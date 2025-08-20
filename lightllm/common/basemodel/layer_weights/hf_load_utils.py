@@ -3,7 +3,6 @@ import os
 import gc
 from safetensors import safe_open
 from tqdm import tqdm
-import torch.distributed as dist
 import lightllm.utils.petrel_helper as utils
 from lightllm.utils.dist_utils import get_current_device_id, get_global_rank
 

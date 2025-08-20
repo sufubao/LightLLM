@@ -64,8 +64,7 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
     worker = int(os.environ.get("LOADWORKER", 1))
     with Pool(worker) as p:
         iterator = p.imap_unordered(partial_func, candidate_files, chunksize=1)
-        if not dist.is_initialized() or get_global_rank() == 0:
-            iterator = tqdm(iterator, total=len(candidate_files), desc=f"Loading model weights with {worker} workers")
+        iterator = tqdm(iterator, total=len(candidate_files), desc=f"pid {os.getpid()} Loading model weights with {worker} workers")
 
         for _ in iterator:
             pass

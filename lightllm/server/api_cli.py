@@ -43,6 +43,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="p d mode, decode node used for kv move manager rpyc server port",
     )
     parser.add_argument(
+        "--select_p_d_node_strategy",
+        type=str,
+        default="round_robin",
+        choices=["random", "round_robin", "adaptive_load"],
+        help="pd master use this strategy to select p d node, can be round_robin, random or adaptive_load",
+    )
+    parser.add_argument(
         "--config_server_host",
         type=str,
         default=None,
@@ -136,6 +143,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""This is just a useful parameter for deepseekv2. When
                         using the deepseekv2 model, set dp to be equal to the tp parameter. In other cases, please
                         do not set it and keep the default value as 1.""",
+    )
+    parser.add_argument(
+        "--dp_balancer",
+        type=str,
+        default="bs_balancer",
+        choices=["round_robin", "bs_balancer"],
+        help="the dp balancer type, default is bs_balancer",
     )
     parser.add_argument(
         "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
@@ -416,7 +430,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--sampling_backend",
         type=str,
         choices=["triton", "sglang_kernel"],
-        default="sglang_kernel",
+        default="triton",
         help="""sampling used impl. 'triton' is use torch and triton kernel,
         sglang_kernel use sglang_kernel impl""",
     )
@@ -450,6 +464,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--auto_update_redundancy_expert",
         action="store_true",
         help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
+    )
+    parser.add_argument(
+        "--enable_fused_shared_experts",
+        action="store_true",
+        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
     )
     parser.add_argument(
         "--mtp_mode",

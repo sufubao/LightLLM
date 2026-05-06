@@ -92,30 +92,30 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
     def test_budget_looser_than_processor_is_noop(self):
         # Processor's max_pixels already gives 16384 tokens. Budget is 32768. Keep smaller.
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=16384 * 28 * 28)
-        clamp_processor_max_pixels(p, visual_image_max_tokens=32768)
+        clamp_processor_max_pixels(p, max_image_tokens=32768)
         self.assertEqual(p.max_pixels, 16384 * 28 * 28)
 
     def test_budget_tighter_clamps(self):
         # patch=14, merge=2 -> unit=28, unit^2=784. Budget 4096 tokens -> 4096*784 pixels.
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=16384 * 28 * 28)
-        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        clamp_processor_max_pixels(p, max_image_tokens=4096)
         self.assertEqual(p.max_pixels, 4096 * 28 * 28)
 
     def test_budget_equal_to_original_is_noop(self):
         # Original gives exactly 16384 tokens. Budget 16384 -> same value.
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=16384 * 28 * 28)
-        clamp_processor_max_pixels(p, visual_image_max_tokens=16384)
+        clamp_processor_max_pixels(p, max_image_tokens=16384)
         self.assertEqual(p.max_pixels, 16384 * 28 * 28)
 
     def test_budget_zero_raises(self):
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=16384 * 28 * 28)
         with self.assertRaises(ValueError):
-            clamp_processor_max_pixels(p, visual_image_max_tokens=0)
+            clamp_processor_max_pixels(p, max_image_tokens=0)
 
     def test_different_patch_merge(self):
         # patch=16, merge=1 -> unit=16, unit^2=256. Budget 1000 tokens -> 256000 pixels.
         p = _FakeProcessor(patch_size=16, merge_size=1, max_pixels=10_000_000)
-        clamp_processor_max_pixels(p, visual_image_max_tokens=1000)
+        clamp_processor_max_pixels(p, max_image_tokens=1000)
         self.assertEqual(p.max_pixels, 1000 * 16 * 16)
 
     def test_processor_max_pixels_none_is_clamped(self):
@@ -123,7 +123,7 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
         # bound); the clamp must treat that as "looser than any budget" and
         # always apply our allowed_max_pixels instead of crashing on int<None.
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=None)
-        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        clamp_processor_max_pixels(p, max_image_tokens=4096)
         self.assertEqual(p.max_pixels, 4096 * 28 * 28)
 
     def test_size_longest_edge_is_clamped(self):
@@ -134,7 +134,7 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
         # matches what the ViT will actually produce after smart_resize.
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=None)
         p.size = {"shortest_edge": 4 * 28 * 28, "longest_edge": 16384 * 28 * 28}
-        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        clamp_processor_max_pixels(p, max_image_tokens=4096)
         self.assertEqual(p.max_pixels, 4096 * 28 * 28)
         self.assertEqual(p.size["longest_edge"], 4096 * 28 * 28)
         # shortest_edge is unrelated to the cap; must not be touched.
@@ -145,7 +145,7 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
         # it alone — same semantics as the existing max_pixels branch.
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=None)
         p.size = {"longest_edge": 1024 * 28 * 28}
-        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        clamp_processor_max_pixels(p, max_image_tokens=4096)
         self.assertEqual(p.size["longest_edge"], 1024 * 28 * 28)
 
     def test_size_without_longest_edge_is_ignored(self):
@@ -153,7 +153,7 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
         # clamp must not invent a longest_edge key in that case.
         p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=16384 * 28 * 28)
         p.size = {"height": 224, "width": 224}
-        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        clamp_processor_max_pixels(p, max_image_tokens=4096)
         self.assertEqual(p.max_pixels, 4096 * 28 * 28)
         self.assertNotIn("longest_edge", p.size)
 

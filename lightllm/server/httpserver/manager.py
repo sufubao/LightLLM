@@ -185,7 +185,7 @@ class HttpServerManager:
                 data = img.read()
                 # must after init_imageitem_extral_params
                 token_num = self.tokenizer.get_image_token_length(img)
-                enforce_image_token_budget(token_num, self.args.visual_image_max_tokens, image_index=img_index)
+                enforce_image_token_budget(token_num, self.args.visual_batch_max_tokens, image_index=img_index)
                 md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
                 md5sums.append(md5sum)
                 img.md5 = md5sum
@@ -242,7 +242,7 @@ class HttpServerManager:
             img_count += 1
             self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
             token_num = self.tokenizer.get_image_token_length(img)
-            enforce_image_token_budget(token_num, self.args.visual_image_max_tokens, image_index=img_index)
+            enforce_image_token_budget(token_num, self.args.visual_batch_max_tokens, image_index=img_index)
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1

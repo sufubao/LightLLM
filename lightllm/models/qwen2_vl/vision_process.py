@@ -27,15 +27,15 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_name: str = "") -> None:
+def clamp_processor_max_pixels(processor, max_image_tokens, processor_name: str = "") -> None:
     """Clamp a Qwen-VL style image processor's max-pixel limit so that even a
-    max-sized image produces ``token_num <= visual_image_max_tokens``.
+    max-sized image produces ``token_num <= max_image_tokens``.
 
     Reuses the processor's built-in ``smart_resize`` mechanism — just tightens
     the per-pixel budget so the existing resize path fits the server-wide
-    per-image token budget. After the clamp, ``get_image_token_length`` cannot
-    return a value above the budget, so request-level rejection becomes a
-    defensive no-op in practice.
+    per-image token budget (``--visual_batch_max_tokens``). After the clamp,
+    ``get_image_token_length`` cannot return a value above the budget, so
+    request-level rejection becomes a defensive no-op in practice.
 
     Different Qwen-VL generations expose the limit on different attributes:
     Qwen2-VL / Qwen2.5-VL / lightllm's own ``Qwen2VLImageProcessor`` use
@@ -44,16 +44,16 @@ def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_nam
     present so any reader (HF runtime, tokenizer ``__init__``) sees the
     tightened bound.
 
-    No-op when ``visual_image_max_tokens`` is None or the processor already
-    enforces a tighter bound.
+    No-op when ``max_image_tokens`` is None or the processor already enforces a
+    tighter bound.
     """
-    if visual_image_max_tokens is None:
+    if max_image_tokens is None:
         return
     unit = processor.patch_size * processor.merge_size
-    allowed_max_pixels = visual_image_max_tokens * unit * unit
+    allowed_max_pixels = max_image_tokens * unit * unit
     if allowed_max_pixels < unit * unit:
         raise ValueError(
-            f"visual_image_max_tokens={visual_image_max_tokens} is too small; "
+            f"max_image_tokens={max_image_tokens} is too small; "
             f"need at least 1 patch's worth (={unit * unit} pixels) for {processor_name or 'processor'}."
         )
 
@@ -78,7 +78,7 @@ def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_nam
             f"{processor_name or 'processor'}: clamping max_pixels/longest_edge to "
             f"{allowed_max_pixels} (was max_pixels={current_max_pixels}, "
             f"longest_edge={current_longest_edge}; "
-            f"visual_image_max_tokens={visual_image_max_tokens}, unit={unit})"
+            f"max_image_tokens={max_image_tokens}, unit={unit})"
         )
 
 

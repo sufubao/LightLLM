@@ -273,11 +273,12 @@ def normal_or_p_d_start(args):
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
 
     # 多模态预算默认值（safety-on-by-default for multimodal deployments）：
-    # - 不传：visual_batch_max_tokens 默认等于 batch_max_tokens（LLM 和 ViT 共用预算口径）；
-    #         visual_image_max_tokens 默认等于 visual_batch_max_tokens（单图必须能塞进一个批次，
-    #         "首图必放行"规则的隐含前提）。
-    # - 传 0：显式关闭对应预算，恢复 PR 之前的"不限"行为（向后兼容用）。
+    # - 不传：visual_batch_max_tokens 默认等于 batch_max_tokens（LLM 和 ViT 共用预算口径）。
+    # - 传 0：显式关闭，恢复 PR 之前的"不限"行为（向后兼容用）。
     # - 传正整数：作为显式预算使用。
+    # 同一个值同时充当 per-step batch budget、per-image hard cap 和 processor max_pixels
+    # clamp 的依据 —— "首图必放行" 规则要求单图必须能塞进一个批次，所以 batch budget 和
+    # 单图上限本来就是同一个数。
     if args.enable_multimodal:
         if args.visual_batch_max_tokens is None:
             args.visual_batch_max_tokens = args.batch_max_tokens
@@ -286,25 +287,8 @@ def normal_or_p_d_start(args):
                 f"(pass --visual_batch_max_tokens 0 to opt out)"
             )
         elif args.visual_batch_max_tokens == 0:
-            logger.info("visual_batch_max_tokens explicitly disabled (=0); per-step ViT token budget off")
+            logger.info("visual_batch_max_tokens explicitly disabled (=0); ViT token budget off")
             args.visual_batch_max_tokens = None
-
-        if args.visual_image_max_tokens is None:
-            args.visual_image_max_tokens = args.visual_batch_max_tokens
-        elif args.visual_image_max_tokens == 0:
-            logger.info("visual_image_max_tokens explicitly disabled (=0); per-image hard cap off")
-            args.visual_image_max_tokens = None
-
-        if (
-            args.visual_image_max_tokens is not None
-            and args.visual_batch_max_tokens is not None
-            and args.visual_image_max_tokens > args.visual_batch_max_tokens
-        ):
-            raise ValueError(
-                f"visual_image_max_tokens ({args.visual_image_max_tokens}) must be "
-                f"<= visual_batch_max_tokens ({args.visual_batch_max_tokens}); otherwise "
-                f"a single 'valid' image can always exceed the batch budget alone."
-            )
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -597,17 +581,6 @@ def visual_only_start(args):
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
     if args.visual_infer_batch_size is None:
         args.visual_infer_batch_size = args.visual_dp
-    if args.visual_image_max_tokens is None and args.visual_batch_max_tokens is not None:
-        args.visual_image_max_tokens = args.visual_batch_max_tokens
-    if (
-        args.visual_image_max_tokens is not None
-        and args.visual_batch_max_tokens is not None
-        and args.visual_image_max_tokens > args.visual_batch_max_tokens
-    ):
-        raise ValueError(
-            f"visual_image_max_tokens ({args.visual_image_max_tokens}) must be "
-            f"<= visual_batch_max_tokens ({args.visual_batch_max_tokens})"
-        )
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 

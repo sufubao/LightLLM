@@ -223,7 +223,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
             processor_config_dict = json.load(f)
         self.processor = Qwen2VLImageProcessor(**processor_config_dict)
         clamp_processor_max_pixels(
-            self.processor, get_env_start_args().visual_image_max_tokens, processor_name="tarsier2-vit"
+            self.processor, get_env_start_args().visual_batch_max_tokens, processor_name="tarsier2-vit"
         )
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]

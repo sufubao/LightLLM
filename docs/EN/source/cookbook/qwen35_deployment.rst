@@ -235,12 +235,9 @@ Hardware Requirements
 - Use ``--data_type fp8_e4m3`` for FP8 KV quantization to further reduce memory pressure
 - Multimodal deployments get ViT OOM protection by default: when
   ``--enable_multimodal`` is on, ``--visual_batch_max_tokens`` is auto-derived
-  from ``--batch_max_tokens`` and ``--visual_image_max_tokens`` is auto-
-  derived from that, bounding peak ViT memory the same way
-  ``--batch_max_tokens`` bounds the LLM prefill. To tighten the per-step
-  budget further, pass an explicit value (e.g.
-  ``--visual_batch_max_tokens 16384``); to override the per-image cap
-  separately, set ``--visual_image_max_tokens`` (must be
-  ``<= --visual_batch_max_tokens``).
-- To opt out of the budget (restore pre-PR behavior), pass
-  ``--visual_batch_max_tokens 0`` and/or ``--visual_image_max_tokens 0``.
+  from ``--batch_max_tokens``. The same value caps both per-step batch
+  output and per-image output (oversized images are auto-resized by the
+  Qwen-VL ``max_pixels`` clamp; anything still over budget is rejected
+  before reaching the ViT). To tighten the budget further, pass an explicit
+  value (e.g. ``--visual_batch_max_tokens 16384``); to opt out and restore
+  pre-PR behavior, pass ``--visual_batch_max_tokens 0``.

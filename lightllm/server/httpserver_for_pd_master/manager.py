@@ -163,6 +163,10 @@ class HttpServerManagerForPDMaster:
 
                 await self.remove_req(group_request_id=block_group_request_id)
 
+        except ClientDisconnected as e:
+            logger.warning(f"group_request_id: {origin_group_request_id} {e.reason}")
+            logger.debug(f"group_request_id: {origin_group_request_id} {e.reason}", exc_info=True)
+            raise
         except BaseException as e:
             logger.error(f"has exception {str(e)}")
             try:
@@ -221,6 +225,7 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
+                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
                 raise ClientDisconnected(group_request_id)
 
             if await req_status.can_read(self.req_id_to_out_inf):
@@ -259,6 +264,7 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
+                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
                 raise ClientDisconnected(group_request_id)
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
@@ -296,6 +302,7 @@ class HttpServerManagerForPDMaster:
             raise ServerBusyError()
 
         if await request.is_disconnected():
+            await self.abort(group_request_id, p_node=p_node, d_node=d_node)
             raise ClientDisconnected(group_request_id)
 
         prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
@@ -324,6 +331,7 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
+                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
                 raise ClientDisconnected(group_request_id)
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
@@ -373,6 +381,7 @@ class HttpServerManagerForPDMaster:
             p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
+                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
                 raise ClientDisconnected(group_request_id)
 
             prompt_tokens = metadata["prompt_tokens"]

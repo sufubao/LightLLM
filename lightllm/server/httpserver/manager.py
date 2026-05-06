@@ -446,11 +446,8 @@ class HttpServerManager:
                 yield sub_req_id, request_output, metadata, finish_status
 
         except ClientDisconnected as e:
-            # Expected control-flow signal: client disconnected or another module aborted.
-            # ``self.abort(...)`` was already called by the disconnect path (and the recycle
-            # loop releases multimodal resources for in-flight requests), so just log a
-            # one-liner and re-raise — no stack trace, no double-abort.
             logger.warning(f"group_request_id: {group_request_id} {e.reason}")
+            logger.debug(f"group_request_id: {group_request_id} {e.reason}", exc_info=True)
             raise
         except Exception as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")

@@ -1,5 +1,6 @@
 import time
 import logging
+from typing import Dict
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_system_status_logger
 
@@ -31,13 +32,23 @@ class SystemStatusReporter:
         self.global_mtp_output_total = 0
         self.global_mtp_accepted_total = 0
 
+        # Per-req shm_cur_output_len snapshot at the previous window boundary,
+        # used to compute the windowed output-token count without per-tick scans.
+        self._req_last_output_len: Dict[int, int] = {}
+
     def count_prompt_tokens(self, num_tokens: int):
         if self.enabled:
             self.prompt_tokens += num_tokens
 
-    def count_output_tokens(self, num_tokens: int):
-        if self.enabled:
-            self.output_tokens += num_tokens
+    def discard_req(self, req):
+        """Settle a finished/aborted req's tail output tokens (those produced after the last
+        window-boundary sweep) and drop its tracking entry."""
+        if not self.enabled:
+            return
+        cur_out_len = req.shm_cur_output_len
+        prev_out_len = self._req_last_output_len.pop(req.request_id, 0)
+        if cur_out_len > prev_out_len:
+            self.output_tokens += cur_out_len - prev_out_len
 
     def on_request_completed(self, input_len: int, output_len: int, cache_len: int, mtp_accepted: int):
         if self.enabled:
@@ -63,6 +74,17 @@ class SystemStatusReporter:
         elapsed = now - self.last_print_time
         if elapsed < self.interval:
             return
+
+        # Single bulk sweep at the window boundary: account for output tokens produced
+        # by every still-running req since the previous boundary, and refresh their
+        # snapshots. Reqs that finished in this window already settled via discard_req.
+        if running_batch is not None:
+            for req in running_batch.reqs:
+                cur_out_len = req.shm_cur_output_len
+                prev_out_len = self._req_last_output_len.get(req.request_id, 0)
+                if cur_out_len > prev_out_len:
+                    self.output_tokens += cur_out_len - prev_out_len
+                    self._req_last_output_len[req.request_id] = cur_out_len
 
         total_tps = (self.prompt_tokens + self.output_tokens) / elapsed
         input_tps = self.prompt_tokens / elapsed

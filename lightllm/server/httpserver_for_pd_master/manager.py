@@ -179,6 +179,32 @@ class HttpServerManagerForPDMaster:
             await self.remove_req(block_group_request_id)
         return
 
+    async def _wait_event_with_disconnect_check(
+        self,
+        event: asyncio.Event,
+        request: Request,
+        group_request_id: int,
+        p_node: PD_Client_Obj,
+        d_node: PD_Client_Obj,
+        timeout: float = 60.0,
+        poll_interval: float = 1.0,
+    ):
+        # Wait for `event`, but periodically check whether the client has
+        # disconnected so we can abort PD nodes promptly instead of holding
+        # their resources for the full timeout window.
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=min(poll_interval, remaining))
+                return
+            except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    await self.abort(group_request_id, p_node=p_node, d_node=d_node)
+                    raise ClientDisconnected(group_request_id)
+
     async def _log_req_header(self, request: Request, group_request_id: int):
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
@@ -247,7 +273,9 @@ class HttpServerManagerForPDMaster:
             return
 
         try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+            await self._wait_event_with_disconnect_check(
+                up_status_event, request, group_request_id, p_node, d_node, timeout=60
+            )
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
@@ -296,7 +324,9 @@ class HttpServerManagerForPDMaster:
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
-            await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
+            await self._wait_event_with_disconnect_check(
+                nixl_np_up_prompt_ids_event, request, group_request_id, p_node, d_node, timeout=60
+            )
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
             raise ServerBusyError()
@@ -314,7 +344,9 @@ class HttpServerManagerForPDMaster:
         )
 
         try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+            await self._wait_event_with_disconnect_check(
+                up_status_event, request, group_request_id, p_node, d_node, timeout=60
+            )
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()

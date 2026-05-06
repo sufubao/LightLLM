@@ -281,6 +281,8 @@ async def get_score(request: Request) -> Response:
 
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
+    except ClientDisconnected:
+        return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 

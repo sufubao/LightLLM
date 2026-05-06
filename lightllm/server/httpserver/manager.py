@@ -664,7 +664,12 @@ class HttpServerManager:
                 pass
 
             if req_status.aborted:
-                raise ClientDisconnected(group_request_id, "aborted by other module")
+                # NOTE: this flag can be set by internal module failures (e.g. the
+                # visual proxy marks shm_req.is_aborted = True on exceptions, which
+                # the recycle loop converts to req_status.aborted), not just client
+                # disconnects. Raise a generic Exception so it surfaces as a server
+                # error instead of being suppressed as a 499.
+                raise Exception(f"req_id {group_request_id} aborted notifyed by other module")
 
             if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)

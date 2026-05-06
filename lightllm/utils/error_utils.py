@@ -24,9 +24,11 @@ class ServerBusyError(Exception):
 
 
 class ClientDisconnected(Exception):
-    """Raised when the client closed the HTTP connection mid-request, or when
-    the request was aborted by another module. This is an expected control-flow
-    signal — handlers should clean up quietly without logging a stack trace."""
+    """Raised when the client closed the HTTP connection mid-request, as
+    detected by ``request.is_disconnected()``. This is an expected control-flow
+    signal — handlers should clean up quietly without logging a stack trace.
+    Internal-module aborts (e.g. visual proxy failures) must NOT raise this —
+    they should surface as real server errors."""
 
     def __init__(self, group_request_id: int, reason: str = "client disconnected"):
         super().__init__(f"req_id {group_request_id} {reason}")

@@ -67,6 +67,9 @@ class RouterManager:
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
         self.status_reporter = None
+        # Track shm_cur_output_len per running request to compute per-tick deltas
+        # for accurate output TPS regardless of router schedule interval.
+        self._req_last_output_len: Dict[int, int] = {}
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
@@ -246,8 +249,18 @@ class RouterManager:
             await self._step()
             counter_count += 1
             if self.running_batch is not None:
-                # Count output tokens (each running req produces ~1 token per decode step)
-                self.status_reporter.count_output_tokens(len(self.running_batch.reqs))
+                # Count output tokens via per-request shm_cur_output_len deltas, since the
+                # router loop runs on schedule_time_interval and len(reqs) is not a per-step
+                # token count.
+                new_output_tokens = 0
+                for req in self.running_batch.reqs:
+                    cur_out_len = req.shm_cur_output_len
+                    prev_out_len = self._req_last_output_len.get(req.request_id, 0)
+                    if cur_out_len > prev_out_len:
+                        new_output_tokens += cur_out_len - prev_out_len
+                        self._req_last_output_len[req.request_id] = cur_out_len
+                if new_output_tokens:
+                    self.status_reporter.count_output_tokens(new_output_tokens)
                 if counter_count % 100 == 0:
                     self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
@@ -342,14 +355,25 @@ class RouterManager:
         if self.running_batch is not None:
             # Capture finished req stats before filtering
             for req in self.running_batch.reqs:
-                if req.shm_infer_released:
-                    self.status_reporter.on_request_completed(
-                        input_len=req.input_len,
-                        output_len=req.shm_cur_output_len,
-                        cache_len=req.prompt_cache_len,
-                        mtp_accepted=req.mtp_accepted_token_num,
-                    )
-                    self.router_statics.update(req.candetoken_out_len)
+                if not req.shm_infer_released:
+                    continue
+                # Settle any output-token delta produced after the last router tick
+                # so windowed TPS does not lose the request's tail tokens.
+                cur_out_len = req.shm_cur_output_len
+                prev_out_len = self._req_last_output_len.pop(req.request_id, 0)
+                if cur_out_len > prev_out_len:
+                    self.status_reporter.count_output_tokens(cur_out_len - prev_out_len)
+                # Aborted/disconnected requests can leave a partial output_len that
+                # would bias the EMA toward shorter generations; skip them.
+                if req.is_aborted:
+                    continue
+                self.status_reporter.on_request_completed(
+                    input_len=req.input_len,
+                    output_len=cur_out_len,
+                    cache_len=req.prompt_cache_len,
+                    mtp_accepted=req.mtp_accepted_token_num,
+                )
+                self.router_statics.update(req.candetoken_out_len)
             self.running_batch.filter_out_finished_req(self.shm_req_manager)
             if self.running_batch.is_clear():
                 self.running_batch = None

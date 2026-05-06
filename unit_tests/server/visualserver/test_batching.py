@@ -108,6 +108,32 @@ class TestPullBatchWithBudget(unittest.TestCase):
         self.assertEqual(permits_before - permits_after, len(got))
         self.assertEqual(len(got), 2)
 
+    def test_rejected_item_returns_to_front_preserves_fifo(self):
+        # TP-correctness regression: after rank 0's budget admission, the
+        # residual queue must equal the original FIFO order with the admitted
+        # prefix removed. Other TP ranks pop ``len(returned)`` from their own
+        # identical queues, so any reorder on rank 0 makes ranks encode
+        # different images on the next step.
+        q, sem = _setup([100, 500, 100])
+        got = pull_batch_with_budget(q, sem, max_num=10, max_tokens=200)
+        # 100 admitted, 500 over-budget -> rejected, loop breaks.
+        self.assertEqual([g.token_num for g in got], [100])
+        remaining_in_order = [q.get_nowait().token_num for _ in range(q.qsize())]
+        self.assertEqual(remaining_in_order, [500, 100])
+
+    def test_rejected_on_sem_exhaustion_returns_to_front(self):
+        # Semaphore-skip path mirrors the budget-skip path: the popped item
+        # must end up at the front of the queue, not the tail.
+        q = queue.Queue()
+        for tn in [100, 200, 300]:
+            q.put(_FakeImg(tn))
+        # Two permits => first acquire (200) succeeds, second (300) fails.
+        sem = threading.Semaphore(2)
+        got = pull_batch_with_budget(q, sem, max_num=10, max_tokens=10_000)
+        self.assertEqual([g.token_num for g in got], [100, 200])
+        remaining_in_order = [q.get_nowait().token_num for _ in range(q.qsize())]
+        self.assertEqual(remaining_in_order, [300])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,37 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
         clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
         self.assertEqual(p.max_pixels, 4096 * 28 * 28)
 
+    def test_size_longest_edge_is_clamped(self):
+        # HF Qwen3-VL / Qwen3.5-VL processors store the per-image limit in
+        # processor.size["longest_edge"]; QWen3VLTokenizer.__init__ reads
+        # that key into self.max_pixel for budget accounting. The clamp
+        # must update both attributes so the tokenizer's get_image_token_length
+        # matches what the ViT will actually produce after smart_resize.
+        p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=None)
+        p.size = {"shortest_edge": 4 * 28 * 28, "longest_edge": 16384 * 28 * 28}
+        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        self.assertEqual(p.max_pixels, 4096 * 28 * 28)
+        self.assertEqual(p.size["longest_edge"], 4096 * 28 * 28)
+        # shortest_edge is unrelated to the cap; must not be touched.
+        self.assertEqual(p.size["shortest_edge"], 4 * 28 * 28)
+
+    def test_size_longest_edge_already_tighter_is_noop(self):
+        # If the processor's longest_edge is already below our budget, leave
+        # it alone — same semantics as the existing max_pixels branch.
+        p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=None)
+        p.size = {"longest_edge": 1024 * 28 * 28}
+        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        self.assertEqual(p.size["longest_edge"], 1024 * 28 * 28)
+
+    def test_size_without_longest_edge_is_ignored(self):
+        # Some processors expose `size` as a dict keyed by height/width. The
+        # clamp must not invent a longest_edge key in that case.
+        p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=16384 * 28 * 28)
+        p.size = {"height": 224, "width": 224}
+        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        self.assertEqual(p.max_pixels, 4096 * 28 * 28)
+        self.assertNotIn("longest_edge", p.size)
+
 
 if __name__ == "__main__":
     unittest.main()

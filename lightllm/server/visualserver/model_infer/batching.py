@@ -3,6 +3,24 @@ import threading
 from typing import List, Optional
 
 
+def _put_front(infer_queue: "queue.Queue", item) -> None:
+    """Push ``item`` back to the front of ``infer_queue``.
+
+    ``queue.Queue.put`` appends to the tail, which would reorder pending items
+    relative to other consumers. The ViT scheduler runs rank-0-only admission
+    on a queue that every TP rank holds an identical copy of, and rank N
+    later pops ``len(images)`` items in FIFO order to follow rank 0's
+    decision. If a rejected item moved to the tail of rank 0's queue, the
+    queues across ranks would diverge and the next batch would encode
+    different images on different ranks. Re-inserting at the head preserves
+    FIFO order on rank 0 and keeps all ranks in sync.
+    """
+    with infer_queue.mutex:
+        infer_queue.queue.appendleft(item)
+        infer_queue.unfinished_tasks += 1
+        infer_queue.not_empty.notify()
+
+
 def pull_batch_with_budget(
     infer_queue: "queue.Queue",
     semaphore: threading.Semaphore,
@@ -16,7 +34,9 @@ def pull_batch_with_budget(
     Rank-0-only admission logic for the ViT scheduler. The first item is always
     admitted even when it alone exceeds ``max_tokens`` — this avoids a deadlock
     when a single request is larger than the per-step budget. Each subsequent
-    item is pulled, inspected, and either kept or returned to the queue.
+    item is pulled, inspected, and either kept or pushed back to the front of
+    the queue so non-rank-0 workers' FIFO pops stay aligned with rank 0's
+    admitted set.
 
     ``semaphore`` counts share with the caller (see ``_init_taskes``); callers
     acquire before every get and release on over-pull so the permit count stays
@@ -49,12 +69,12 @@ def pull_batch_with_budget(
         except queue.Empty:
             break
         if not semaphore.acquire(blocking=False):
-            infer_queue.put(task)
+            _put_front(infer_queue, task)
             break
 
         next_tokens = task.token_num or 0
         if max_tokens is not None and total_tokens + next_tokens > max_tokens:
-            infer_queue.put(task)
+            _put_front(infer_queue, task)
             semaphore.release()
             break
 

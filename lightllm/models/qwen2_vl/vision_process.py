@@ -28,14 +28,21 @@ logger = init_logger(__name__)
 
 
 def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_name: str = "") -> None:
-    """Clamp a Qwen-VL style image processor's ``max_pixels`` so that even a
+    """Clamp a Qwen-VL style image processor's max-pixel limit so that even a
     max-sized image produces ``token_num <= visual_image_max_tokens``.
 
-    Reuses the processor's built-in ``smart_resize`` + ``max_pixels`` mechanism —
-    just tightens ``max_pixels`` so the existing resize path fits the server-wide
+    Reuses the processor's built-in ``smart_resize`` mechanism — just tightens
+    the per-pixel budget so the existing resize path fits the server-wide
     per-image token budget. After the clamp, ``get_image_token_length`` cannot
     return a value above the budget, so request-level rejection becomes a
     defensive no-op in practice.
+
+    Different Qwen-VL generations expose the limit on different attributes:
+    Qwen2-VL / Qwen2.5-VL / lightllm's own ``Qwen2VLImageProcessor`` use
+    ``processor.max_pixels``, while HF's Qwen3-VL / Qwen3.5-VL processors store
+    it in ``processor.size["longest_edge"]``. Both attributes are clamped when
+    present so any reader (HF runtime, tokenizer ``__init__``) sees the
+    tightened bound.
 
     No-op when ``visual_image_max_tokens`` is None or the processor already
     enforces a tighter bound.
@@ -49,14 +56,30 @@ def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_nam
             f"visual_image_max_tokens={visual_image_max_tokens} is too small; "
             f"need at least 1 patch's worth (={unit * unit} pixels) for {processor_name or 'processor'}."
         )
+
+    # Track originals so the log line shows the pre-clamp values; some
+    # processors only expose one of the two schemas, so each branch is gated
+    # on its own attribute presence.
     current_max_pixels = getattr(processor, "max_pixels", None)
+    size = getattr(processor, "size", None)
+    has_longest_edge = isinstance(size, dict) and "longest_edge" in size
+    current_longest_edge = size.get("longest_edge") if has_longest_edge else None
+
+    clamped = False
     if current_max_pixels is None or allowed_max_pixels < current_max_pixels:
-        logger.info(
-            f"{processor_name or 'processor'}: clamping max_pixels "
-            f"{current_max_pixels} -> {allowed_max_pixels} "
-            f"(visual_image_max_tokens={visual_image_max_tokens}, unit={unit})"
-        )
         processor.max_pixels = allowed_max_pixels
+        clamped = True
+    if has_longest_edge and (current_longest_edge is None or allowed_max_pixels < current_longest_edge):
+        size["longest_edge"] = allowed_max_pixels
+        clamped = True
+
+    if clamped:
+        logger.info(
+            f"{processor_name or 'processor'}: clamping max_pixels/longest_edge to "
+            f"{allowed_max_pixels} (was max_pixels={current_max_pixels}, "
+            f"longest_edge={current_longest_edge}; "
+            f"visual_image_max_tokens={visual_image_max_tokens}, unit={unit})"
+        )
 
 
 IMAGE_FACTOR = 28

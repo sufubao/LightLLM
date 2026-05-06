@@ -349,6 +349,7 @@ class RouterManager:
                         cache_len=req.prompt_cache_len,
                         mtp_accepted=req.mtp_accepted_token_num,
                     )
+                    self.router_statics.update(req.candetoken_out_len)
             self.running_batch.filter_out_finished_req(self.shm_req_manager)
             if self.running_batch.is_clear():
                 self.running_batch = None

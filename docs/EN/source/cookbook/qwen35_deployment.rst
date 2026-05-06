@@ -233,12 +233,14 @@ Hardware Requirements
 - ``--tp 8`` required to fit model weights across GPUs
 - Reduce ``--max_req_total_len`` or ``--graph_max_batch_size`` if encountering OOM errors
 - Use ``--data_type fp8_e4m3`` for FP8 KV quantization to further reduce memory pressure
-- For multimodal OOMs driven by dynamic-resolution images or video, cap the
-  per-step ViT workload with ``--visual_batch_max_tokens`` (e.g. ``16384``).
-  This bounds peak ViT memory the same way ``--batch_max_tokens`` bounds the
-  LLM prefill. Setting this alone also derives a default single-image cap
-  (``--visual_image_max_tokens`` is implicitly set to the same value), which
-  rejects any single image that couldn't fit in one batch — closing the "first
-  image always admitted" deadlock-avoidance hole. Override
-  ``--visual_image_max_tokens`` separately only if you need a stricter single-
-  image limit.
+- Multimodal deployments get ViT OOM protection by default: when
+  ``--enable_multimodal`` is on, ``--visual_batch_max_tokens`` is auto-derived
+  from ``--batch_max_tokens`` and ``--visual_image_max_tokens`` is auto-
+  derived from that, bounding peak ViT memory the same way
+  ``--batch_max_tokens`` bounds the LLM prefill. To tighten the per-step
+  budget further, pass an explicit value (e.g.
+  ``--visual_batch_max_tokens 16384``); to override the per-image cap
+  separately, set ``--visual_image_max_tokens`` (must be
+  ``<= --visual_batch_max_tokens``).
+- To opt out of the budget (restore pre-PR behavior), pass
+  ``--visual_batch_max_tokens 0`` and/or ``--visual_image_max_tokens 0``.

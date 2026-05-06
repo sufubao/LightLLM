@@ -134,6 +134,29 @@ class TestPullBatchWithBudget(unittest.TestCase):
         remaining_in_order = [q.get_nowait().token_num for _ in range(q.qsize())]
         self.assertEqual(remaining_in_order, [300])
 
+    def test_unfinished_tasks_stays_consistent_through_reject(self):
+        # Queue.put bumps unfinished_tasks; Queue.get does NOT decrement it
+        # (only task_done() does). The reject path re-inserts at the front
+        # and must not bump the counter again — otherwise Queue.join() would
+        # hang forever even after every consumed item is task_done()'d.
+        q, sem = _setup([100, 500, 100])
+        # 3 items put in => unfinished_tasks == 3
+        self.assertEqual(q.unfinished_tasks, 3)
+        got = pull_batch_with_budget(q, sem, max_num=10, max_tokens=200)
+        self.assertEqual([g.token_num for g in got], [100])
+        # One item consumed (returned to caller, awaiting task_done), two
+        # still pending in the queue. Counter should still match the number
+        # of logical outstanding tasks: 3.
+        self.assertEqual(q.unfinished_tasks, 3)
+        # task_done for the returned item, then drain the rest with task_done.
+        q.task_done()
+        self.assertEqual(q.qsize(), 2)
+        for _ in range(q.qsize()):
+            q.get_nowait()
+            q.task_done()
+        # join() must return promptly; if the counter were corrupted it would hang.
+        q.join()
+
 
 if __name__ == "__main__":
     unittest.main()

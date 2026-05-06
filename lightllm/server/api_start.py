@@ -272,18 +272,34 @@ def normal_or_p_d_start(args):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
 
-    # 多模态预算默认值：
-    # - visual_batch_max_tokens 默认等于 batch_max_tokens（LLM 和 ViT 共用预算口径）
-    # - visual_image_max_tokens 默认等于 visual_batch_max_tokens（单图必须能塞进一个批次，
-    #   "首图必放行"规则的隐含前提）
-    # 用户显式指定其中任意一个会覆盖默认值。
+    # 多模态预算默认值（safety-on-by-default for multimodal deployments）：
+    # - 不传：visual_batch_max_tokens 默认等于 batch_max_tokens（LLM 和 ViT 共用预算口径）；
+    #         visual_image_max_tokens 默认等于 visual_batch_max_tokens（单图必须能塞进一个批次，
+    #         "首图必放行"规则的隐含前提）。
+    # - 传 0：显式关闭对应预算，恢复 PR 之前的"不限"行为（向后兼容用）。
+    # - 传正整数：作为显式预算使用。
     if args.enable_multimodal:
         if args.visual_batch_max_tokens is None:
             args.visual_batch_max_tokens = args.batch_max_tokens
-            logger.info(f"visual_batch_max_tokens auto-derived from batch_max_tokens = {args.batch_max_tokens}")
+            logger.info(
+                f"visual_batch_max_tokens auto-derived from batch_max_tokens = {args.batch_max_tokens} "
+                f"(pass --visual_batch_max_tokens 0 to opt out)"
+            )
+        elif args.visual_batch_max_tokens == 0:
+            logger.info("visual_batch_max_tokens explicitly disabled (=0); per-step ViT token budget off")
+            args.visual_batch_max_tokens = None
+
         if args.visual_image_max_tokens is None:
             args.visual_image_max_tokens = args.visual_batch_max_tokens
-        if args.visual_image_max_tokens > args.visual_batch_max_tokens:
+        elif args.visual_image_max_tokens == 0:
+            logger.info("visual_image_max_tokens explicitly disabled (=0); per-image hard cap off")
+            args.visual_image_max_tokens = None
+
+        if (
+            args.visual_image_max_tokens is not None
+            and args.visual_batch_max_tokens is not None
+            and args.visual_image_max_tokens > args.visual_batch_max_tokens
+        ):
             raise ValueError(
                 f"visual_image_max_tokens ({args.visual_image_max_tokens}) must be "
                 f"<= visual_batch_max_tokens ({args.visual_batch_max_tokens}); otherwise "

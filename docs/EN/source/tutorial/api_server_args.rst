@@ -281,8 +281,13 @@ Multimodal Parameters
     peak ViT memory on dynamic-resolution models (Qwen2.5/3/3.5-VL, etc.)
     where one 4K image or long video can contain more patches than many
     small images combined. One image is always admitted per step to avoid
-    deadlock when a single request is larger than the budget. Default is
-    ``None`` (disabled; only ``--visual_infer_batch_size`` applies).
+    deadlock when a single request is larger than the budget.
+
+    **Default behavior with** ``--enable_multimodal``: auto-derived from
+    ``--batch_max_tokens`` so multimodal deployments get OOM protection
+    without explicit opt-in. Pass an explicit positive integer to override.
+    Pass ``0`` to opt out and restore the pre-budget behavior (only
+    ``--visual_infer_batch_size`` applies).
 
 .. option:: --visual_image_max_tokens
 
@@ -291,15 +296,16 @@ Multimodal Parameters
     ``token_num`` exceeds this value is rejected with a ``ValueError`` before
     reaching the ViT. Pairs with ``--visual_batch_max_tokens`` to close the
     "first image always admitted" hole — without this cap, one 4K image can
-    still OOM the ViT on its own.
+    still OOM the ViT on its own. Also drives the processor ``max_pixels``
+    clamp so Qwen-VL-family processors auto-resize oversized images to fit.
 
-    If not specified, defaults to ``--visual_batch_max_tokens`` (single image
-    must fit in one batch; this is the implicit precondition of the first-image-
-    always-admitted rule). Set explicitly to a smaller value only if your ViT
-    cannot handle a batch-sized image alone. Must satisfy
-    ``visual_image_max_tokens <= visual_batch_max_tokens``.
-    Default is ``None`` (disabled when ``--visual_batch_max_tokens`` is also
-    unset).
+    **Default behavior with** ``--enable_multimodal``: auto-derived from
+    ``--visual_batch_max_tokens`` (single image must fit in one batch; this
+    is the implicit precondition of the first-image-always-admitted rule).
+    Set explicitly to a smaller positive integer only if your ViT cannot
+    handle a batch-sized image alone; must satisfy
+    ``visual_image_max_tokens <= visual_batch_max_tokens``. Pass ``0`` to opt
+    out and accept any image size.
 
 .. option:: --visual_gpu_ids
 

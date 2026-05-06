@@ -478,13 +478,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="""
         Per-step ViT admission budget measured in image output tokens (post
-        spatial_merge). When set, the ViT scheduler stops adding images to the
-        current batch once their cumulative token_num would exceed this value.
-        Acts as the multimodal analogue of --batch_max_tokens and caps peak ViT
+        spatial_merge). The ViT scheduler stops adding images to the current
+        batch once their cumulative token_num would exceed this value. Acts as
+        the multimodal analogue of --batch_max_tokens and caps peak ViT
         memory/compute for dynamic-resolution models (Qwen2.5/3/3.5-VL, etc.).
         One image is always admitted per step to avoid deadlock when a single
-        request is larger than the budget. Defaults to None (disabled; only the
-        image-count cap applies).
+        request is larger than the budget.
+
+        Default behavior when --enable_multimodal is on: auto-derived from
+        --batch_max_tokens so multimodal deployments get OOM protection without
+        explicit opt-in. Pass an explicit positive integer to override; pass 0
+        to opt out entirely and restore the pre-budget behavior (only the
+        image-count cap --visual_infer_batch_size applies).
         """,
     )
     parser.add_argument(
@@ -498,7 +503,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         being forwarded to the ViT. Pairs with --visual_batch_max_tokens to
         close the "first image always admitted" hole — without this cap, one
         4K image or long-aspect-ratio image can still OOM the ViT by itself.
-        Defaults to None (disabled; any size is accepted).
+        Also drives the processor max_pixels clamp so Qwen-VL-family processors
+        auto-resize oversized images to fit.
+
+        Default behavior when --enable_multimodal is on: auto-derived from
+        --visual_batch_max_tokens (single image must fit in one batch). Pass an
+        explicit smaller positive integer for a stricter cap; pass 0 to opt
+        out and accept any image size.
         """,
     )
     parser.add_argument(

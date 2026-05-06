@@ -14,10 +14,15 @@ def _put_front(infer_queue: "queue.Queue", item) -> None:
     queues across ranks would diverge and the next batch would encode
     different images on different ranks. Re-inserting at the head preserves
     FIFO order on rank 0 and keeps all ranks in sync.
+
+    Note: ``Queue.get`` does *not* decrement ``unfinished_tasks`` — only
+    ``task_done()`` does. The original ``Queue.put`` already counted this
+    item, so we must NOT bump the counter again on re-insert; doing so would
+    desync ``Queue.join()``/``task_done()`` accounting (a latent footgun if
+    any future caller starts using them on this queue).
     """
     with infer_queue.mutex:
         infer_queue.queue.appendleft(item)
-        infer_queue.unfinished_tasks += 1
         infer_queue.not_empty.notify()
 
 

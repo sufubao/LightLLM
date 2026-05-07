@@ -1,4 +1,5 @@
 from lightllm.utils.log_utils import init_logger
+from typing import Optional
 
 logger = init_logger(__name__)
 
@@ -30,7 +31,7 @@ class ClientDisconnected(Exception):
     Internal-module aborts (e.g. visual proxy failures) must NOT raise this —
     they should surface as real server errors."""
 
-    def __init__(self, group_request_id: "int | None" = None, reason: str = "client disconnected"):
+    def __init__(self, group_request_id: Optional[int] = None, reason: str = "client disconnected"):
         prefix = f"req_id {group_request_id} " if group_request_id is not None else ""
         super().__init__(f"{prefix}{reason}")
         self.group_request_id = group_request_id

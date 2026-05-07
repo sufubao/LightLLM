@@ -390,6 +390,8 @@ async def tokens(request: Request):
             },
             status_code=200,
         )
+    except ClientDisconnected:
+        return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
 

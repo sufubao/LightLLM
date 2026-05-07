@@ -30,8 +30,9 @@ class ClientDisconnected(Exception):
     Internal-module aborts (e.g. visual proxy failures) must NOT raise this —
     they should surface as real server errors."""
 
-    def __init__(self, group_request_id: int, reason: str = "client disconnected"):
-        super().__init__(f"req_id {group_request_id} {reason}")
+    def __init__(self, group_request_id: "int | None" = None, reason: str = "client disconnected"):
+        prefix = f"req_id {group_request_id} " if group_request_id is not None else ""
+        super().__init__(f"{prefix}{reason}")
         self.group_request_id = group_request_id
         self.reason = reason
 

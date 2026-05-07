@@ -244,7 +244,8 @@ async def generate(request: Request) -> Response:
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    except ClientDisconnected:
+    except ClientDisconnected as e:
+        logger.error(str(e))
         return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
@@ -265,7 +266,8 @@ async def generate_stream(request: Request) -> Response:
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    except ClientDisconnected:
+    except ClientDisconnected as e:
+        logger.error(str(e))
         return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
@@ -281,7 +283,8 @@ async def get_score(request: Request) -> Response:
 
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
-    except ClientDisconnected:
+    except ClientDisconnected as e:
+        logger.error(str(e))
         return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
@@ -313,7 +316,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         resp = await chat_completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    except ClientDisconnected:
+    except ClientDisconnected as e:
+        logger.error(str(e))
         return Response(status_code=499)
     return resp
 
@@ -329,7 +333,8 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         resp = await completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    except ClientDisconnected:
+    except ClientDisconnected as e:
+        logger.error(str(e))
         return Response(status_code=499)
     return resp
 
@@ -344,7 +349,8 @@ async def anthropic_messages(raw_request: Request) -> Response:
 
     try:
         return await anthropic_messages_impl(raw_request)
-    except ClientDisconnected:
+    except ClientDisconnected as e:
+        logger.error(str(e))
         return Response(status_code=499)
 
 
@@ -390,7 +396,8 @@ async def tokens(request: Request):
             },
             status_code=200,
         )
-    except ClientDisconnected:
+    except ClientDisconnected as e:
+        logger.error(str(e))
         return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")

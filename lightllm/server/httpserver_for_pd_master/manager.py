@@ -189,9 +189,16 @@ class HttpServerManagerForPDMaster:
         timeout: float = 60.0,
         poll_interval: float = 1.0,
     ):
-        # Wait for `event`, but periodically check whether the client has
-        # disconnected so we can abort PD nodes promptly instead of holding
-        # their resources for the full timeout window.
+        # 修复一个旧 bug：原先此处直接 `await asyncio.wait_for(event.wait(), timeout=60)`，
+        # 在等待 KV 移交握手（up_status_event / nixl_np_up_prompt_ids_event）期间完全不
+        # 检查客户端是否已断开。如果客户端在 P 已 prefill 完、D 还没回 ack 的窗口里断开，
+        # master 会把 P 和 D 的资源占满最多 60 秒，然后还会错误地抛 ServerBusyError。
+        #
+        # 这里把同一个 60s 总预算切成多个 poll_interval 的小段：每段超时回来检查一次
+        # request.is_disconnected()，发现断开就立刻通过 self.abort() 给 P/D 各发一个
+        # ABORT_REQ，然后抛 ClientDisconnected，让 API 层返回 499。真超时时仍按原语义
+        # 抛 asyncio.TimeoutError，调用方继续转换为 ServerBusyError。
+        # 效果：最坏情况下 PD 节点在客户端走后被占的时间从 60s 降到约 1s。
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -251,6 +258,12 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
+                # 修复旧 bug：原先这里只是 `raise Exception(...)`，只能让 master 自己的 HTTP 协程退出，
+                # 但通过 websocket 连过来的 P/D 节点完全收不到 abort 信号，会继续把请求跑完，
+                # 长时间占着 KV cache 与 shm 槽位。这里改为先调用 self.abort(...)，它会通过 P/D 两条
+                # websocket 各发一个 ObjType.ABORT_REQ，让两端立即释放本请求资源；然后再抛
+                # ClientDisconnected，让 API 层走 499 静默路径而不是 417 + ERROR。
+                # 同样的 abort + raise 模式在本文件下面几处 disconnect 检查点也会出现，原因相同。
                 await self.abort(group_request_id, p_node=p_node, d_node=d_node)
                 raise ClientDisconnected(group_request_id)
 

@@ -445,12 +445,13 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except ClientDisconnected as e:
-            logger.warning(f"group_request_id: {group_request_id} {e.reason}")
-            logger.debug(f"group_request_id: {group_request_id} {e.reason}", exc_info=True)
-            raise
-        except Exception as e:
+        except (ClientDisconnected, Exception) as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+
+            if isinstance(e, ClientDisconnected):
+                logger.warning(f"group_request_id: {group_request_id} {e.reason}")
+                logger.debug(f"group_request_id: {group_request_id} {e.reason}", exc_info=True)
+
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
@@ -668,7 +669,9 @@ class HttpServerManager:
 
             if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
-                raise ClientDisconnected(group_request_id)
+                raise ClientDisconnected(
+                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                )
 
             async with req_status.lock:
                 event.clear()

@@ -163,12 +163,13 @@ class HttpServerManagerForPDMaster:
 
                 await self.remove_req(group_request_id=block_group_request_id)
 
-        except ClientDisconnected as e:
-            logger.warning(f"group_request_id: {origin_group_request_id} {e.reason}")
-            logger.debug(f"group_request_id: {origin_group_request_id} {e.reason}", exc_info=True)
-            raise
-        except BaseException as e:
+        except (ClientDisconnected, BaseException) as e:
             logger.error(f"has exception {str(e)}")
+
+            if isinstance(e, ClientDisconnected):
+                logger.warning(f"group_request_id: {origin_group_request_id} {e.reason}")
+                logger.debug(f"group_request_id: {origin_group_request_id} {e.reason}", exc_info=True)
+
             try:
                 await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
             except:
@@ -178,39 +179,6 @@ class HttpServerManagerForPDMaster:
         finally:
             await self.remove_req(block_group_request_id)
         return
-
-    async def _wait_event_with_disconnect_check(
-        self,
-        event: asyncio.Event,
-        request: Request,
-        group_request_id: int,
-        p_node: PD_Client_Obj,
-        d_node: PD_Client_Obj,
-        timeout: float = 60.0,
-        poll_interval: float = 1.0,
-    ):
-        # 修复一个旧 bug：原先此处直接 `await asyncio.wait_for(event.wait(), timeout=60)`，
-        # 在等待 KV 移交握手（up_status_event / nixl_np_up_prompt_ids_event）期间完全不
-        # 检查客户端是否已断开。如果客户端在 P 已 prefill 完、D 还没回 ack 的窗口里断开，
-        # master 会把 P 和 D 的资源占满最多 60 秒，然后还会错误地抛 ServerBusyError。
-        #
-        # 这里把同一个 60s 总预算切成多个 poll_interval 的小段：每段超时回来检查一次
-        # request.is_disconnected()，发现断开就立刻通过 self.abort() 给 P/D 各发一个
-        # ABORT_REQ，然后抛 ClientDisconnected，让 API 层返回 499。真超时时仍按原语义
-        # 抛 asyncio.TimeoutError，调用方继续转换为 ServerBusyError。
-        # 效果：最坏情况下 PD 节点在客户端走后被占的时间从 60s 降到约 1s。
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise asyncio.TimeoutError()
-            try:
-                await asyncio.wait_for(event.wait(), timeout=min(poll_interval, remaining))
-                return
-            except asyncio.TimeoutError:
-                if await request.is_disconnected():
-                    await self.abort(group_request_id, p_node=p_node, d_node=d_node)
-                    raise ClientDisconnected(group_request_id)
 
     async def _log_req_header(self, request: Request, group_request_id: int):
         x_request_id = request.headers.get("X-Request-Id", "")
@@ -258,14 +226,9 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
-                # 修复旧 bug：原先这里只是 `raise Exception(...)`，只能让 master 自己的 HTTP 协程退出，
-                # 但通过 websocket 连过来的 P/D 节点完全收不到 abort 信号，会继续把请求跑完，
-                # 长时间占着 KV cache 与 shm 槽位。这里改为先调用 self.abort(...)，它会通过 P/D 两条
-                # websocket 各发一个 ObjType.ABORT_REQ，让两端立即释放本请求资源；然后再抛
-                # ClientDisconnected，让 API 层走 499 静默路径而不是 417 + ERROR。
-                # 同样的 abort + raise 模式在本文件下面几处 disconnect 检查点也会出现，原因相同。
-                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
-                raise ClientDisconnected(group_request_id)
+                raise ClientDisconnected(
+                    group_request_id=group_request_id, reason="fetch_stream prefill period check network disconnected"
+                )
 
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
@@ -286,9 +249,7 @@ class HttpServerManagerForPDMaster:
             return
 
         try:
-            await self._wait_event_with_disconnect_check(
-                up_status_event, request, group_request_id, p_node, d_node, timeout=60
-            )
+            await asyncio.wait_for(up_status_event.wait(), timeout=60)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
@@ -305,8 +266,9 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
-                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
-                raise ClientDisconnected(group_request_id)
+                raise ClientDisconnected(
+                    group_request_id=group_request_id, reason="fetch_stream decode period check network disconnected"
+                )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
@@ -337,16 +299,15 @@ class HttpServerManagerForPDMaster:
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
-            await self._wait_event_with_disconnect_check(
-                nixl_np_up_prompt_ids_event, request, group_request_id, p_node, d_node, timeout=60
-            )
+            await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
             raise ServerBusyError()
 
         if await request.is_disconnected():
-            await self.abort(group_request_id, p_node=p_node, d_node=d_node)
-            raise ClientDisconnected(group_request_id)
+            raise ClientDisconnected(
+                group_request_id=group_request_id, reason="fetch_nixl_stream prefill period check network disconnected"
+            )
 
         prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
@@ -357,9 +318,7 @@ class HttpServerManagerForPDMaster:
         )
 
         try:
-            await self._wait_event_with_disconnect_check(
-                up_status_event, request, group_request_id, p_node, d_node, timeout=60
-            )
+            await asyncio.wait_for(up_status_event.wait(), timeout=60)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
@@ -376,8 +335,10 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
-                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
-                raise ClientDisconnected(group_request_id)
+                raise ClientDisconnected(
+                    group_request_id=group_request_id,
+                    reason="fetch_nixl_stream decode period check network disconnected",
+                )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
@@ -426,8 +387,9 @@ class HttpServerManagerForPDMaster:
             p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
-                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
-                raise ClientDisconnected(group_request_id)
+                raise ClientDisconnected(
+                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                )
 
             prompt_tokens = metadata["prompt_tokens"]
             out_token_counter += 1

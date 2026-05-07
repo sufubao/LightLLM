@@ -64,10 +64,10 @@ class AudioItem:
             self._preload_data = audio_values.tobytes()
             return
 
-        except ClientDisconnected:
+        except ClientDisconnected as e:
             # Preserve client-disconnect signal so the API layer can return 499
-            # without the noisy 'Failed to read audio' error path.
-            raise
+            # without the noisy 'Failed to read audio' error logs.
+            raise e
         except Exception as e:
             raise ValueError(f"Failed to read audio type={self._type}, data[:100]={self._data[:100]}: {e}!")
 
@@ -153,10 +153,10 @@ class ImageItem:
             self._preload_data = img_data
             return
 
-        except ClientDisconnected:
+        except ClientDisconnected as e:
             # Preserve client-disconnect signal so the API layer can return 499
-            # without the noisy 'Failed to read image' error path.
-            raise
+            # without the noisy 'Failed to read image' error logs.
+            raise e
         except Exception as e:
             raise ValueError(f"Failed to read image type={self._type}, data[:100]={self._data[:100]}: {e}!")
 

@@ -47,24 +47,30 @@ class DeTokenizationManager:
         return
 
     def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
+        from lightllm.server.core.objs import FinishStatus
+
         for req_index in recv_obj.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
-            req.link_prompt_ids_shm_array()
-            req.link_logprobs_shm_array()
+            try:
+                req.link_prompt_ids_shm_array()
+                req.link_logprobs_shm_array()
 
-            logger.info(
-                f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
-            )
+                logger.info(
+                    f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
+                )
 
-            # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-            decode_req = DecodeReq(req, self.is_pd_decode_mode)
-            if self.is_pd_decode_mode:
-                decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
-            # token_healing mode 的特殊初始化
-            if self.args.token_healing_mode:
-                decode_req.init_token_healing_prefix_str(self.token_id_to_token, self.tokenizer)
+                # p d 分离模式，decode节点的解码需要做一些特殊的修复。
+                decode_req = DecodeReq(req, self.is_pd_decode_mode)
+                if self.is_pd_decode_mode:
+                    decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
+                # token_healing mode 的特殊初始化
+                if self.args.token_healing_mode:
+                    decode_req.init_token_healing_prefix_str(self.token_id_to_token, self.tokenizer)
 
-            self.req_id_to_out[req.request_id] = decode_req
+                self.req_id_to_out[req.request_id] = decode_req
+            except Exception as e:
+                req.finish_status.set_status(FinishStatus.FINISHED_ERROR)
+                raise e
         return
 
     def handle_loop(self):
@@ -76,7 +82,11 @@ class DeTokenizationManager:
                     for _ in range(recv_max_count):
                         recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         assert isinstance(recv_obj, GroupReqIndexes)
-                        self._add_new_group_req_index(recv_obj=recv_obj)
+                        try:
+                            self._add_new_group_req_index(recv_obj=recv_obj)
+                        except Exception:
+                            logger.exception("add new group req index has exception")
+                            self.pub_to_httpserver.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
                     recv_max_count = min(int(recv_max_count * 1.3), 256)

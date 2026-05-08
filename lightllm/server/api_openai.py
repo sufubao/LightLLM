@@ -70,7 +70,7 @@ async def _safe_stream_wrapper(stream_generator):
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
     except ClientDisconnected as e:
-        logger.error(str(e))
+        logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
         return
 

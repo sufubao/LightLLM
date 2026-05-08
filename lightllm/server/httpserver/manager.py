@@ -450,7 +450,6 @@ class HttpServerManager:
 
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {group_request_id} {e.reason}")
-                logger.debug(f"group_request_id: {group_request_id} {e.reason}", exc_info=True)
 
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放

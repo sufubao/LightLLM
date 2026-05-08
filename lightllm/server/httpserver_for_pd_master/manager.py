@@ -168,7 +168,6 @@ class HttpServerManagerForPDMaster:
 
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {origin_group_request_id} {e.reason}")
-                logger.debug(f"group_request_id: {origin_group_request_id} {e.reason}", exc_info=True)
 
             try:
                 await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)

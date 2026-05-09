@@ -303,9 +303,10 @@ class VisualModelRpcServer(rpyc.Service):
         任务处理循环: 从队列中取出ImageItem和embed 放入 afs中, 执行完成后通知调用者
         """
         while True:
+            images: List[ImageItem] = []
             try:
                 # 从队列获取任务, 阻塞等待
-                images: List[ImageItem] = self._get_image_items_from_store_queue(max_num=self.infer_max_batch_size)
+                images = self._get_image_items_from_store_queue(max_num=self.infer_max_batch_size)
 
                 if self.is_visual_only_mode:
                     self._commit_to_afs(images=images)
@@ -316,8 +317,23 @@ class VisualModelRpcServer(rpyc.Service):
                     self.sempare.release()
 
             except Exception as e:
-                logger.exception(str(e))
-                raise e
+                # 不能 raise 终止 worker 线程: 单次 commit 失败 (例如 set_items_embed
+                # RPyC `result expired`) 不应导致整个 store 管道死掉。否则后续图片永远
+                # 留在 store_queue 里, 它们的 image.event 永远不会 set, 视觉端
+                # handle_images 必须等到 60s 超时才能放弃 - 大量请求同时排队时累积时延
+                # 远超必要。改为: 记录异常, 给已取出的 images 设置 event 让上游早点
+                # 收到失败信号, 释放信号量, 继续循环。
+                logger.exception(f"_store_worker commit failed, n_images={len(images)}: {e}")
+                for image in images:
+                    try:
+                        if hasattr(image, "event") and image.event is not None:
+                            image.event.set()
+                    except Exception:
+                        logger.exception("failed to signal image.event after commit failure")
+                    try:
+                        self.sempare.release()
+                    except Exception:
+                        logger.exception("failed to release sempare after commit failure")
 
     def _commit_to_afs(self, images):
         if self.tp_rank_id == 0:

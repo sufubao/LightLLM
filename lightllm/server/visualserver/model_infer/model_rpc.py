@@ -322,24 +322,43 @@ class VisualModelRpcServer(rpyc.Service):
     def _commit_to_afs(self, images):
         if self.tp_rank_id == 0:
             for image in images:
+                logger.debug(f"_commit_to_afs afs.insert START md5={image.md5}")
                 self.afs_handler.insert(image.md5, image.gen_embed)
                 self._log_latency(image, stage="store_to_afs")
+                logger.debug(f"_commit_to_afs event.set START md5={image.md5}")
                 image.event.set()
                 self._log_latency(image, stage="set_event")
+                logger.debug(f"_commit_to_afs event.set DONE md5={image.md5}")
 
     def _commit_to_cpu_cache(self, images):
         if self.tp_rank_id == 0:
+            md5s = [image.md5 for image in images]
             for image in images:
                 # 等待拷贝到cpu cache 完成。
+                # cuda_event.synchronize() can hang silently on a stuck CUDA stream
+                # (no Python exception raised). Bracket logs so post-mortem can tell
+                # whether we wedged here or at set_items_embed below.
+                logger.debug(f"_commit_to_cpu_cache cuda_event.sync START md5={image.md5}")
                 image.cuda_event.synchronize()
+                logger.debug(f"_commit_to_cpu_cache cuda_event.sync DONE md5={image.md5}")
                 self._log_latency(image, stage="inference")
 
             uuids = [image.uuid for image in images]
+            # set_items_embed is a synchronous RPyC call; if the embed-cache server
+            # is hung-but-alive RPyC's sync_request_timeout (default 30s) should fire
+            # and raise here, but we want unambiguous evidence either way.
+            logger.debug(f"_commit_to_cpu_cache set_items_embed START md5s={md5s}")
             self.cache_client.root.set_items_embed(uuids)
+            logger.debug(f"_commit_to_cpu_cache set_items_embed DONE md5s={md5s}")
 
             for image in images:
                 self._log_latency(image, stage="set_items_embed")
 
             for image in images:
+                # event.set() unblocks visualserver/manager.py:handle_images;
+                # if this never logs DONE for an md5 the visual loop will wedge
+                # via thread-pool exhaustion in to_thread(event.wait).
+                logger.debug(f"_commit_to_cpu_cache event.set START md5={image.md5}")
                 image.event.set()
+                logger.debug(f"_commit_to_cpu_cache event.set DONE md5={image.md5}")
                 self._log_latency(image, stage="set_event")

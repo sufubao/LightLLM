@@ -119,7 +119,6 @@ class SystemStatusReporter:
             (self.global_cache_total / self.global_input_total * 100) if self.global_input_total > 0 else 0.0
         )
 
-        kv_pct = avg_kv_used * 100
         kv_pct_no_cache = avg_kv_used_no_cache * 100
 
         log_parts = [

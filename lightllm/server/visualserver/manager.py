@@ -26,6 +26,14 @@ from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
 
+# Cap how long handle_images waits for the per-DP store-worker to call
+# image.event.set(). The wait runs in asyncio.to_thread, so each stuck
+# wait holds one default-executor thread; without a deadline a hang in
+# _commit_to_cpu_cache (cuda_event.synchronize / set_items_embed RPyC /
+# event.set) would eventually exhaust the executor and silence the
+# zmq recv loop.
+VISUAL_HANDLE_IMAGES_EVENT_WAIT_TIMEOUT = 60.0
+
 
 class VisualManager:
     def __init__(
@@ -92,7 +100,7 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    def get_need_infer_images(self, group_req_indexes: GroupReqIndexes) -> List[ImageItem]:
+    async def get_need_infer_images(self, group_req_indexes: GroupReqIndexes) -> List[ImageItem]:
         shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
         is_aborted = shm_req.is_aborted
         disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
@@ -111,7 +119,12 @@ class VisualManager:
             ready_image = [False] * len(img_uuids)
         else:
             if len(img_uuids) > 0:
-                ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+                # Synchronous RPyC call - run in a thread so a slow embed-cache
+                # response cannot wedge the visualserver event loop and silence
+                # `loop_for_netio_req`.
+                ready_image = obtain(
+                    await asyncio.to_thread(self.cache_client.root.get_items_embed, img_uuids)
+                )
             else:
                 ready_image = []
 
@@ -123,15 +136,33 @@ class VisualManager:
         return images_need_infer
 
     async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
-        images_need_infer = self.get_need_infer_images(group_req_indexes)
+        images_need_infer = await self.get_need_infer_images(group_req_indexes)
 
         if len(images_need_infer) == 0:
             self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             return
-        else:
+
+        try:
             await self.handle_images(images_need_infer)
-            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-            return
+        except TimeoutError:
+            # handle_images timed out waiting for image.event.set(); the
+            # downstream store/cache pipeline is wedged for these images.
+            # Mark the shm_req as aborted and forward to the next module so
+            # router/multi_level_kv_cache release the shm slot rather than
+            # leaving it pinned at refcount=1 forever.
+            logger.error(
+                f"handle_images timed out for group_req_id={group_req_indexes.group_req_id}; "
+                f"marking aborted and forwarding so downstream releases the shm slot"
+            )
+            try:
+                shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
+                shm_req.is_aborted = True
+                self.shm_req_manager.put_back_req_obj(shm_req)
+            except BaseException as e:
+                logger.exception(f"failed to mark shm_req aborted after handle_images timeout: {e}")
+
+        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        return
 
     async def handle_images(self, images_need_infer: List[ImageItem]):
         if not hasattr(self, "cur_dp_index"):
@@ -159,10 +190,25 @@ class VisualManager:
                 raise e
 
         # 等待推理通知已经 ok
+        # threading.Event.wait(timeout) returns True if set, False on timeout.
+        # A False here means the model_rpc store path (cuda_event.synchronize,
+        # set_items_embed RPyC, or event.set itself) is silently wedged.
         for dp_index in range(self.vit_dp):
             _images = dp_to_handle_images[dp_index]
             if _images:
-                await asyncio.to_thread(_images[-1][1].wait)
+                ok = await asyncio.to_thread(
+                    _images[-1][1].wait, VISUAL_HANDLE_IMAGES_EVENT_WAIT_TIMEOUT
+                )
+                if not ok:
+                    md5s = [img.md5 for img, _ in _images]
+                    logger.error(
+                        f"handle_images event.wait timeout after "
+                        f"{VISUAL_HANDLE_IMAGES_EVENT_WAIT_TIMEOUT}s on dp_index={dp_index} "
+                        f"md5s={md5s}; check model_rpc.py:_commit_to_cpu_cache START/DONE logs"
+                    )
+                    raise TimeoutError(
+                        f"visual handle_images event.wait timeout dp_index={dp_index}"
+                    )
         return
 
     async def infer_images(self, dp_index: int, images, events):

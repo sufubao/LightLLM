@@ -122,20 +122,24 @@ class SystemStatusReporter:
         kv_pct = avg_kv_used * 100
         kv_pct_no_cache = avg_kv_used_no_cache * 100
 
+        log_parts = [
+            f"router_status(window={elapsed:.1f}s)",
+            f"throughput(total={total_tps:.1f},input={input_tps:.1f},output={output_tps:.1f})",
+            f"req(running={running},waiting={queued},paused={paused_req_num})",
+            f"kv(used={kv_pct_no_cache:.1f}%)",
+            f"gpu_cache_hit(window={window_cache_hit_rate:.1f}%,global={global_cache_hit_rate:.1f}%)",
+        ]
+
         # Avg MTP accepted length (only shown when MTP is active)
-        mtp_suffix = ""
         if self.global_mtp_accepted_total > 0:
             decode_steps = self.global_mtp_output_total - self.global_mtp_accepted_total
             avg_mtp_len = self.global_mtp_output_total / max(decode_steps, 1)
-            mtp_suffix = f", MTP {avg_mtp_len:.2f}"
+            log_parts.append(
+                f"mtp(avg_tokens_per_step={avg_mtp_len:.2f},"
+                f"accepted={self.global_mtp_accepted_total},output={self.global_mtp_output_total})"
+            )
 
-        self.status_logger.info(
-            f"TPS {total_tps:.1f} (in {input_tps:.1f}, out {output_tps:.1f}), "
-            f"REQ {running}run, {queued}wait, {paused_req_num}pause, "
-            f"KV CACHE {kv_pct:.1f}% (active {kv_pct_no_cache:.1f}%), "
-            f"CACHE HIT {window_cache_hit_rate:.1f}% (global {global_cache_hit_rate:.1f}%)"
-            f"{mtp_suffix}"
-        )
+        self.status_logger.info(" | ".join(log_parts))
 
         # Reset windowed counters
         self.prompt_tokens = 0

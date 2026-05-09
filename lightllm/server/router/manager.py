@@ -347,16 +347,16 @@ class RouterManager:
                 # Settle any output-token tail produced after the last window boundary,
                 # so windowed TPS does not lose the req's last tokens.
                 self.status_reporter.discard_req(req)
-                # Aborted/disconnected requests can leave a partial output_len that
-                # would bias the EMA toward shorter generations; skip them.
-                if req.is_aborted:
-                    continue
                 self.status_reporter.on_request_completed(
                     input_len=req.input_len,
                     output_len=req.shm_cur_output_len,
                     cache_len=req.prompt_cache_len,
                     mtp_accepted=req.mtp_accepted_token_num,
                 )
+                # Aborted/disconnected requests can leave a partial output_len that
+                # would bias the EMA toward shorter generations; skip them.
+                if req.is_aborted:
+                    continue
                 self.router_statics.update(req.candetoken_out_len)
             self.running_batch.filter_out_finished_req(self.shm_req_manager)
             if self.running_batch.is_clear():

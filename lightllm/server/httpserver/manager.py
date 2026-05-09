@@ -298,7 +298,11 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+        group_request_id = None
         if isinstance(prompt, str):
+            # Guard against extremely long string prompts that might stall the tokenizer
+            # or cause excessive memory usage before tokenization.
+            # 8 characters per token is a conservative heuristic (avg is ~4).
             max_prompt_chars = self.max_req_total_len * 8
             if len(prompt) > max_prompt_chars:
                 raise ValueError(

@@ -51,7 +51,7 @@ class ProxyVisualManager(VisualManager):
         )
 
     async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
-        images_need_infer = self.get_need_infer_images(group_req_indexes)
+        images_need_infer = await self.get_need_infer_images(group_req_indexes)
 
         # case 1
         if len(images_need_infer) == 0:

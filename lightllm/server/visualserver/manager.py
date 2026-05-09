@@ -100,7 +100,7 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    def get_need_infer_images(self, group_req_indexes: GroupReqIndexes) -> List[ImageItem]:
+    async def get_need_infer_images(self, group_req_indexes: GroupReqIndexes) -> List[ImageItem]:
         shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
         is_aborted = shm_req.is_aborted
         disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
@@ -119,7 +119,12 @@ class VisualManager:
             ready_image = [False] * len(img_uuids)
         else:
             if len(img_uuids) > 0:
-                ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+                # Synchronous RPyC call - run in a thread so a slow embed-cache
+                # response cannot wedge the visualserver event loop and silence
+                # `loop_for_netio_req`.
+                ready_image = obtain(
+                    await asyncio.to_thread(self.cache_client.root.get_items_embed, img_uuids)
+                )
             else:
                 ready_image = []
 
@@ -131,7 +136,7 @@ class VisualManager:
         return images_need_infer
 
     async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
-        images_need_infer = self.get_need_infer_images(group_req_indexes)
+        images_need_infer = await self.get_need_infer_images(group_req_indexes)
 
         if len(images_need_infer) == 0:
             self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)

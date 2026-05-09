@@ -17,7 +17,12 @@ from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
-from lightllm.utils.config_utils import has_audio_module, has_vision_module, is_linear_att_mixed_model
+from lightllm.utils.config_utils import (
+    has_audio_module,
+    has_vision_module,
+    is_linear_att_mixed_model,
+    auto_set_max_req_total_len,
+)
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
@@ -69,6 +74,7 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
+    auto_set_max_req_total_len(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -124,10 +130,13 @@ def normal_or_p_d_start(args):
         args.running_max_req_size = 3
         args.batch_max_tokens = 2048
         args.chunked_prefill_size = 1024
-        args.mem_fraction = 0.85
+        if args.mem_fraction > 0.82:
+            args.mem_fraction = 0.82
+        args.graph_max_batch_size = 32
         logger.info(
             f"performance_mode is personal, set running_max_req_size to 3,"
-            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.85"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.82,"
+            f"graph_max_batch_size to 32"
         )
 
     if not args.disable_shm_warning:
@@ -517,6 +526,8 @@ def pd_master_start(args):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    auto_set_max_req_total_len(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.

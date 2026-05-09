@@ -1,5 +1,6 @@
 import time
 import logging
+import subprocess
 from typing import Dict
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_system_status_logger
@@ -58,6 +59,44 @@ class SystemStatusReporter:
             self.global_cache_total += cache_len
             self.global_mtp_output_total += output_len
             self.global_mtp_accepted_total += mtp_accepted
+
+    def _get_gpu_status_for_debug(self) -> str:
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"gpu=unavailable({e.__class__.__name__})"
+
+        gpu_infos = []
+        for line in result.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) != 4:
+                continue
+            gpu_index, util, mem_used, mem_total = parts
+            try:
+                mem_used_mb = float(mem_used)
+                mem_total_mb = float(mem_total)
+                mem_ratio = mem_used_mb / mem_total_mb * 100 if mem_total_mb > 0 else 0.0
+                mem_used_gb = mem_used_mb / 1024
+                mem_total_gb = mem_total_mb / 1024
+                gpu_infos.append(
+                    f"{gpu_index}(util={float(util):.0f}%,mem={mem_ratio:.1f}%,"
+                    f"used={mem_used_gb:.1f}GiB/{mem_total_gb:.1f}GiB)"
+                )
+            except ValueError:
+                continue
+        if not gpu_infos:
+            return "gpu=unavailable(empty)"
+        return "gpu=[" + ";".join(gpu_infos) + "]"
 
     def maybe_print(
         self,
@@ -119,6 +158,7 @@ class SystemStatusReporter:
             (self.global_cache_total / self.global_input_total * 100) if self.global_input_total > 0 else 0.0
         )
 
+        kv_pct = avg_kv_used * 100
         kv_pct_no_cache = avg_kv_used_no_cache * 100
 
         log_parts = [
@@ -139,6 +179,19 @@ class SystemStatusReporter:
             )
 
         self.status_logger.info(" | ".join(log_parts))
+        if logger.isEnabledFor(logging.DEBUG):
+            kv_unrefed_prefix_cache_pct = max(0.0, kv_pct - kv_pct_no_cache)
+            debug_parts = [
+                "router_status_debug",
+                f"kv_physical={kv_pct:.1f}%",
+                f"kv_unrefed_prefix_cache={kv_unrefed_prefix_cache_pct:.1f}%",
+                f"throughput_tokens(input={self.prompt_tokens},output={self.output_tokens})",
+                f"gpu_cache_tokens(window={self.window_cache_total}/{self.window_input_total},"
+                f"global={self.global_cache_total}/{self.global_input_total})",
+                f"tracked_output_reqs={len(self._req_last_output_len)}",
+                self._get_gpu_status_for_debug(),
+            ]
+            logger.debug(" | ".join(debug_parts))
 
         # Reset windowed counters
         self.prompt_tokens = 0

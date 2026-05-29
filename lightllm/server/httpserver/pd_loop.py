@@ -6,6 +6,9 @@ import socket
 import httpx
 import base64
 import weakref
+import os
+import signal
+import sys
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
@@ -31,7 +34,12 @@ async def timer_log(manager: HttpServerManager):
 
 
 async def pd_handle_loop(manager: HttpServerManager):
-    assert manager.args.host not in ["127.0.0.1", "localhost"], "pd mode must specify host ip"
+    if manager.args.host in ["127.0.0.1", "localhost"]:
+        logger.error("pd mode must specify host ip, not use 127.0.0.1 or localhost")
+        # kill father process to trigger graceful exit, avoid orphan process
+        os.kill(os.getppid(), signal.SIGINT)
+        sys.exit(-1)
+
     if manager.args.host in ["0.0.0.0"]:
         manager.host_ip = get_hostname_ip()
     else:
@@ -213,11 +221,8 @@ async def _pd_process_generate(
             nixl_pd_upload_websocket=nixl_pd_upload_websocket,
             nixl_pd_event=nixl_pd_event,
         ):
-            # p d 模式下，将 token 数据放入到转发队列中, 请求id 小于0的请求是health探测请求，不用转发。
-            is_health_check_req = sub_req_id < 0
-            if not is_health_check_req:
-                metadata["node_mode"] = manager.args.run_mode
-                await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
+            metadata["node_mode"] = manager.args.run_mode
+            await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except NixlPrefillNodeStopGenToken as e:
         logger.info(f"nixl prefill node stop gen token for group_request_id {e.group_request_id}")
     except BaseException as e:

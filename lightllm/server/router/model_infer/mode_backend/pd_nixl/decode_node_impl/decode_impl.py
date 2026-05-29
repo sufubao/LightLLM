@@ -33,11 +33,14 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
 
         g_infer_state_lock.acquire()
 
-        uninit_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=False)
+        uninit_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         # 匹配radix cache，并更新一些资源的管理。
         self._post_init_reqs(uninit_reqs=uninit_reqs)
-
         g_infer_state_lock.release()
+
+        # pd nixl 的 decode 节点模式下当前不支持 cpu cache, 未来可能会支持。
+        assert not self.args.enable_cpu_cache
+
         req_ids = [e[0] for e in reqs]
         return req_ids
 
@@ -50,26 +53,9 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
 
         for req_obj in uninit_reqs:
             req_obj: InferReq = req_obj  # for easy typing
-            request_id = req_obj.req_id
-            if request_id > 0:
-                req_obj._match_radix_cache()
-                # 构建 chuncked trans task
-                self._decode_node_gen_trans_tasks(req_obj=req_obj)
-            else:
-                # 对于不合法的请求， 主要是health请求，直接模拟将其finished掉
-                req_obj.cur_output_len += 1
-                req_obj.set_next_gen_token_id(0, 0.0, 1)
-                req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
+            # 构建 chuncked trans task
+            self._decode_node_gen_trans_tasks(req_obj=req_obj)
 
-                if self.is_master_in_dp:
-                    req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                    req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-                    req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    req_obj.shm_req.finish_status.set_status(FinishStatus.FINISHED_STOP)
-                    req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
-                    req_id = req_obj.shm_req.request_id
-                    logger.error(f"req_id: {req_id} forced to finished")
         return
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:

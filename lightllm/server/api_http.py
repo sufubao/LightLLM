@@ -62,6 +62,7 @@ from .api_models import (
     ModelListResponse,
 )
 from .build_prompt import build_prompt, init_tokenizer
+from .access_log_middleware import add_access_log_middleware
 
 logger = init_logger(__name__)
 
@@ -116,39 +117,7 @@ g_objs = G_Objs()
 app = FastAPI()
 g_objs.app = app
 
-_ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
-_ACCESS_LOG_RESET = "\033[0m"
-
-
-class _AccessLogMiddleware:
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] not in ("http", "websocket"):
-            await self.app(scope, receive, send)
-            return
-
-        status_holder = {"status": 0}
-
-        async def send_wrapper(message):
-            if message["type"] == "http.response.start":
-                status_holder["status"] = message["status"]
-            await send(message)
-
-        try:
-            await self.app(scope, receive, send_wrapper)
-        finally:
-            if scope["type"] == "http":
-                status = status_holder["status"]
-                msg = f"{scope['method']} {scope['path']} {status}"
-                color = _ACCESS_LOG_STATUS_COLORS.get(status // 100, "")
-                if color:
-                    msg = color + msg + _ACCESS_LOG_RESET
-                logger.info(msg)
-
-
-app.add_middleware(_AccessLogMiddleware)
+add_access_log_middleware(app)
 
 
 def create_error_response(

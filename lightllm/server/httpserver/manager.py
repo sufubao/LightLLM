@@ -458,9 +458,16 @@ class HttpServerManager:
 
         except ValueError as e:
             logger.warning(f"group_request_id: {group_request_id} request invalid: {str(e)}")
+            # A ValueError raised during validation/encoding (e.g. input too long) happens
+            # before the request is registered in req_id_to_out_inf. In that case there is
+            # nothing to abort -- calling abort() would only emit a misleading
+            # "aborted ... not exist" warning -- so we just release the not-yet-tracked
+            # multimodal resources. Registered requests are aborted and reclaimed by the
+            # recycle loop, which also releases their multimodal resources.
             if group_request_id not in self.req_id_to_out_inf:
                 await self._release_multimodal_resources(multimodal_params)
-            await self.abort(group_request_id)
+            else:
+                await self.abort(group_request_id)
             raise e
         except (ClientDisconnected, Exception) as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")

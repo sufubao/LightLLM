@@ -14,10 +14,12 @@ from ..pd_io_struct import PD_Master_Obj
 from .nccl_tcp_store import start_tcp_store_server
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.server.access_log_middleware import add_access_log_middleware
 
 
 logger = init_logger(__name__)
 app = FastAPI()
+add_access_log_middleware(app)
 
 registered_pd_master_objs: Dict[str, PD_Master_Obj] = {}
 registered_visual_server_objs: Dict[str, VIT_Obj] = {}

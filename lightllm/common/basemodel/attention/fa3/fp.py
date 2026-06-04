@@ -1,12 +1,19 @@
 import dataclasses
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import (
+    BaseAttBackend,
+    BasePrefillAttState,
+    BaseDecodeAttState,
+    AttControl,
+)
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
-from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+from lightllm.common.basemodel.triton_kernel.gen_prefill_params import (
+    gen_cumsum_pad0_tensor,
+)
 
 
 class Fa3AttBackend(BaseAttBackend):
@@ -21,12 +28,14 @@ class Fa3AttBackend(BaseAttBackend):
         model = self.model
         if not hasattr(self, "_shared_page_table_buffer"):
             self._shared_page_table_buffer = [
-                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
-                    get_current_device_id()
-                ),
-                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
-                    get_current_device_id()
-                ),
+                torch.empty(
+                    model.graph_max_batch_size * model.graph_max_len_in_batch,
+                    dtype=torch.int32,
+                ).to(get_current_device_id()),
+                torch.empty(
+                    model.graph_max_batch_size * model.graph_max_len_in_batch,
+                    dtype=torch.int32,
+                ).to(get_current_device_id()),
             ]
         return self._shared_page_table_buffer
 
@@ -75,7 +84,12 @@ class Fa3PrefillAttState(BasePrefillAttState):
         )
 
     def _nomarl_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        att_control: AttControl,
+        alloc_func=torch.empty,
     ) -> torch.Tensor:
         self.backend: Fa3AttBackend = self.backend  # for typing
 
@@ -91,7 +105,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
 
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
-        sm_scale = 1.0 / (Lq ** 0.5)
+        sm_scale = 1.0 / (Lq**0.5)
         o = flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
@@ -125,8 +139,11 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     def init_state(self):
         self.backend: Fa3AttBackend = self.backend
         args_mtp_step = get_env_start_args().mtp_step
+        is_mtp_verify_decode = (
+            args_mtp_step > 0 and self.infer_state.b_num_accepted_tokens is not None
+        )
 
-        if args_mtp_step > 0:
+        if is_mtp_verify_decode:
             # 修正 mtp 在 fa3 下的输入。
             mtp_size = args_mtp_step + 1
             b_q_seq_len = torch.full(
@@ -136,15 +153,18 @@ class Fa3DecodeAttState(BaseDecodeAttState):
                 device=self.infer_state.b_seq_len.device,
             )
             b_kv_seq_len = self.infer_state.b_seq_len[mtp_size - 1 :: mtp_size]
-            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
+            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(
+                b_q_seq_len, b_kv_seq_len
+            )
             self.cu_seqlens_q = b1_cu_q_seq_len.int()
             self.cu_seqlens_k = b1_cu_kv_seq_len.int()
         else:
             self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
 
-        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
-        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
+        mtp_size = args_mtp_step + 1 if is_mtp_verify_decode else 1
+        att_batch_size = self.infer_state.batch_size // mtp_size
+        assert self.infer_state.batch_size % mtp_size == 0
 
         model = self.backend.model
         # 可以使用 cuda graph的时候从 buffer中申请
@@ -163,13 +183,17 @@ class Fa3DecodeAttState(BaseDecodeAttState):
                 device=self.infer_state.input_ids.device,
             )
 
-        if args_mtp_step > 0:
+        if is_mtp_verify_decode:
             page_table_copy(
                 page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
                 req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.infer_state.b_req_idx[args_mtp_step :: (args_mtp_step + 1)],
+                b_req_idx=self.infer_state.b_req_idx[
+                    args_mtp_step :: (args_mtp_step + 1)
+                ],
             )
-            self.b_att_seq_len = self.infer_state.b_seq_len[args_mtp_step :: (args_mtp_step + 1)].contiguous()
+            self.b_att_seq_len = self.infer_state.b_seq_len[
+                args_mtp_step :: (args_mtp_step + 1)
+            ].contiguous()
             self.decode_max_q_seq_len = args_mtp_step + 1
         else:
             page_table_copy(
@@ -221,7 +245,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
 
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
-        sm_scale = 1.0 / (Lq ** 0.5)
+        sm_scale = 1.0 / (Lq**0.5)
         o = flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),

@@ -3,8 +3,9 @@ import torch
 from ..base_att import AttControl
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_fp8_quant
+from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import (
+    q_per_head_fp8_quant,
+)
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 from typing import Union
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
@@ -45,9 +46,16 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             torch.arange(batch_size, device=device), self.infer_state.b_q_seq_len
         )
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-
+        self.k_descale = (
+            offline_scales[:, :head_num]
+            .view(-1, 1, head_num)
+            .expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:]
+            .view(-1, 1, head_num)
+            .expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
     def prefill_att(
         self,
@@ -86,7 +94,9 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         k_head_dim = k.shape[2]
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
-        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
+        layer_index = self.backend._find_layer_index(
+            k=cache_k, v=cache_v, att_state=self
+        )
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, q_head_dim),
             k_cache=cache_k,
@@ -116,20 +126,24 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         super().init_state()
         self.backend: Fp8Fa3AttBackend = self.backend
 
-        args_mtp_step = get_env_start_args().mtp_step
-        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
-        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
-
         device = self.infer_state.input_ids.device
-        batch_size = att_batch_size
+        batch_size = self.b_att_seq_len.shape[0]
         mem_manager = self.backend.model.mem_manager
 
         offline_scales: torch.Tensor = mem_manager.scales
         head_num = mem_manager.head_num
 
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        self.k_descale = (
+            offline_scales[:, :head_num]
+            .view(-1, 1, head_num)
+            .expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:]
+            .view(-1, 1, head_num)
+            .expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
         return
 
@@ -169,12 +183,18 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
 
-        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
+        layer_index = self.backend._find_layer_index(
+            k=cache_k, v=cache_v, att_state=self
+        )
 
         q_head_num = q.shape[1]
         if scaled_fp8_quant is None:
-            raise ImportError("scaled_fp8_quant is unavailable. Please install vllm to enable FP8 decode attention.")
-        q, q_scale = scaled_fp8_quant(q.reshape(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
+            raise ImportError(
+                "scaled_fp8_quant is unavailable. Please install vllm to enable FP8 decode attention."
+            )
+        q, q_scale = scaled_fp8_quant(
+            q.reshape(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True
+        )
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,

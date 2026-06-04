@@ -4,6 +4,7 @@ import os
 import gc
 import copy
 import json
+import math
 import torch
 import torch.nn.functional as F
 import triton
@@ -17,20 +18,32 @@ from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_cl
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
+    copy_kv_index_to_req,
+)
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
-from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
+from lightllm.common.basemodel.triton_kernel.gather_token_id import (
+    gather_token,
+    gather_token_prefill_decode_mixed,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_llm_data_type,
+    get_added_mtp_kv_layer_num,
+)
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.envs_utils import (
+    set_model_init_status,
+    enable_diverse_mode_gqa_decode_fast_kernel,
+)
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
@@ -69,7 +82,9 @@ class TpPartBaseModel:
         # 主要是在prefill阶段返回多少个token的用于后续处理相关。
         self.is_token_healing = kvargs.get("is_token_healing", False)
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
-        assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
+        assert not (
+            self.is_token_healing and self.return_all_prompt_logics
+        ), "can not be true in same time"
         self.data_type = get_llm_data_type()
         mtp_step = get_env_start_args().mtp_step
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
@@ -119,11 +134,19 @@ class TpPartBaseModel:
         self._init_att_backend()
         self._init_att_backend1()
 
-        logger.info(f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}")
-        logger.info(f"use decode att backend: {self.decode_att_backend.__class__.__name__}")
+        logger.info(
+            f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}"
+        )
+        logger.info(
+            f"use decode att backend: {self.decode_att_backend.__class__.__name__}"
+        )
         if self.prefill_att_backend1 is not None:
-            logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
-            logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
+            logger.info(
+                f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}"
+            )
+            logger.info(
+                f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}"
+            )
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -156,11 +179,18 @@ class TpPartBaseModel:
         return
 
     def _init_quant(self):
-        self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
-        logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
+        self.quant_cfg = Quantcfg(
+            self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype
+        )
+        logger.info(
+            f"Initial quantization. "
+            f"The default quantization method is {self.quant_cfg.quant_type}"
+        )
 
     def _init_weights(self, start_layer_index=0):
-        self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
+        self.pre_post_weight = self.pre_and_post_weight_class(
+            self.data_type, network_config=self.config
+        )
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,
@@ -168,7 +198,9 @@ class TpPartBaseModel:
                 network_config=self.config,
                 quant_cfg=self.quant_cfg,
             )
-            for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
+            for i in range(
+                start_layer_index, start_layer_index + self.config["n_layer"]
+            )
         ]
         return
 
@@ -233,7 +265,9 @@ class TpPartBaseModel:
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
         self.layers_infer = [
             self.transformer_layer_infer_class(i, network_config=self.config)
-            for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
+            for i in range(
+                start_layer_index, start_layer_index + self.config["n_layer"]
+            )
         ]
         return
 
@@ -248,8 +282,12 @@ class TpPartBaseModel:
         return
 
     def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(
+            index=0
+        )(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(
+            model=self
+        )
         return
 
     def _init_att_backend1(self):
@@ -278,7 +316,9 @@ class TpPartBaseModel:
         self.prefill_graph = (
             None
             if not get_env_start_args().enable_prefill_cudagraph
-            else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
+            else PrefillCudaGraph(
+                decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_
+            )
         )
         if self.prefill_graph is not None:
             if get_env_start_args().enable_prefill_microbatch_overlap:
@@ -315,11 +355,14 @@ class TpPartBaseModel:
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
         infer_state.b_mtp_index = model_input.b_mtp_index
+        infer_state.b_num_accepted_tokens = model_input.b_num_accepted_tokens
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
             else:
-                infer_state.b_ready_cache_len = torch.zeros_like(input=infer_state.b_seq_len)
+                infer_state.b_ready_cache_len = torch.zeros_like(
+                    input=infer_state.b_seq_len
+                )
         else:
             if enable_diverse_mode_gqa_decode_fast_kernel():
                 infer_state.b_shared_seq_len = model_input.b_shared_seq_len
@@ -338,21 +381,47 @@ class TpPartBaseModel:
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
         if infer_state.is_prefill:
-            infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
-            if self.prefill_att_backend1 is not None:
-                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
+            infer_state.prefill_att_state = (
+                self.prefill_att_backend.create_att_prefill_state(
                     infer_state=infer_state
                 )
+            )
+            if self.prefill_att_backend1 is not None:
+                infer_state.prefill_att_state1 = (
+                    self.prefill_att_backend1.create_att_prefill_state(
+                        infer_state=infer_state
+                    )
+                )
         else:
-            infer_state.decode_att_state = self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
+            infer_state.decode_att_state = (
+                self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
+            )
             if self.decode_att_backend1 is not None:
-                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
-                    infer_state=infer_state
+                infer_state.decode_att_state1 = (
+                    self.decode_att_backend1.create_att_decode_state(
+                        infer_state=infer_state
+                    )
                 )
 
         return infer_state
 
-    def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
+    def _get_decode_padding_unit(self, model_input: ModelInput) -> int:
+        padding_unit = self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1
+        if (
+            self.args.mtp_step > 0
+            and (not model_input.is_prefill)
+            and model_input.b_num_accepted_tokens is not None
+        ):
+            padding_unit = math.lcm(padding_unit, self.args.mtp_step + 1)
+        return padding_unit
+
+    def _get_decode_infer_batch_size(self, model_input: ModelInput) -> int:
+        padding_unit = self._get_decode_padding_unit(model_input)
+        return triton.cdiv(model_input.batch_size, padding_unit) * padding_unit
+
+    def _create_padded_decode_model_input(
+        self, model_input: ModelInput, new_batch_size: int
+    ):
         if model_input.batch_size == new_batch_size:
             return model_input
 
@@ -361,22 +430,121 @@ class TpPartBaseModel:
         padded_batch_size = new_batch_size - model_input.batch_size
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = new_batch_size
-        new_model_input.total_token_num += padded_batch_size * 2
-        new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
-        new_model_input.b_req_idx = F.pad(
-            new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
+
+        is_mtp_verify_decode = (
+            self.args.mtp_step > 0
+            and (not model_input.is_prefill)
+            and model_input.b_num_accepted_tokens is not None
         )
-        new_model_input.b_mtp_index = F.pad(
-            new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
-        )
-        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
-        new_model_input.mem_indexes = F.pad(
-            new_model_input.mem_indexes,
-            (0, padded_batch_size),
-            mode="constant",
-            value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
-        )
+        if is_mtp_verify_decode:
+            mtp_size = self.args.mtp_step + 1
+            assert model_input.batch_size % mtp_size == 0
+            assert new_batch_size % mtp_size == 0
+            assert padded_batch_size % mtp_size == 0
+            padded_req_num = padded_batch_size // mtp_size
+
+            pad_mtp_index = torch.arange(
+                mtp_size,
+                dtype=new_model_input.b_mtp_index.dtype,
+                device=new_model_input.b_mtp_index.device,
+            ).repeat(padded_req_num)
+            pad_seq_len = torch.arange(
+                2,
+                mtp_size + 2,
+                dtype=new_model_input.b_seq_len.dtype,
+                device=new_model_input.b_seq_len.device,
+            ).repeat(padded_req_num)
+            new_model_input.total_token_num += padded_req_num * (
+                mtp_size * (mtp_size + 3) // 2
+            )
+            new_model_input.max_kv_seq_len = max(
+                mtp_size + 1, model_input.max_kv_seq_len
+            )
+            new_model_input.input_ids = torch.cat(
+                (
+                    new_model_input.input_ids,
+                    torch.ones(
+                        padded_batch_size,
+                        dtype=new_model_input.input_ids.dtype,
+                        device=new_model_input.input_ids.device,
+                    ),
+                ),
+                dim=0,
+            )
+            new_model_input.b_req_idx = torch.cat(
+                (
+                    new_model_input.b_req_idx,
+                    torch.full(
+                        (padded_batch_size,),
+                        self.req_manager.HOLD_REQUEST_ID,
+                        dtype=new_model_input.b_req_idx.dtype,
+                        device=new_model_input.b_req_idx.device,
+                    ),
+                ),
+                dim=0,
+            )
+            new_model_input.b_mtp_index = torch.cat(
+                (new_model_input.b_mtp_index, pad_mtp_index), dim=0
+            )
+            new_model_input.b_seq_len = torch.cat(
+                (new_model_input.b_seq_len, pad_seq_len), dim=0
+            )
+            new_model_input.mem_indexes = torch.cat(
+                (
+                    new_model_input.mem_indexes,
+                    torch.full(
+                        (padded_batch_size,),
+                        self.mem_manager.HOLD_TOKEN_MEMINDEX,
+                        dtype=new_model_input.mem_indexes.dtype,
+                        device=new_model_input.mem_indexes.device,
+                    ),
+                ),
+                dim=0,
+            )
+            new_model_input.b_num_accepted_tokens = torch.cat(
+                (
+                    new_model_input.b_num_accepted_tokens,
+                    torch.ones(
+                        padded_req_num,
+                        dtype=new_model_input.b_num_accepted_tokens.dtype,
+                        device=new_model_input.b_num_accepted_tokens.device,
+                    ),
+                ),
+                dim=0,
+            )
+        else:
+            new_model_input.total_token_num += padded_batch_size * 2
+            new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
+            new_model_input.input_ids = F.pad(
+                new_model_input.input_ids,
+                (0, padded_batch_size),
+                mode="constant",
+                value=1,
+            )
+            new_model_input.b_req_idx = F.pad(
+                new_model_input.b_req_idx,
+                (0, padded_batch_size),
+                mode="constant",
+                value=self.req_manager.HOLD_REQUEST_ID,
+            )
+            new_model_input.b_mtp_index = F.pad(
+                new_model_input.b_mtp_index,
+                (0, padded_batch_size),
+                mode="constant",
+                value=0,
+            )
+            new_model_input.b_seq_len = F.pad(
+                new_model_input.b_seq_len,
+                (0, padded_batch_size),
+                mode="constant",
+                value=2,
+            )
+            new_model_input.mem_indexes = F.pad(
+                new_model_input.mem_indexes,
+                (0, padded_batch_size),
+                mode="constant",
+                value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
+            )
         new_model_input.multimodal_params = new_model_input.multimodal_params + [
             {"images": [], "audios": []} for _ in range(padded_batch_size)
         ]
@@ -384,11 +552,17 @@ class TpPartBaseModel:
         if enable_diverse_mode_gqa_decode_fast_kernel():
             if new_model_input.b_shared_seq_len is not None:
                 new_model_input.b_shared_seq_len = F.pad(
-                    new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
+                    new_model_input.b_shared_seq_len,
+                    (0, padded_batch_size),
+                    mode="constant",
+                    value=0,
                 )
             if new_model_input.b_mark_shared_group is not None:
                 new_model_input.b_mark_shared_group = F.pad(
-                    new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
+                    new_model_input.b_mark_shared_group,
+                    (0, padded_batch_size),
+                    mode="constant",
+                    value=1,
                 )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
@@ -401,21 +575,35 @@ class TpPartBaseModel:
         new_model_input.check_input()
         return new_model_input
 
-    def _create_padded_prefill_model_input(self, model_input: ModelInput, new_handle_token_num: int):
-        if model_input.total_token_num - model_input.prefix_total_token_num == new_handle_token_num:
+    def _create_padded_prefill_model_input(
+        self, model_input: ModelInput, new_handle_token_num: int
+    ):
+        if (
+            model_input.total_token_num - model_input.prefix_total_token_num
+            == new_handle_token_num
+        ):
             return model_input
 
-        assert model_input.total_token_num - model_input.prefix_total_token_num < new_handle_token_num
+        assert (
+            model_input.total_token_num - model_input.prefix_total_token_num
+            < new_handle_token_num
+        )
 
-        padded_token_num = new_handle_token_num - (model_input.total_token_num - model_input.prefix_total_token_num)
+        padded_token_num = new_handle_token_num - (
+            model_input.total_token_num - model_input.prefix_total_token_num
+        )
         assert padded_token_num > 0
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = model_input.batch_size + 1
         new_model_input.total_token_num += padded_token_num
         new_model_input.max_q_seq_len = max(padded_token_num, model_input.max_q_seq_len)
-        new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
+        new_model_input.max_kv_seq_len = max(
+            padded_token_num, model_input.max_kv_seq_len
+        )
         new_model_input.max_cache_len = max(0, model_input.max_cache_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_token_num), mode="constant", value=1)
+        new_model_input.input_ids = F.pad(
+            new_model_input.input_ids, (0, padded_token_num), mode="constant", value=1
+        )
         new_model_input.mem_indexes = F.pad(
             new_model_input.mem_indexes,
             (0, padded_token_num),
@@ -423,20 +611,33 @@ class TpPartBaseModel:
             value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
         )
         new_model_input.b_req_idx = F.pad(
-            new_model_input.b_req_idx, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
+            new_model_input.b_req_idx,
+            (0, 1),
+            mode="constant",
+            value=self.req_manager.HOLD_REQUEST_ID,
         )
-        new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
-        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
-        new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
+        new_model_input.b_mtp_index = F.pad(
+            new_model_input.b_mtp_index, (0, 1), mode="constant", value=0
+        )
+        new_model_input.b_seq_len = F.pad(
+            new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num
+        )
+        new_model_input.b_ready_cache_len = F.pad(
+            new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0
+        )
         b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
-        new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
+        new_model_input.b_prefill_start_loc = (
+            b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
+        )
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
-        new_model_input.b_prefill_has_output_cpu = [e for e in new_model_input.b_prefill_has_output_cpu] + [False]
+        new_model_input.b_prefill_has_output_cpu = [
+            e for e in new_model_input.b_prefill_has_output_cpu
+        ] + [False]
         new_model_input.prefix_total_token_num = model_input.prefix_total_token_num
 
-        new_model_input.multimodal_params = [e for e in new_model_input.multimodal_params] + [
-            {"images": [], "audios": []}
-        ]
+        new_model_input.multimodal_params = [
+            e for e in new_model_input.multimodal_params
+        ] + [{"images": [], "audios": []}]
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.mtp_draft_input_hiddens is not None:
@@ -448,7 +649,9 @@ class TpPartBaseModel:
         new_model_input.check_input()
         return new_model_input
 
-    def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
+    def _create_unpad_decode_model_output(
+        self, model_output: ModelOutput, origin_batch_size: int
+    ):
         padded_batch_size = model_output.logits.shape[0]
         if padded_batch_size == origin_batch_size:
             return model_output
@@ -458,12 +661,17 @@ class TpPartBaseModel:
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.mtp_main_output_hiddens is not None:
             _hidden_states = new_model_output.mtp_main_output_hiddens
-            new_model_output.mtp_main_output_hiddens = _hidden_states[0:origin_batch_size]
+            new_model_output.mtp_main_output_hiddens = _hidden_states[
+                0:origin_batch_size
+            ]
 
         return new_model_output
 
     def _create_unpad_prefill_model_output(
-        self, padded_model_output: ModelOutput, origin_handle_token_num: int, origin_batch_size: int
+        self,
+        padded_model_output: ModelOutput,
+        origin_handle_token_num: int,
+        origin_batch_size: int,
     ):
         if self.return_all_prompt_logics:
             new_model_output = copy.copy(padded_model_output)
@@ -476,7 +684,9 @@ class TpPartBaseModel:
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.mtp_main_output_hiddens is not None:
             _hidden_states = new_model_output.mtp_main_output_hiddens
-            new_model_output.mtp_main_output_hiddens = _hidden_states[0:origin_handle_token_num]
+            new_model_output.mtp_main_output_hiddens = _hidden_states[
+                0:origin_handle_token_num
+            ]
 
         return new_model_output
 
@@ -484,7 +694,10 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ):
-        if self.args.enable_prefill_decode_mixed and model_input.b_is_decode_req is not None:
+        if (
+            self.args.enable_prefill_decode_mixed
+            and model_input.b_is_decode_req is not None
+        ):
             gather_token_prefill_decode_mixed(
                 input_ids=model_input.input_ids,
                 req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -494,17 +707,26 @@ class TpPartBaseModel:
                 b_prefill_start_loc=model_input.b_prefill_start_loc,
             )
 
-        origin_handle_token_num = model_input.total_token_num - model_input.prefix_total_token_num
+        origin_handle_token_num = (
+            model_input.total_token_num - model_input.prefix_total_token_num
+        )
         origin_batch_size = model_input.batch_size
 
         if self.args.enable_tpsp_mix_mode:
-            infer_handle_token_num = triton.cdiv(origin_handle_token_num, self.tp_world_size_) * self.tp_world_size_
+            infer_handle_token_num = (
+                triton.cdiv(origin_handle_token_num, self.tp_world_size_)
+                * self.tp_world_size_
+            )
         else:
             infer_handle_token_num = origin_handle_token_num
 
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=infer_handle_token_num):
-            infer_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=infer_handle_token_num
+        if self.prefill_graph is not None and self.prefill_graph.can_run(
+            handle_token_num=infer_handle_token_num
+        ):
+            infer_handle_token_num = (
+                self.prefill_graph.find_closest_graph_handle_token_num(
+                    handle_token_num=infer_handle_token_num
+                )
             )
 
         model_input = self._create_padded_prefill_model_input(
@@ -549,15 +771,18 @@ class TpPartBaseModel:
             )
 
         origin_batch_size = model_input.batch_size
-        if self.args.enable_tpsp_mix_mode:
-            infer_batch_size = triton.cdiv(model_input.batch_size, self.tp_world_size_) * self.tp_world_size_
-        else:
-            infer_batch_size = model_input.batch_size
+        infer_batch_size = self._get_decode_infer_batch_size(model_input)
+        is_mtp_verify_decode = (
+            self.args.mtp_step > 0 and model_input.b_num_accepted_tokens is not None
+        )
 
         if self.graph is not None and self.graph.can_run(
             batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
         ):
-            infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
+            infer_batch_size = self.graph.find_closest_graph_batch_size(
+                batch_size=infer_batch_size,
+                is_mtp_verify_decode=is_mtp_verify_decode,
+            )
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
@@ -571,13 +796,19 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
-            if self.graph.need_capture(infer_batch_size):
+            if self.graph.need_capture(
+                infer_batch_size, is_mtp_verify_decode=is_mtp_verify_decode
+            ):
                 infer_state.is_cuda_graph = True
-                model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
+                model_output: ModelOutput = self.graph.capture_decode(
+                    self._token_forward, infer_state
+                )
             else:
                 model_output: ModelOutput = self.graph.replay(infer_state)
 
-            model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
+            model_output = self._create_unpad_decode_model_output(
+                model_output, origin_batch_size=origin_batch_size
+            )
         else:
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
@@ -592,37 +823,50 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
             model_output = self._token_forward(infer_state)
-            model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
+            model_output = self._create_unpad_decode_model_output(
+                model_output, origin_batch_size=origin_batch_size
+            )
 
         return model_output
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
-        input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
+        input_embs = self.pre_infer.context_forward(
+            infer_state.input_ids, infer_state, self.pre_post_weight
+        )
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
             infer_state.prepare_prefill_dp_balance()
             input_embs = infer_state._all_to_all_balance_get(data=input_embs)
 
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+        input_embs = self.pre_infer._tpsp_sp_split(
+            input=input_embs, infer_state=infer_state
+        )
         input_tensors = [input_embs]
 
         def prefill_func(input_tensors, infer_state):
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
-                _input_embs = layer.context_forward(_input_embs, infer_state, self.trans_layers_weight[i])
+                _input_embs = layer.context_forward(
+                    _input_embs, infer_state, self.trans_layers_weight[i]
+                )
             return [_input_embs]
 
         handle_token_num = infer_state.input_ids.shape[0]
 
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
-            finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=handle_token_num
+        if self.prefill_graph is not None and self.prefill_graph.can_run(
+            handle_token_num=handle_token_num
+        ):
+            finded_handle_token_num = (
+                self.prefill_graph.find_closest_graph_handle_token_num(
+                    handle_token_num=handle_token_num
+                )
             )
             assert finded_handle_token_num == handle_token_num
-            if self.prefill_graph.need_capture(handle_token_num=finded_handle_token_num):
+            if self.prefill_graph.need_capture(
+                handle_token_num=finded_handle_token_num
+            ):
                 output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
                     prefill_func=prefill_func,
                     input_tensors=input_tensors,
@@ -635,21 +879,31 @@ class TpPartBaseModel:
 
         else:
             g_cache_manager.cache_env_in()
-            output_tensors: List[torch.Tensor] = prefill_func(input_tensors, infer_state)
+            output_tensors: List[torch.Tensor] = prefill_func(
+                input_tensors, infer_state
+            )
             g_cache_manager.cache_env_out()
 
         input_embs = output_tensors[0]
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        last_input_embs = self.post_infer._tpsp_allgather(
+            input=input_embs, infer_state=infer_state
+        )
         if infer_state.need_dp_prefill_balance:
-            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
+            last_input_embs = infer_state._all_to_all_unbalance_get(
+                data=last_input_embs
+            )
 
-        predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
+        predict_logits = self.post_infer.token_forward(
+            last_input_embs, infer_state, self.pre_post_weight
+        )
         model_output = ModelOutput(logits=predict_logits)
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+            input_embs = self.pre_infer._tpsp_allgather(
+                input=input_embs, infer_state=infer_state
+            )
             if infer_state.need_dp_prefill_balance:
                 input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
@@ -663,14 +917,22 @@ class TpPartBaseModel:
     def _token_forward(self, infer_state: InferStateInfo):
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
-        input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+        input_embs = self.pre_infer.token_forward(
+            cuda_input_ids, infer_state, self.pre_post_weight
+        )
+        input_embs = self.pre_infer._tpsp_sp_split(
+            input=input_embs, infer_state=infer_state
+        )
 
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
-            input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
+            input_embs: torch.Tensor = layer.token_forward(
+                input_embs, infer_state, self.trans_layers_weight[i]
+            )
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        last_input_embs = self.post_infer._tpsp_allgather(
+            input=input_embs, infer_state=infer_state
+        )
         predict_logits: torch.Tensor = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
@@ -679,7 +941,9 @@ class TpPartBaseModel:
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+            input_embs = self.pre_infer._tpsp_allgather(
+                input=input_embs, infer_state=infer_state
+            )
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
@@ -689,11 +953,16 @@ class TpPartBaseModel:
         return model_output
 
     @torch.no_grad()
-    def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
+    def microbatch_overlap_prefill(
+        self, model_input0: ModelInput, model_input1: ModelInput
+    ):
         model_input0.to_cuda()
         model_input1.to_cuda()
 
-        if self.args.enable_prefill_decode_mixed and model_input0.b_is_decode_req is not None:
+        if (
+            self.args.enable_prefill_decode_mixed
+            and model_input0.b_is_decode_req is not None
+        ):
             gather_token_prefill_decode_mixed(
                 input_ids=model_input0.input_ids,
                 req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -703,7 +972,10 @@ class TpPartBaseModel:
                 b_prefill_start_loc=model_input0.b_prefill_start_loc,
             )
 
-        if self.args.enable_prefill_decode_mixed and model_input1.b_is_decode_req is not None:
+        if (
+            self.args.enable_prefill_decode_mixed
+            and model_input1.b_is_decode_req is not None
+        ):
             gather_token_prefill_decode_mixed(
                 input_ids=model_input1.input_ids,
                 req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -717,10 +989,20 @@ class TpPartBaseModel:
         assert model_input1.mem_indexes.is_cuda
 
         assert self.args.enable_tpsp_mix_mode
-        origin_handle_token_num0 = model_input0.total_token_num - model_input0.prefix_total_token_num
-        origin_handle_token_num1 = model_input1.total_token_num - model_input1.prefix_total_token_num
-        infer_handle_token_num0 = triton.cdiv(origin_handle_token_num0, self.tp_world_size_) * self.tp_world_size_
-        infer_handle_token_num1 = triton.cdiv(origin_handle_token_num1, self.tp_world_size_) * self.tp_world_size_
+        origin_handle_token_num0 = (
+            model_input0.total_token_num - model_input0.prefix_total_token_num
+        )
+        origin_handle_token_num1 = (
+            model_input1.total_token_num - model_input1.prefix_total_token_num
+        )
+        infer_handle_token_num0 = (
+            triton.cdiv(origin_handle_token_num0, self.tp_world_size_)
+            * self.tp_world_size_
+        )
+        infer_handle_token_num1 = (
+            triton.cdiv(origin_handle_token_num1, self.tp_world_size_)
+            * self.tp_world_size_
+        )
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
 
@@ -760,7 +1042,9 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
-        model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
+        model_output0, model_output1 = self._overlap_tpsp_context_forward(
+            infer_state0, infer_state1=infer_state1
+        )
 
         model_output0 = self._create_unpad_prefill_model_output(
             padded_model_output=model_output0,
@@ -780,7 +1064,9 @@ class TpPartBaseModel:
         return model_output0, model_output1
 
     @torch.no_grad()
-    def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
+    def microbatch_overlap_decode(
+        self, model_input0: ModelInput, model_input1: ModelInput
+    ):
         model_input0.to_cuda()
         model_input1.to_cuda()
         assert self.args.enable_tpsp_mix_mode
@@ -804,14 +1090,26 @@ class TpPartBaseModel:
 
         origin_batch_size = model_input0.batch_size
         max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
-        infer_batch_size = triton.cdiv(origin_batch_size, self.tp_world_size_) * self.tp_world_size_
+        infer_batch_size = self._get_decode_infer_batch_size(model_input0)
+        is_mtp_verify_decode = (
+            self.args.mtp_step > 0 and model_input0.b_num_accepted_tokens is not None
+        )
 
-        if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
-            infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
+        if self.graph is not None and self.graph.can_run(
+            infer_batch_size, max_len_in_batch
+        ):
+            infer_batch_size = self.graph.find_closest_graph_batch_size(
+                infer_batch_size,
+                is_mtp_verify_decode=is_mtp_verify_decode,
+            )
             # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
-            padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
-            padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
+            padded_model_input0 = self._create_padded_decode_model_input(
+                model_input0, infer_batch_size
+            )
+            padded_model_input1 = self._create_padded_decode_model_input(
+                model_input1, infer_batch_size
+            )
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -832,7 +1130,9 @@ class TpPartBaseModel:
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
-            if self.graph.need_capture(infer_batch_size):
+            if self.graph.need_capture(
+                infer_batch_size, is_mtp_verify_decode=is_mtp_verify_decode
+            ):
                 infer_state0.is_cuda_graph = True
                 infer_state1.is_cuda_graph = True
 
@@ -848,11 +1148,19 @@ class TpPartBaseModel:
                 )
 
             # TODO 动态 mtp fix
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
+            model_output0 = self._create_unpad_decode_model_output(
+                model_output0, origin_batch_size=origin_batch_size
+            )
+            model_output1 = self._create_unpad_decode_model_output(
+                model_output1, origin_batch_size=origin_batch_size
+            )
         else:
-            model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
-            model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
+            model_input0 = self._create_padded_decode_model_input(
+                model_input0, infer_batch_size
+            )
+            model_input1 = self._create_padded_decode_model_input(
+                model_input1, infer_batch_size
+            )
             infer_state0 = self._create_inferstate(model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -873,18 +1181,30 @@ class TpPartBaseModel:
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
-            model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
+            model_output0, model_output1 = self._overlap_tpsp_token_forward(
+                infer_state0, infer_state1=infer_state1
+            )
+            model_output0 = self._create_unpad_decode_model_output(
+                model_output0, origin_batch_size=origin_batch_size
+            )
+            model_output1 = self._create_unpad_decode_model_output(
+                model_output1, origin_batch_size=origin_batch_size
+            )
 
         return model_output0, model_output1
 
     @final
-    def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
+    def _overlap_tpsp_context_forward(
+        self, infer_state: InferStateInfo, infer_state1: InferStateInfo
+    ):
         g_cache_manager.cache_env_in()
 
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
-            infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
+            infer_state.input_ids,
+            infer_state1.input_ids,
+            infer_state,
+            infer_state1,
+            self.pre_post_weight,
         )
 
         # 决定是否进行 dp balance 优化，可以提升dp > 1 时的 prefill 效率。
@@ -895,26 +1215,46 @@ class TpPartBaseModel:
             input_embs = infer_state._all_to_all_balance_get(data=input_embs)
             input_embs1 = infer_state1._all_to_all_balance_get(data=input_embs1)
 
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
-        input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
+        input_embs = self.pre_infer._tpsp_sp_split(
+            input=input_embs, infer_state=infer_state
+        )
+        input_embs1 = self.pre_infer._tpsp_sp_split(
+            input=input_embs1, infer_state=infer_state1
+        )
 
         for i in range(self.layers_num):
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
-                input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
+                input_embs,
+                input_embs1,
+                infer_state,
+                infer_state1,
+                self.trans_layers_weight[i],
             )
 
         # 折叠模式调用完infer_state 和 infer_state1 上的hook函数后，input_embs 和 input_embs1 才具备正确的运算数据。
         infer_state.call_overlap_hook()
         infer_state1.call_overlap_hook()
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+        last_input_embs = self.post_infer._tpsp_allgather(
+            input=input_embs, infer_state=infer_state
+        )
+        last_input_embs1 = self.post_infer._tpsp_allgather(
+            input=input_embs1, infer_state=infer_state1
+        )
         if infer_state.need_dp_prefill_balance:
-            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
-            last_input_embs1 = infer_state1._all_to_all_unbalance_get(data=last_input_embs1)
+            last_input_embs = infer_state._all_to_all_unbalance_get(
+                data=last_input_embs
+            )
+            last_input_embs1 = infer_state1._all_to_all_unbalance_get(
+                data=last_input_embs1
+            )
 
         predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
-            last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
+            last_input_embs,
+            last_input_embs1,
+            infer_state,
+            infer_state1,
+            self.pre_post_weight,
         )
         g_cache_manager.cache_env_out()
 
@@ -922,8 +1262,12 @@ class TpPartBaseModel:
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+            input_embs = self.pre_infer._tpsp_allgather(
+                input=input_embs, infer_state=infer_state
+            )
+            input_embs1 = self.pre_infer._tpsp_allgather(
+                input=input_embs1, infer_state=infer_state1
+            )
             if infer_state.need_dp_prefill_balance:
                 input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
                 input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
@@ -933,35 +1277,61 @@ class TpPartBaseModel:
         return model_output, model_output1
 
     @final
-    def _overlap_tpsp_token_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
+    def _overlap_tpsp_token_forward(
+        self, infer_state: InferStateInfo, infer_state1: InferStateInfo
+    ):
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
-            infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
+            infer_state.input_ids,
+            infer_state1.input_ids,
+            infer_state,
+            infer_state1,
+            self.pre_post_weight,
         )
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
-        input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
+        input_embs = self.pre_infer._tpsp_sp_split(
+            input=input_embs, infer_state=infer_state
+        )
+        input_embs1 = self.pre_infer._tpsp_sp_split(
+            input=input_embs1, infer_state=infer_state1
+        )
 
         for i in range(self.layers_num):
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
-                input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
+                input_embs,
+                input_embs1,
+                infer_state,
+                infer_state1,
+                self.trans_layers_weight[i],
             )
 
         # 折叠模式调用完infer_state 上的hook函数后，input_embs 和 input_embs 才具备正确的运算数据。
         infer_state.call_overlap_hook()
         infer_state1.call_overlap_hook()
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+        last_input_embs = self.post_infer._tpsp_allgather(
+            input=input_embs, infer_state=infer_state
+        )
+        last_input_embs1 = self.post_infer._tpsp_allgather(
+            input=input_embs1, infer_state=infer_state1
+        )
 
         predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
-            last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
+            last_input_embs,
+            last_input_embs1,
+            infer_state,
+            infer_state1,
+            self.pre_post_weight,
         )
 
         model_output = ModelOutput(logits=predict_logits.contiguous())
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+            input_embs = self.pre_infer._tpsp_allgather(
+                input=input_embs, infer_state=infer_state
+            )
+            input_embs1 = self.pre_infer._tpsp_allgather(
+                input=input_embs1, infer_state=infer_state1
+            )
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
             model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
@@ -974,7 +1344,9 @@ class TpPartBaseModel:
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
-        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
+        disable_check_max_len_infer = (
+            os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
+        )
         if disable_check_max_len_infer:
             logger.info("disable_check_max_len_infer is true")
             return
@@ -985,8 +1357,12 @@ class TpPartBaseModel:
         # 模拟最大长度进行 prefill，观察是否出现 OOM
         try:
             logger.info("begin check max_len infer")
-            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int32, device="cuda")
-            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+            dummy_input_ids = torch.ones(
+                self.batch_max_tokens, dtype=torch.int32, device="cuda"
+            )
+            b_req_idx = torch.tensor(
+                [self.req_manager.alloc()], dtype=torch.int32, device="cuda"
+            )
             mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
@@ -1060,9 +1436,16 @@ class TpPartBaseModel:
                 rand_gen = torch.Generator(device="cuda")
                 rand_gen.manual_seed(input_len)
                 dummy_input_ids = torch.randint(
-                    0, 10000, (input_len,), dtype=torch.int32, device="cuda", generator=rand_gen
+                    0,
+                    10000,
+                    (input_len,),
+                    dtype=torch.int32,
+                    device="cuda",
+                    generator=rand_gen,
                 )
-                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                b_req_idx = torch.tensor(
+                    [self.req_manager.alloc()], dtype=torch.int32, device="cuda"
+                )
                 mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
@@ -1100,7 +1483,9 @@ class TpPartBaseModel:
                 gc.collect()
                 torch.cuda.empty_cache()
             except Exception as e:
-                logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
+                logger.warning(
+                    f"autotune warmup for length {input_len} failed: {str(e)}"
+                )
                 logger.exception(str(e))
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
@@ -1124,10 +1509,14 @@ class TpPartBaseModel:
         batch_size = 1
         dummy_input_ids = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
         b_req_idx = torch.tensor(
-            [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+            [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)],
+            dtype=torch.int32,
+            device="cuda",
         )
         mem_indexes = torch.tensor(
-            [self.mem_manager.HOLD_TOKEN_MEMINDEX for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+            [self.mem_manager.HOLD_TOKEN_MEMINDEX for _ in range(batch_size)],
+            dtype=torch.int32,
+            device="cuda",
         )
         b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
         b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
@@ -1176,10 +1565,15 @@ class TpPartBaseModel:
             or "Qwen3MOEMTPModel" in str(self.__class__)
             or "MistralMTPModel" in str(self.__class__)
             or "Glm4MoeLiteMTPModel" in str(self.__class__)
+            or "Qwen3_5MTPModel" in str(self.__class__)
+            or "Qwen3_5MoeMTPModel" in str(self.__class__)
         )
         if is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
-                token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
+                token_num,
+                self.config["hidden_size"],
+                dtype=self.data_type,
+                device="cuda",
             )
         else:
             special_model_input["mtp_draft_input_hiddens"] = None

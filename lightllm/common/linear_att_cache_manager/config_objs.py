@@ -8,6 +8,15 @@ from lightllm.utils.torch_dtype_utils import get_torch_dtype
 logger = init_logger(__name__)
 
 
+def get_mtp_draft_full_att_layer_num(args) -> int:
+    mtp_mode = getattr(args, "mtp_mode", None)
+    if mtp_mode == "eagle_with_att":
+        return 1
+    if mtp_mode == "vanilla_with_att":
+        return getattr(args, "mtp_step", 0)
+    return 0
+
+
 @dataclasses.dataclass
 class LinearAttCacheConfig:
     tp_world_size: int
@@ -28,9 +37,18 @@ class LinearAttCacheConfig:
     ssm_state_dtype: torch.dtype
     full_attention_interval: int
     all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
+    draft_full_att_layer_num: int = 0
 
     def get_conv_dim(self):
         return self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
+
+    def get_main_full_att_layer_num(self):
+        main_full_att_layer_num = self.all_layer_num - self.linear_layer_num
+        assert main_full_att_layer_num == self.all_layer_num // self.full_attention_interval
+        return main_full_att_layer_num
+
+    def get_persisted_full_att_layer_num(self):
+        return self.get_main_full_att_layer_num() + self.draft_full_att_layer_num
 
     def get_persisted_conv_state_shape(self):
         # NARROW shape used for the CPU/disk persisted page and ALL byte math.
@@ -71,7 +89,7 @@ class LinearAttCacheConfig:
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
         full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
-        a = full_att_bytes * (self.all_layer_num - self.linear_layer_num) * big_page_token_num
+        a = full_att_bytes * self.get_persisted_full_att_layer_num() * big_page_token_num
         return a
 
     def get_cpu_cache_conv_bytes(self):
@@ -116,4 +134,5 @@ class LinearAttCacheConfig:
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=llm_config["full_attention_interval"],
             all_layer_num=n_layer,
+            draft_full_att_layer_num=get_mtp_draft_full_att_layer_num(args),
         )

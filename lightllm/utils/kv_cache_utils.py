@@ -121,6 +121,8 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
         if is_linear_att_mixed_model(args.model_dir):
+            # Linear mixed models use one packed byte page; MTP draft full-attn
+            # slots are accounted in LinearAttCacheConfig.get_cpu_cache_big_page_bytes().
             pass
         else:
             cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()

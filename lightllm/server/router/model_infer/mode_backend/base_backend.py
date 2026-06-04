@@ -359,6 +359,16 @@ class ModeBackend:
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
+            elif model_type in ("qwen3_5", "qwen3_5_text"):
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+
+                self.draft_models.append(Qwen3_5MTPModel(mtp_model_kvargs))
+            elif model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
+
+                self.draft_models.append(Qwen3_5MoeMTPModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 
@@ -604,7 +614,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -785,11 +794,35 @@ class ModeBackend:
         )
         return mtp_accept_len, accepted_index
 
+    def _commit_mtp_accept_len(
+        self,
+        decode_reqs: List[InferReq],
+        mtp_accept_len_cpu: torch.Tensor,
+    ):
+        # Carry the per-req accept count into the NEXT step as the canonical
+        # pointer (design §3.1). This must run on every rank (not only master):
+        # the kernels on this rank read req.mtp_accept_len.
+        #
+        # CRITICAL ordering (overlap scheduler): the next step's decode_mtp reads
+        # req.mtp_accept_len (to build b_num_accepted_tokens) the moment its
+        # wait_to_forward() is released, which happens at THIS step's
+        # notify_forward_and_wait_post_handle() (start of phase 3). So this carry
+        # MUST be committed in phase 2 (pre_post_handle), before that release —
+        # otherwise the next step reads a one-step-stale accept count. The error
+        # is invisible while accept_len is constant (==1) and corrupts the GDN
+        # conv/ssm committed-state read-offset the instant a multi-token accept
+        # (accept_len>=2) occurs.
+        for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
+            req.mtp_accept_len = int(accept_len)
+        return
+
     def _update_mtp_accept_ratio(
         self,
         decode_reqs: List[InferReq],
         mtp_accept_len_cpu: torch.Tensor,
     ):
+        # Master-only accept-ratio statistics. Unlike _commit_mtp_accept_len this
+        # only feeds metrics, so it may stay in the phase-3 post_handle region.
         if self.is_master_in_dp:
             for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
@@ -811,7 +844,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

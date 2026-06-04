@@ -45,7 +45,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _init_linear_layer_metadata(self, layer_num, network_config):
-
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
         self.num_k_heads = network_config["linear_num_key_heads"]
@@ -121,7 +120,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_tp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-
         shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
 
         hidden_states = input.view(-1, self.embed_dim_)
@@ -254,6 +252,18 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if is_prefill:
             core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
+        elif getattr(infer_state, "is_mtp_verify", False):
+            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+            conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+            core_attn_out = self._gdn_verify_kernel(
+                mixed_qkv,
+                conv_states,
+                ssm_states,
+                a,
+                b,
+                infer_state,
+                layer_weight,
+            )
         else:
             mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
             conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
@@ -374,7 +384,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.mm_param.weight,
             bias=layer_weight.linear_conv1d.bias,
             query_start_loc=infer_state.b1_cu_q_seq_len,
-            cache_indices=infer_state.b_buffer_idx,
+            cache_indices=infer_state.b_conv_buffer_idx,
             has_initial_state=infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=self.activation,
@@ -419,7 +429,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.mm_param.weight,
             bias=layer_weight.linear_conv1d.bias,
             activation=self.activation,
-            conv_state_indices=infer_state.b_buffer_idx,
+            conv_state_indices=infer_state.b_conv_buffer_idx,
         )
 
         # Recurrent processing with fused gating; the kernel reads the
@@ -432,6 +442,61 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             initial_state=ssm_states,
             inplace_final_state=True,
             ssm_state_indices=infer_state.b_buffer_idx,
+            use_qk_l2norm_in_kernel=True,
+            A_log=layer_weight.linear_A_log.weight,
+            dt_bias=layer_weight.linear_dt_bias.weight,
+            a_raw=a,
+            b_raw=b,
+        )
+        return core_attn_out
+
+    def _gdn_verify_kernel(
+        self,
+        mixed_qkv: torch.Tensor,
+        conv_states: torch.Tensor,
+        ssm_states: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        infer_state: Qwen3NextInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ):
+        from lightllm.models.qwen3next.triton_kernel.causal_conv1d_spec import (
+            causal_conv1d_update as causal_conv1d_update_spec,
+        )
+
+        # Spec conv: history read from offset (num_accepted-1) of the single widened
+        # conv slot per request (b_conv_buffer_idx), grouping each request's S+1
+        # candidates via the GDN-specific cu_seqlens.
+        mixed_qkv = causal_conv1d_update_spec(
+            mixed_qkv,
+            conv_states,
+            layer_weight.linear_conv1d.mm_param.weight,
+            bias=layer_weight.linear_conv1d.bias,
+            activation=self.activation,
+            conv_state_indices=infer_state.b_conv_buffer_idx,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
+            query_start_loc=infer_state.b_gdn_verify_cu_seqlens,
+        )
+
+        # Varlen recurrent: each request's S+1 candidates are contiguous in the
+        # flattened batch, so use the prefill-style rearrange (decode=False) which
+        # produces the [1, total_tokens, H, *] flattened layout the cu_seqlens
+        # varlen path requires (q.shape[0] == 1). decode=True would instead give
+        # [total_tokens, 1, H, *], which the varlen kernel rejects.
+        query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
+        assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
+        if not torch.cuda.is_current_stream_capturing():
+            assert (infer_state.b_num_accepted_tokens >= 1).all(), "num_accepted must be >= 1"
+        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+            q=query,
+            k=key,
+            v=value,
+            initial_state=ssm_states,
+            inplace_final_state=True,
+            cu_seqlens=infer_state.b_gdn_verify_cu_seqlens.to(torch.long),
+            ssm_state_indices=infer_state.b_ssm_index_rows,
+            ssm_state_write_indices=infer_state.b_ssm_index_rows,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
             use_qk_l2norm_in_kernel=True,
             A_log=layer_weight.linear_A_log.weight,
             dt_bias=layer_weight.linear_dt_bias.weight,

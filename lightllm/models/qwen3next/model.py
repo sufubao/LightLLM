@@ -23,7 +23,6 @@ logger = init_logger(__name__)
 
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
-
     # weight class
     pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
@@ -80,15 +79,35 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             all_layer_num=self.config["n_layer"],
         )
 
+        # Main-model full-attn KV layer count (layers 3,7,...,63 -> slots 0..M-1 for
+        # full_attention_interval=4, n_layer=64 -> M=16). The CPU/disk cache persists ONLY
+        # this main slice (see Task 8.2); draft KV is speculative and never persisted.
+        main_full_att = self.linear_config.all_layer_num - self.linear_config.linear_layer_num
+        # MTP draft model adds DEDICATED full-attn KV slots that must NOT collide with the
+        # main slots [0, main_full_att). vanilla_with_att adds `mtp_step` extra layers,
+        # eagle_with_att adds 1; non-MTP launches add 0 -> no behavior change.
+        draft_full_att_layers = 0
+        if start_args.mtp_mode == "eagle_with_att":
+            draft_full_att_layers = 1
+        elif start_args.mtp_mode == "vanilla_with_att":
+            draft_full_att_layers = start_args.mtp_step
+        self._main_full_att_layer_num = main_full_att
+        self._draft_full_att_layers = draft_full_att_layers
+
         self.mem_manager = Qwen3NextMemManager(
             size=self.max_total_token_num,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.config["head_dim"],
-            full_att_layer_num=self.linear_config.all_layer_num - self.linear_config.linear_layer_num,
+            # Size the kv buffer for main + dedicated draft full-attn slots.
+            full_att_layer_num=main_full_att + draft_full_att_layers,
             linear_config=self.linear_config,
             mem_fraction=self.mem_fraction,
         )
+        # Expose the main-slice boundary on the mem_manager so the CPU-copy paths can persist
+        # only the main full-attn slice and the draft can map to slots >= main_full_att.
+        self.mem_manager.main_full_att_layer_num = main_full_att
+        self.mem_manager.draft_full_att_layers = draft_full_att_layers
 
     def _init_req_manager(self):
         create_max_seq_len = 0

@@ -193,6 +193,9 @@ def copy_kv_buffer_to_cpu_cache(
     cpu_kv_ssm_tail_dim = cpu_kv_ssm_state.shape[-1]
     full_att_layer_num = gpu_kv_full_att_state.shape[-2]
 
+    # The caller passes only the MAIN full-attn slice mem_manager.kv_buffer[:main_full_att]
+    # (MTP draft slots are excluded -- speculative KV is never persisted). Assert the sliced
+    # layer count matches the main full-att page layer count.
     assert (
         full_att_layer_num
         == (linear_config.all_layer_num // linear_config.full_attention_interval)
@@ -388,7 +391,6 @@ def copy_cpu_cache_to_kv_buffer(
     linear_config: LinearAttCacheConfig,
     grid_num: int = 12,
 ):
-
     assert len(mem_indexes) % len(page_indexes) == 0
 
     BLOCK = 4096
@@ -428,6 +430,14 @@ def copy_cpu_cache_to_kv_buffer(
     cpu_kv_ssm_tail_dim = cpu_kv_ssm_state.shape[-1]
     full_att_layer_num = gpu_full_att_kv_state.shape[-2]
 
+    # The caller passes only the MAIN full-attn slice mem_manager.kv_buffer[:main_full_att]
+    # (MTP draft slots are excluded -- speculative KV is never restored from cache). Assert the
+    # sliced layer count matches the main full-att page layer count.
+    assert (
+        full_att_layer_num
+        == (linear_config.all_layer_num // linear_config.full_attention_interval)
+        == (linear_config.all_layer_num - linear_config.linear_layer_num)
+    )
     assert gpu_full_att_tail_dim == cpu_cache_full_att.shape[-1]
     assert cpu_cache_conv.shape[-1] == cpu_kv_conv_state.shape[-1]
     assert cpu_cache_ssm.shape[-1] == cpu_kv_ssm_state.shape[-1]

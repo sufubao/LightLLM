@@ -41,8 +41,23 @@ class LinearAttCacheConfig:
             + self.head_linear_v_dim * self.num_linear_v_heads
         )
 
-    def get_conv_state_shape(self):
+    def get_persisted_conv_state_shape(self):
+        # NARROW shape used for the CPU/disk persisted page and ALL byte math.
+        # Persisted state is always the committed (narrow) sliding window.
         return (self.get_conv_dim(), self.conv_kernel_size - 1)
+
+    def get_gpu_conv_state_shape(self, mtp_step: int):
+        # WIDENED working shape for the GPU buffer: holds the tentatively
+        # rolled-in S speculative tokens before acceptance. width-1 + S, where
+        # S = mtp_step (a verify step has seqlen=S+1 -> width-1+(seqlen-1)).
+        # Design §3.3. mtp_step=0 -> same as narrow (back-compat).
+        return (self.get_conv_dim(), (self.conv_kernel_size - 1) + mtp_step)
+
+    # Backward-compatible alias: anything that persists / sizes the CPU page
+    # must use the NARROW shape. Kept as the default so existing callers stay
+    # correct; the GPU buffer alloc is migrated to get_gpu_conv_state_shape.
+    def get_conv_state_shape(self):
+        return self.get_persisted_conv_state_shape()
 
     def get_ssm_state_shape(self):
         return (self.num_linear_v_heads, self.head_linear_k_dim, self.head_linear_v_dim)
@@ -66,6 +81,9 @@ class LinearAttCacheConfig:
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
         full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
+        # `all_layer_num` is the MAIN model layer count only; MTP draft full-attn layers are NOT
+        # included here, so the CPU/disk page sizes the MAIN full-attn slice only -- draft KV is
+        # speculative and intentionally never persisted. Do not add draft layers to this term.
         a = full_att_bytes * (self.all_layer_num - self.linear_layer_num) * big_page_token_num
         return a
 

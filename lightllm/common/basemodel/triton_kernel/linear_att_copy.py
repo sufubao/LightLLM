@@ -5,12 +5,13 @@ import triton.language as tl
 
 @triton.jit
 def _copy_linear_att_state_to_kv_buffer(
-    gpu_conv_ptr,  # [linear_layer_num, size_num, xdim]
+    gpu_conv_ptr,  # [linear_layer_num, size_num, conv_dim * gpu_widened_width] (uint8 tail)
     gpu_ssm_ptr,  # [linear_layer_num, size_num, xxdim]
-    cpu_kv_conv_ptr,  # [size, linear_layer_num, xdim]
+    cpu_kv_conv_ptr,  # [size, linear_layer_num, conv_dim * width_narrow] (uint8 tail)
     cpu_kv_ssm_ptr,  # [size, linear_layer_num, xxdim]
     b_req_idx,  # [batch_size,]
     big_page_buffer_ids,  # [batch_size,]
+    num_accepted_tokens_ptr,  # [batch_size,]
     gpu_conv_stride_l,
     gpu_conv_stride_s,
     gpu_conv_stride_d,
@@ -24,7 +25,9 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_kv_ssm_stride_l,
     cpu_kv_ssm_stride_d,
     mtp_step,
-    gpu_conv_tail_dim,
+    conv_dim,  # number of conv rows (the d dimension)
+    gpu_conv_row_bytes,  # widened per-row byte length: gpu_widened_width * itemsize
+    conv_narrow_row_bytes,  # narrow per-row byte length: width_narrow * itemsize
     gpu_ssm_tail_dim,
     BLOCK: tl.constexpr,
 ):
@@ -40,28 +43,37 @@ def _copy_linear_att_state_to_kv_buffer(
         return
 
     cur_req_idx = tl.load(b_req_idx + cur_batch).to(tl.int64)
-    cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
+    accept_len = tl.load(num_accepted_tokens_ptr + cur_batch).to(tl.int64)
+    canonical_off = accept_len - 1
 
-    for i in range(tl.cdiv(gpu_conv_tail_dim, BLOCK)):
-        gpu_start_off = i * BLOCK + tl.arange(0, BLOCK)
-        mask = gpu_start_off < gpu_conv_tail_dim
-        conv_data = tl.load(
-            gpu_conv_ptr + cur_layer * gpu_conv_stride_l + cur_state_req_idx * gpu_conv_stride_s + gpu_start_off,
-            mask=mask,
-        )
-        dest_conv_ptr = (
-            cpu_kv_conv_ptr
-            + big_page_buffer_idx * cpu_kv_conv_stride_s
-            + cur_layer * cpu_kv_conv_stride_l
-            + gpu_start_off
-        )
-        tl.store(dest_conv_ptr, conv_data, mask=mask)
+    # --- conv snapshot ---
+    # conv is a single WIDENED slot keyed by req_idx (asymmetric layout, §3.4).
+    # The committed NARROW window of byte length conv_narrow_row_bytes sits at
+    # byte offset canonical_off * itemsize inside each widened row. The flattened
+    # uint8 tail lays out element [d, w] at d * gpu_conv_row_bytes + w (bytes),
+    # so the narrow window is strided per row: copy row-by-row.
+    conv_src_slot = cur_req_idx
+    # gpu_conv_stride_d carries the per-element byte size (itemsize); the narrow
+    # window starts canonical_off elements into the widened row.
+    conv_off_bytes = canonical_off * gpu_conv_stride_d
+    gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + conv_src_slot * gpu_conv_stride_s + conv_off_bytes
+    cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
+    for d in range(conv_dim):
+        for i in range(tl.cdiv(conv_narrow_row_bytes, BLOCK)):
+            off = i * BLOCK + tl.arange(0, BLOCK)
+            mask = off < conv_narrow_row_bytes
+            conv_data = tl.load(gpu_conv_base + d * gpu_conv_row_bytes + off, mask=mask)
+            tl.store(cpu_conv_base + d * cpu_kv_conv_stride_d + off, conv_data, mask=mask)
 
+    # --- ssm snapshot ---
+    # ssm is an (S+1) BLOCK per request; the committed block slot is
+    # req_idx * (mtp_step + 1) + canonical_off.
+    ssm_src_slot = (cur_req_idx * (mtp_step + 1) + canonical_off).to(tl.int64)
     for i in range(tl.cdiv(gpu_ssm_tail_dim, BLOCK)):
         gpu_start_off = i * BLOCK + tl.arange(0, BLOCK)
         mask = gpu_start_off < gpu_ssm_tail_dim
         ssm_data = tl.load(
-            gpu_ssm_ptr + cur_layer * gpu_ssm_stride_l + cur_state_req_idx * gpu_ssm_stride_s + gpu_start_off,
+            gpu_ssm_ptr + cur_layer * gpu_ssm_stride_l + ssm_src_slot * gpu_ssm_stride_s + gpu_start_off,
             mask=mask,
         )
         dest_ssm_ptr = (
@@ -75,32 +87,43 @@ def _copy_linear_att_state_to_kv_buffer(
 def copy_linear_att_state_to_kv_buffer(
     b_req_idx: torch.Tensor,
     big_page_buffer_ids: torch.Tensor,
-    gpu_conv_state: torch.Tensor,  # [linear_layer_num, s, ...]
-    gpu_ssm_state: torch.Tensor,  # [linear_layer_num, s, ...]
-    cpu_kv_conv_state: torch.Tensor,  # [s, linear_layer_num, ...]
-    cpu_kv_ssm_state: torch.Tensor,  # [s, linear_layer_num, ...]
+    gpu_conv_state: torch.Tensor,  # [linear_layer_num, s_widened, conv_dim, gpu_widened_width]
+    gpu_ssm_state: torch.Tensor,  # [linear_layer_num, s_block, ...]
+    cpu_kv_conv_state: torch.Tensor,  # [size, linear_layer_num, conv_dim, width_narrow]
+    cpu_kv_ssm_state: torch.Tensor,  # [size, linear_layer_num, ...]
     mtp_step: int,
+    b_num_accepted_tokens: torch.Tensor,  # [batch_size,] per-req post-accept count (>=1)
 ):
     assert len(b_req_idx) == big_page_buffer_ids.shape[0]
+    assert len(b_req_idx) == b_num_accepted_tokens.shape[0]
     BLOCK = 4096
-    gpu_conv_state = gpu_conv_state.view(gpu_conv_state.shape[0], gpu_conv_state.shape[1], -1).view(dtype=torch.uint8)
+
+    # Conv: keep the (conv_dim, width) tail un-flattened so the committed narrow
+    # window can be read per row at the canonical offset (the window is strided
+    # in the flattened widened layout). Capture itemsize BEFORE the uint8 view to
+    # convert the element-unit canonical offset into a byte offset.
+    assert gpu_conv_state.dim() >= 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
+    assert cpu_kv_conv_state.dim() >= 4, "cpu_kv_conv_state must be [size, layer, conv_dim, width_narrow]"
+    conv_itemsize = gpu_conv_state.element_size()
+    gpu_conv_state = gpu_conv_state.view(
+        gpu_conv_state.shape[0], gpu_conv_state.shape[1], gpu_conv_state.shape[2], -1
+    ).view(dtype=torch.uint8)
+    cpu_kv_conv_state = cpu_kv_conv_state.view(
+        cpu_kv_conv_state.shape[0], cpu_kv_conv_state.shape[1], cpu_kv_conv_state.shape[2], -1
+    ).view(dtype=torch.uint8)
+
     gpu_ssm_state = gpu_ssm_state.view(gpu_ssm_state.shape[0], gpu_ssm_state.shape[1], -1).view(dtype=torch.uint8)
-    cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], cpu_kv_conv_state.shape[1], -1).view(
-        dtype=torch.uint8
-    )
     cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], cpu_kv_ssm_state.shape[1], -1).view(
         dtype=torch.uint8
     )
-    assert gpu_conv_state.shape[-1] == cpu_kv_conv_state.shape[-1]
-    assert gpu_ssm_state.shape[-1] == cpu_kv_ssm_state.shape[-1]
-    assert (
-        gpu_conv_state.stride(-1)
-        == gpu_ssm_state.stride(-1)
-        == cpu_kv_conv_state.stride(-1)
-        == cpu_kv_ssm_state.stride(-1)
-    )
 
-    gpu_conv_tail_dim = gpu_conv_state.shape[-1]
+    assert gpu_conv_state.shape[2] == cpu_kv_conv_state.shape[2], "conv_dim mismatch between gpu and cpu conv buffers"
+    assert gpu_ssm_state.shape[-1] == cpu_kv_ssm_state.shape[-1]
+
+    conv_dim = gpu_conv_state.shape[2]
+    gpu_conv_row_bytes = gpu_conv_state.shape[-1]  # widened per-row byte length
+    conv_narrow_row_bytes = cpu_kv_conv_state.shape[-1]  # narrow per-row byte length
+    assert conv_narrow_row_bytes <= gpu_conv_row_bytes
     gpu_ssm_tail_dim = gpu_ssm_state.shape[-1]
 
     layer_num = gpu_conv_state.shape[0]
@@ -114,9 +137,10 @@ def copy_linear_att_state_to_kv_buffer(
         cpu_kv_ssm_ptr=cpu_kv_ssm_state,
         b_req_idx=b_req_idx,
         big_page_buffer_ids=big_page_buffer_ids,
+        num_accepted_tokens_ptr=b_num_accepted_tokens,
         gpu_conv_stride_l=gpu_conv_state.stride(0),
         gpu_conv_stride_s=gpu_conv_state.stride(1),
-        gpu_conv_stride_d=gpu_conv_state.stride(2),
+        gpu_conv_stride_d=conv_itemsize,
         gpu_ssm_stride_l=gpu_ssm_state.stride(0),
         gpu_ssm_stride_s=gpu_ssm_state.stride(1),
         gpu_ssm_stride_d=gpu_ssm_state.stride(2),
@@ -127,7 +151,9 @@ def copy_linear_att_state_to_kv_buffer(
         cpu_kv_ssm_stride_l=cpu_kv_ssm_state.stride(1),
         cpu_kv_ssm_stride_d=cpu_kv_ssm_state.stride(2),
         mtp_step=mtp_step,
-        gpu_conv_tail_dim=gpu_conv_tail_dim,
+        conv_dim=conv_dim,
+        gpu_conv_row_bytes=gpu_conv_row_bytes,
+        conv_narrow_row_bytes=conv_narrow_row_bytes,
         gpu_ssm_tail_dim=gpu_ssm_tail_dim,
         BLOCK=BLOCK,
     )

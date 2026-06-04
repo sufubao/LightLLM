@@ -32,8 +32,22 @@ class LinearAttCacheConfig:
     def get_conv_dim(self):
         return self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
 
-    def get_conv_state_shape(self):
+    def get_persisted_conv_state_shape(self):
+        # NARROW shape used for the CPU/disk persisted page and ALL byte math.
+        # Persisted state is always the committed (narrow) sliding window.
         return (self.get_conv_dim(), self.conv_kernel_size - 1)
+
+    def get_gpu_conv_state_shape(self, mtp_step: int):
+        # WIDENED working shape for the GPU buffer: holds the tentatively
+        # rolled-in S speculative tokens before acceptance. width-1 + S, where
+        # S = mtp_step (a verify step has seqlen=S+1 -> width-1+(seqlen-1)).
+        return (self.get_conv_dim(), (self.conv_kernel_size - 1) + mtp_step)
+
+    # Backward-compatible alias: anything that persists / sizes the CPU page
+    # must use the NARROW shape. Kept as the default so existing callers stay
+    # correct; the GPU buffer alloc is migrated to get_gpu_conv_state_shape.
+    def get_conv_state_shape(self):
+        return self.get_persisted_conv_state_shape()
 
     def get_ssm_state_shape(self):
         return (self.num_linear_v_heads, self.head_linear_k_dim, self.head_linear_v_dim)

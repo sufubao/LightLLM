@@ -236,15 +236,16 @@ class ReqManagerForMamba(ReqManager):
         self.big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
-        assert (
-            self.mtp_step == 0
-        ), "currently only support mtp_step 0 for simplicity, more mtp_step support will be added in the future"
+        assert self.mtp_step <= 7, (
+            f"mtp_step={self.mtp_step} exceeds 7; req_to_next_token_ids width is 8 "
+            "(widening it is an explicit follow-up, spec §9)"
+        )
         self.linear_config = linear_config
 
         self.req_to_conv_state = LayerCache(
-            size=(max_request_num + 1) * (self.mtp_step + 1),
+            size=(max_request_num + 1),
             dtype=self.linear_config.conv_state_dtype,
-            shape=self.linear_config.get_conv_state_shape(),
+            shape=self.linear_config.get_gpu_conv_state_shape(mtp_step=self.mtp_step),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
         )
@@ -258,11 +259,11 @@ class ReqManagerForMamba(ReqManager):
         return
 
     def init_linear_att_state(self, req: "InferReq"):
-        index = req.req_idx * (self.mtp_step + 1)
-        conv_state = self.req_to_conv_state.buffer[:, index, ...]
-        ssm_state = self.req_to_ssm_state.buffer[:, index, ...]
-        conv_state.fill_(0)
-        ssm_state.fill_(0)
+        conv_index = req.req_idx
+        ssm_index = req.req_idx * (self.mtp_step + 1)
+        self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
+        self.req_to_ssm_state.buffer[:, ssm_index, ...].fill_(0)
+        req.mtp_accept_len = 1
         return
 
     def get_mamba_cache(self, layer_idx_in_all: int):
@@ -275,16 +276,17 @@ class ReqManagerForMamba(ReqManager):
         return conv_states, ssm_states
 
     def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
-
         from .linear_att_cache_manager import LinearAttCacheManager
 
         big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
 
         conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
-        dest_req_idx = req.req_idx * (self.mtp_step + 1)
-
-        self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
-        self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
+        conv_dest = req.req_idx
+        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        narrow_w = conv_state.shape[-1]  # persisted (narrow) width
+        self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
+        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
+        req.mtp_accept_len = 1
         return
 
     def copy_small_page_buffer_to_linear_att_state(
@@ -293,9 +295,12 @@ class ReqManagerForMamba(ReqManager):
         conv_state, ssm_state = linear_att_small_page_buffers.get_state_cache(
             buffer_idx=req.shared_kv_node.small_page_buffer_idx
         )
-        dest_req_idx = req.req_idx * (self.mtp_step + 1)
+        conv_dest = req.req_idx
+        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        narrow_w = conv_state.shape[-1]
         # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
         # 同时，非连续对象的拷贝，可能存在效率问题。
-        self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
-        self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
+        self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
+        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
+        req.mtp_accept_len = 1
         return

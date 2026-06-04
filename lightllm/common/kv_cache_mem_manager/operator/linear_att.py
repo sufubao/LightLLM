@@ -76,11 +76,16 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             copy_cpu_cache_to_kv_buffer,
         )
 
+        # Persist/restore ONLY the main model's full-attn slice. The kv buffer is widened by
+        # dedicated MTP draft slots [main_full_att, main_full_att + draft) (speculative KV that
+        # must never touch the CPU/disk cache), so slice them off here.
+        main_full_att = getattr(mem_manager, "main_full_att_layer_num", mem_manager.kv_buffer.shape[0])
+
         copy_cpu_cache_to_kv_buffer(
             mem_indexes=mem_indexes,
             big_page_buffer_ids=big_page_buffer_ids_gpu,
             page_indexes=page_indexes,
-            gpu_full_att_kv_state=mem_manager.kv_buffer,
+            gpu_full_att_kv_state=mem_manager.kv_buffer[:main_full_att],
             cpu_kv_conv_state=mem_manager.linear_att_big_page_buffers.conv_state_cache.buffer,
             cpu_kv_ssm_state=mem_manager.linear_att_big_page_buffers.ssm_state_cache.buffer,
             cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,
@@ -169,12 +174,17 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             copy_kv_buffer_to_cpu_cache,
         )
 
+        # Persist ONLY the main model's full-attn slice. The kv buffer is widened by dedicated
+        # MTP draft slots [main_full_att, main_full_att + draft) (speculative KV that must never
+        # be persisted to the CPU/disk cache), so slice them off here.
+        main_full_att = getattr(mem_manager, "main_full_att_layer_num", mem_manager.kv_buffer.shape[0])
+
         copy_kv_buffer_to_cpu_cache(
             mem_indexes=mem_indexes,
             page_indexes=page_indexes,
             page_readies=page_readies,
             big_page_buffer_ids=big_page_buffer_ids_gpu,
-            gpu_kv_full_att_state=mem_manager.kv_buffer,
+            gpu_kv_full_att_state=mem_manager.kv_buffer[:main_full_att],
             cpu_kv_conv_state=mem_manager.linear_att_big_page_buffers.conv_state_cache.buffer,
             cpu_kv_ssm_state=mem_manager.linear_att_big_page_buffers.ssm_state_cache.buffer,
             cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,

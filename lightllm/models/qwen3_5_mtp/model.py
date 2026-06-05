@@ -97,7 +97,6 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
             )
         draft_kv_slot = main_full_att + draft_idx
         layer_infer = self.layers_infer[0]
-        layer_infer._draft_kv_slot = draft_kv_slot
         layer_infer.layer_num_ = draft_kv_slot * interval
         logger.info(
             f"Qwen3.5 MTP draft layer assigned dedicated full-attn KV slot {draft_kv_slot} "

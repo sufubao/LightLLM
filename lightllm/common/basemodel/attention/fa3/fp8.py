@@ -44,9 +44,12 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             torch.arange(batch_size, device=device), self.infer_state.b_q_seq_len
         )
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
     def prefill_att(
         self,
@@ -115,7 +118,6 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         super().init_state()
         self.backend: Fp8Fa3AttBackend = self.backend
 
-        device = self.infer_state.input_ids.device
         batch_size = self.b_att_seq_len.shape[0]
         mem_manager = self.backend.model.mem_manager
 
@@ -123,8 +125,12 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         head_num = mem_manager.head_num
 
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
         return
 

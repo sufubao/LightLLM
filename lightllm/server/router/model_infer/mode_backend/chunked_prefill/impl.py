@@ -115,11 +115,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            (
-                _,
-                next_token_ids_cpu,
-                next_token_logprobs_cpu,
-            ) = self._sample_and_scatter_token(
+            (_, next_token_ids_cpu, next_token_logprobs_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -162,11 +158,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            (
-                _,
-                next_token_ids_cpu,
-                next_token_logprobs_cpu,
-            ) = self._sample_and_scatter_token(
+            (_, next_token_ids_cpu, next_token_logprobs_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -204,11 +196,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            (
-                next_token_ids,
-                next_token_ids_cpu,
-                next_token_logprobs_cpu,
-            ) = self._sample_and_scatter_token(
+            (next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -490,11 +478,7 @@ class ChunkedPrefillBackend(ModeBackend):
         g_infer_state_lock.release()
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
-        (
-            draft_model_input,
-            draft_next_token_ids,
-            accepted_req_idx,
-        ) = self._build_eagle_accepted_draft_input(
+        (draft_model_input, draft_next_token_ids, accepted_req_idx,) = self._build_eagle_accepted_draft_input(
             main_model_input=main_model_input,
             main_model_output=main_model_output,
             next_token_ids=next_token_ids,

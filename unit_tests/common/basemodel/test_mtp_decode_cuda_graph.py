@@ -286,11 +286,7 @@ def test_build_eagle_accepted_draft_input_narrows_to_accepted_rows():
     b_req_mtp_start_loc = torch.tensor([0, 3], dtype=torch.int32)
     mtp_accept_len = torch.tensor([2, 3], dtype=torch.int32)
 
-    (
-        draft_input,
-        accepted_next_tokens,
-        accepted_req_idx,
-    ) = backend._build_eagle_accepted_draft_input(
+    (draft_input, accepted_next_tokens, accepted_req_idx,) = backend._build_eagle_accepted_draft_input(
         main_model_input=main_input,
         main_model_output=main_output,
         next_token_ids=next_token_ids,

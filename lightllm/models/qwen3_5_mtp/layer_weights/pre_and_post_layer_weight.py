@@ -9,7 +9,6 @@ from lightllm.common.quantization import Quantcfg
 
 
 class Qwen3_5MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
-
     def __init__(self, data_type, network_config, quant_cfg: Quantcfg):
         super().__init__(data_type, network_config)
         self.quant_cfg: Quantcfg = quant_cfg

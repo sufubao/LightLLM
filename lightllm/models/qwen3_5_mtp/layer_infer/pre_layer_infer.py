@@ -6,7 +6,6 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
 
 class Qwen3_5MTPPreLayerInfer(Qwen3VLMultimodalPreLayerInfer):
-
     def __init__(self, network_config):
         super().__init__(network_config)
         self.eps_ = network_config["rms_norm_eps"]

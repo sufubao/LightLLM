@@ -4,14 +4,12 @@ import inspect
 import threading
 import setproctitle
 import torch.multiprocessing as mp
-import collections
 import queue
 import pickle
-from typing import List, Dict, Union, Deque, Optional
+from typing import List, Dict, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskRet
-from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..nixl_kv_transporter import NixlKVTransporter
@@ -42,6 +40,12 @@ def _init_env(
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
 ):
+
+    import os
+
+    # prefill source-side page copy and UCX progress are on the request critical path.
+    os.environ["CUDA_MPS_CLIENT_PRIORITY"] = "0"
+
     torch.backends.cudnn.enabled = False
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_prefill_trans:Device{device_id}")
 
@@ -96,7 +100,7 @@ class _PrefillTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.nixl_pd_kv_page_num, page_size=self.args.nixl_pd_kv_page_size
         )
-        self.copy_cuda_stream = torch.cuda.Stream()
+        self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = NixlKVTransporter(
             node_id=self.args.pd_node_id, tp_idx=device_id, kv_move_buffer=kv_move_buffer
         )
@@ -104,7 +108,8 @@ class _PrefillTransModule:
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
 
         self.local_copy_kv_queue = queue.Queue()
-        self.notify_peer_read_kv_queue = queue.Queue()
+        self.ready_transfer_queue = queue.Queue()
+        self.write_peer_kv_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
 
@@ -112,15 +117,46 @@ class _PrefillTransModule:
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
 
+        # warmup 预先执行一次 kv 写入 page buffer，避免第一次拷贝时出现卡顿。
+        self._warmup()
+
         for func in [
             self.recv_task_loop,
             self.local_copy_kv_loop,
-            self.notify_peer_to_read_kv_loop,
+            self.ready_transfer_loop,
+            self.accept_decode_write_task_loop,
+            self.write_peer_kv_loop,
             self.update_task_status_loop,
             self.success_loop,
             self.fail_loop,
         ]:
             threading.Thread(target=func, daemon=True).start()
+        return
+
+    def _warmup(self):
+        for dp_index in range(self.args.dp // self.args.nnodes):
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.write_mem_to_page_kv_move_buffer(
+                    mem_indexes=[0],
+                    page_index=0,
+                    dp_index=dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                )
+                torch.cuda.current_stream().synchronize()
+        return
+
+    def _abort(self, request_id: int, error_info: str = "aborted req"):
+        aborted_tasks = []
+        with self.waiting_dict_lock:
+            for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.request_id == request_id:
+                    aborted_tasks.append(self.waiting_dict.pop(key))
+
+        for trans_task in aborted_tasks:
+            trans_task.error_info = error_info
+            self.failed_queue.put(trans_task)
         return
 
     @log_exception
@@ -158,51 +194,37 @@ class _PrefillTransModule:
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
-            self.notify_peer_read_kv_queue.put((sync_event, trans_task))
+            self.ready_transfer_queue.put((sync_event, trans_task))
         return
 
     @log_exception
-    def notify_peer_to_read_kv_loop(self):
+    def ready_transfer_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            sync_event, trans_task = self.notify_peer_read_kv_queue.get()
+            sync_event, trans_task = self.ready_transfer_queue.get()
             trans_task: NIXLChunckedTransTask = trans_task
             sync_event: torch.cuda.Event = sync_event
-
             sync_event.synchronize()
-
-            trans_task.start_trans_time = time.time()
-            with self.waiting_dict_lock:
-                self.waiting_dict[trans_task.get_key()] = trans_task
-
+            key = trans_task.get_key()
             try:
-                self.transporter.send_readtask_to_decode_node(trans_task=trans_task)
-            except BaseException as e:
-                logger.error(f"send readtask to decode node failed: {trans_task.to_str()}")
-                logger.exception(str(e))
-                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
-
                 with self.waiting_dict_lock:
-                    trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
-
-                if trans_task is not None:
-                    trans_task.error_info = f"send readtask to decode node failed: {str(e)}"
-                    self.failed_queue.put(trans_task)
+                    self.waiting_dict[key] = trans_task
+                self.transporter.send_write_request_task_to_decode_node(trans_task)
+                logger.info(f"send WRITE request to decode: {key}")
+            except BaseException as e:
+                with self.waiting_dict_lock:
+                    self.waiting_dict.pop(key, None)
+                logger.error(f"send WRITE request to decode failed: {trans_task.to_str()}")
+                logger.exception(str(e))
+                trans_task.error_info = f"send WRITE request to decode failed: {str(e)}"
+                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
+                self.failed_queue.put(trans_task)
                 continue
-
-            logger.info(f"send readtask to decode: {trans_task.to_str()}")
         return
 
     @log_exception
-    def update_task_status_loop(
-        self,
-    ):
+    def accept_decode_write_task_loop(self):
         while True:
-            if len(self.waiting_dict) == 0:
-                time.sleep(0.001)
-                continue
-
-            # notify update
             try:
                 notifies_dict = self.transporter.get_new_notifs()
             except BaseException as e:
@@ -215,43 +237,134 @@ class _PrefillTransModule:
                     for notify in _notify_list:
                         try:
                             notify_obj = pickle.loads(notify)
-                        except:
+                        except BaseException:
                             notify_obj = None
 
-                        if isinstance(notify_obj, NIXLChunckedTransTaskRet):
+                        if not isinstance(notify_obj, NIXLChunckedTransTask):
+                            continue
+
+                        if notify_obj.error_info is not None:
+                            logger.warning(f"recv WRITE error from decode: {notify_obj.to_str()}")
+                            self._abort(request_id=notify_obj.request_id, error_info=notify_obj.error_info)
+                            continue
+
+                        if notify_obj.nixl_write_stage == "ready":
                             key = notify_obj.get_key()
                             with self.waiting_dict_lock:
                                 trans_task = self.waiting_dict.pop(key, None)
-
                             if trans_task is not None:
-                                trans_task.error_info = notify_obj.error_info
-                                if trans_task.error_info is not None:
-                                    self.failed_queue.put(trans_task)
-                                else:
-                                    self.success_queue.put(trans_task)
+                                trans_task.nixl_dst_page_index = notify_obj.nixl_dst_page_index
+                                self.write_peer_kv_queue.put(trans_task)
+                                logger.info(
+                                    f"recv WRITE ready from decode request_id={trans_task.request_id} "
+                                    f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "
+                                    f"srcpage={trans_task.nixl_src_page_index} dstpage={trans_task.nixl_dst_page_index}"
+                                )
                             else:
-                                logger.warning(f"can not find trans task for ret: {notify_obj}")
+                                logger.warning(
+                                    f"can not find pending WRITE request for ready notify: {notify_obj.to_str()}"
+                                )
+                                # 发一个error信息回去给 decode 节点，让其可以知道这边有问题了，它可以选择其他清理掉请求。
+                                notify_obj.error_info = "can not find pending WRITE request for ready notify"
+                                self.transporter.send_error_info_to_decode_node(trans_task=notify_obj)
+                            continue
+                        else:
+                            logger.error(f"ignore unknown WRITE notify stage: {notify_obj.to_str()}")
+                            continue
 
-            # check time_out update
             self._check_tasks_time_out()
+
+            if not notifies_dict:
+                time.sleep(0.001)
+        return
 
     def _check_tasks_time_out(self):
         with self.waiting_dict_lock:
-            keys = list(self.waiting_dict.keys())
+            timeout_tasks = []
+            for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.time_out():
+                    timeout_tasks.append(self.waiting_dict.pop(key))
 
-        for key in keys:
-            with self.waiting_dict_lock:
-                trans_task = self.waiting_dict.pop(key, None)
+        for trans_task in timeout_tasks:
+            trans_task.error_info = "time out waiting decode WRITE ready"
+            self.failed_queue.put(trans_task)
+        return
 
-            if trans_task is not None and trans_task.time_out():
-                trans_task.error_info = "time out in update_task_status_loop"
-                self.failed_queue.put(trans_task)
-                continue
+    @log_exception
+    def write_peer_kv_loop(self):
+        torch.cuda.set_device(self.device_id)
+        while True:
+            trans_task = self.write_peer_kv_queue.get()
+            trans_task: NIXLChunckedTransTask = trans_task
 
-            if trans_task is not None:
+            try:
+                xfer_handle = self.transporter.write_blocks_paged(trans_task=trans_task)
+                trans_task.xfer_handle = xfer_handle
+                trans_task.start_trans_time = time.time()
                 with self.waiting_dict_lock:
                     self.waiting_dict[trans_task.get_key()] = trans_task
+                logger.info(f"start WRITE to decode node: {trans_task.to_str()}")
+                continue
+            except BaseException as e:
+                logger.error(f"write_blocks_paged failed: {trans_task.to_str()}")
+                logger.exception(str(e))
+                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
+                trans_task.error_info = f"write_blocks_paged failed: {str(e)}"
+                self.failed_queue.put(trans_task)
+                continue
         return
+
+    @log_exception
+    def update_task_status_loop(
+        self,
+    ):
+        while True:
+            if len(self.waiting_dict) == 0:
+                time.sleep(0.001)
+                continue
+
+            with self.waiting_dict_lock:
+                tasks = list(self.waiting_dict.values())
+                for trans_task in tasks:
+                    if trans_task.xfer_handle is None:
+                        continue
+
+                    # 传输任务状态检查
+                    ret = self.transporter.check_task_status(trans_task=trans_task)
+                    if ret == "DONE":
+                        trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
+                        if self.transporter.capture_telemetry:
+                            telem = self.transporter.nixl_agent.get_xfer_telemetry(trans_task.xfer_handle)
+                            total_us = telem.xferDuration
+                            post_us = telem.postDuration
+                            backend_us = telem.xferDuration - telem.postDuration
+                            nixl_backend = self.transporter.nixl_agent.query_xfer_backend(trans_task.xfer_handle)
+                            logger.info(
+                                f"write trans task request_id={trans_task.request_id} "
+                                f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "
+                                f"src_page={trans_task.nixl_src_page_index} dst_page={trans_task.nixl_dst_page_index} "
+                                f"xfer time: {total_us:.3f} us, "
+                                f"post time: {post_us:.3f} us, backend time: {backend_us:.3f} us, "
+                                f"nixl_backend: {nixl_backend}, total_bytes: {telem.totalBytes}"
+                            )
+                        self.transporter.send_write_done_task_to_decode_node(trans_task)
+                        logger.info(
+                            f"send WRITE done nixl notify "
+                            f"request_id={trans_task.request_id} "
+                            f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "
+                            f"src_page={trans_task.nixl_src_page_index} dst_page={trans_task.nixl_dst_page_index}"
+                        )
+                        self.success_queue.put(trans_task)
+                    elif ret == "ERR":
+                        trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
+                        trans_task.error_info = "xfer error"
+                        self.failed_queue.put(trans_task)
+                    elif trans_task.time_out():
+                        trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
+                        trans_task.error_info = "time out in update_task_status_loop"
+                        self.failed_queue.put(trans_task)
+
+            time.sleep(0.001)
 
     @log_exception
     def success_loop(self):
@@ -261,12 +374,18 @@ class _PrefillTransModule:
             # 写回后，回收页面
             if trans_task.nixl_src_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_src_page_index)
+            if trans_task.xfer_handle is not None:
+                self.transporter.release_xfer_handle(trans_task.xfer_handle)
 
             ret = trans_task.createRetObj()
             ret.first_gen_token_id = None
             ret.first_gen_token_logprob = None
             self.task_out_queue.put(ret)
-            logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
+
+            if trans_task.start_trans_time is not None:
+                logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
+            else:
+                logger.info(f"trans task ret success:{ret}")
 
     @log_exception
     def fail_loop(self):
@@ -277,7 +396,13 @@ class _PrefillTransModule:
             # 回收页面
             if trans_task.nixl_src_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_src_page_index)
+            if trans_task.xfer_handle is not None:
+                self.transporter.release_xfer_handle(trans_task.xfer_handle)
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
             logger.info(f"trans task ret fail:{ret}")
+
+            if trans_task.error_info is not None:
+                self._abort(request_id=trans_task.request_id, error_info=trans_task.error_info)
+                self.transporter.send_error_info_to_decode_node(trans_task=trans_task)

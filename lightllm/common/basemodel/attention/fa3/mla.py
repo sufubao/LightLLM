@@ -1,19 +1,12 @@
 import dataclasses
 import torch
-from ..base_att import (
-    BaseAttBackend,
-    BasePrefillAttState,
-    BaseDecodeAttState,
-    AttControl,
-)
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
-from lightllm.common.basemodel.triton_kernel.gen_prefill_params import (
-    gen_cumsum_pad0_tensor,
-)
+from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
 
@@ -29,14 +22,12 @@ class MlaFa3AttBackend(BaseAttBackend):
         model = self.model
         if not hasattr(self, "_shared_page_table_buffer"):
             self._shared_page_table_buffer = [
-                torch.empty(
-                    model.graph_max_batch_size * model.graph_max_len_in_batch,
-                    dtype=torch.int32,
-                ).to(get_current_device_id()),
-                torch.empty(
-                    model.graph_max_batch_size * model.graph_max_len_in_batch,
-                    dtype=torch.int32,
-                ).to(get_current_device_id()),
+                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
+                    get_current_device_id()
+                ),
+                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
+                    get_current_device_id()
+                ),
             ]
         return self._shared_page_table_buffer
 
@@ -78,12 +69,7 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
         )
 
     def _mla_prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: MlaFa3AttBackend = self.backend  # for typing
         k_nope, k_rope = k

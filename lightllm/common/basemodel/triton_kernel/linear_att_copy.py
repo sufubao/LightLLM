@@ -46,15 +46,7 @@ def _copy_linear_att_state_to_kv_buffer(
     accept_len = tl.load(num_accepted_tokens_ptr + cur_batch).to(tl.int64)
     canonical_off = accept_len - 1
 
-    # --- conv snapshot ---
-    # conv is a single WIDENED slot keyed by req_idx (asymmetric layout, §3.4).
-    # The committed NARROW window of byte length conv_narrow_row_bytes sits at
-    # byte offset canonical_off * itemsize inside each widened row. The flattened
-    # uint8 tail lays out element [d, w] at d * gpu_conv_row_bytes + w (bytes),
-    # so the narrow window is strided per row: copy row-by-row.
     conv_src_slot = cur_req_idx
-    # gpu_conv_stride_d carries the per-element byte size (itemsize); the narrow
-    # window starts canonical_off elements into the widened row.
     conv_off_bytes = canonical_off * gpu_conv_stride_d
     gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + conv_src_slot * gpu_conv_stride_s + conv_off_bytes
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
@@ -65,9 +57,6 @@ def _copy_linear_att_state_to_kv_buffer(
             conv_data = tl.load(gpu_conv_base + d * gpu_conv_row_bytes + off, mask=mask)
             tl.store(cpu_conv_base + d * cpu_kv_conv_stride_d + off, conv_data, mask=mask)
 
-    # --- ssm snapshot ---
-    # ssm is an (S+1) BLOCK per request; the committed block slot is
-    # req_idx * (mtp_step + 1) + canonical_off.
     ssm_src_slot = (cur_req_idx * (mtp_step + 1) + canonical_off).to(tl.int64)
     for i in range(tl.cdiv(gpu_ssm_tail_dim, BLOCK)):
         gpu_start_off = i * BLOCK + tl.arange(0, BLOCK)
@@ -98,10 +87,6 @@ def copy_linear_att_state_to_kv_buffer(
     assert len(b_req_idx) == b_num_accepted_tokens.shape[0]
     BLOCK = 4096
 
-    # Conv: keep the (conv_dim, width) tail un-flattened so the committed narrow
-    # window can be read per row at the canonical offset (the window is strided
-    # in the flattened widened layout). Capture itemsize BEFORE the uint8 view to
-    # convert the element-unit canonical offset into a byte offset.
     assert gpu_conv_state.dim() >= 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
     assert cpu_kv_conv_state.dim() >= 4, "cpu_kv_conv_state must be [size, layer, conv_dim, width_narrow]"
     conv_itemsize = gpu_conv_state.element_size()

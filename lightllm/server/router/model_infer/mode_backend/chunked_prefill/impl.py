@@ -4,9 +4,7 @@ import copy
 from typing import List, Optional, Callable, Dict, Any
 from queue import Queue
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.mode_backend.overlap_events import (
-    OverlapEventPack,
-)
+from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
@@ -43,10 +41,7 @@ class ChunkedPrefillBackend(ModeBackend):
         if get_env_start_args().mtp_mode:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.is_mtp_eagle = get_env_start_args().mtp_mode in [
-                "eagle_with_att",
-                "eagle_no_att",
-            ]
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
         else:
@@ -115,7 +110,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            (_, next_token_ids_cpu, next_token_logprobs_cpu,) = self._sample_and_scatter_token(
+            _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -158,7 +153,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            (_, next_token_ids_cpu, next_token_logprobs_cpu,) = self._sample_and_scatter_token(
+            _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -196,7 +191,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            (next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu,) = self._sample_and_scatter_token(
+            next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -207,9 +202,7 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             # mtp kv fill
             self._draft_prefill_forward(
-                model_input=model_input,
-                model_output=model_output,
-                next_token_ids=next_token_ids,
+                model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
             )
             g_infer_context.copy_linear_att_state_to_cache_buffer(
                 b_req_idx=model_input.b_req_idx,
@@ -249,11 +242,6 @@ class ChunkedPrefillBackend(ModeBackend):
         """
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
 
-        # Build the per-real-request accept tensor (carried InferReq.mtp_accept_len
-        # from the previous step). decode_reqs is one entry per real request,
-        # aligning 1:1 with the b_gdn_verify_cu_seqlens grouping (the same zip used
-        # by _update_mtp_accept_ratio). Threaded onto the infer_state via ModelInput
-        # (mirrors b_mtp_index); to_cuda() moves it inside forward. §3.1
         if self.mtp_step > 0:
             accept_lens = [req.mtp_accept_len for req in decode_reqs]
             model_input.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
@@ -290,10 +278,9 @@ class ChunkedPrefillBackend(ModeBackend):
             verify_event = torch.cuda.Event()
             verify_event.record()
 
-            (
-                next_token_ids_cpu,
-                next_token_logprobs_cpu,
-            ) = self._async_copy_next_token_infos_to_pin_mem(next_token_ids, next_token_logprobs)
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
+                next_token_ids, next_token_logprobs
+            )
 
             # 调用具体的draft decode函数
             additional_mem_indexes_cpu = self._draft_decode_func(
@@ -315,12 +302,8 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         verify_event.synchronize()
-        # Commit the carried accept count HERE (phase 2 / pre_post_handle), not in
-        # phase 3: the next overlapped step reads req.mtp_accept_len as soon as this
-        # step calls notify_forward_and_wait_post_handle() below, so the update must
-        # land before that release to avoid feeding the kernels a stale (one-step-old)
-        # accept count. See _commit_mtp_accept_len for the full rationale.
-        self._commit_mtp_accept_len(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
+        for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
+            req.mtp_accept_len = int(accept_len)
         verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
@@ -352,12 +335,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
 
-    def _draft_prefill_forward(
-        self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-    ):
+    def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
         # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
         draft_model_input = model_input
         draft_model_output = model_output

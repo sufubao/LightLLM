@@ -1,4 +1,5 @@
 import os
+import copy
 import torch
 import numpy as np
 from multiprocessing import Queue
@@ -282,41 +283,136 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
         multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size * (mtp_step + 1))],
     )
 
+    # MTP verify layout. The main decode is a VERIFY forward over the (mtp_step+1)-expanded
+    # batch. Setting b_num_accepted_tokens (one entry per real request) flips is_mtp_verify=True
+    # so the hybrid GDN main model runs the fused spec-decode verify kernel — the production path.
+    # Without it the main decode silently takes the plain _gdn_decode_kernel on the S+1-expanded
+    # batch (whose rows share req_idx), colliding on the single widened conv slot and mismeasuring
+    # cost. accept_len is fixed at 1 (steady-state low-acceptance); the verify-forward COST is
+    # ~constant in accept_len (it always processes mtp_step+1 rows), so this faithfully measures
+    # per-step decode cost. Vary accept_len in [1, mtp_step+1] to sweep the acceptance regime.
+    accept_len = 1
+    is_eagle = args.mtp_mode.startswith("eagle")
+    model_input.b_num_accepted_tokens = torch.full((batch_size,), accept_len, dtype=torch.int32, device="cuda")
+    req_offsets = torch.arange(batch_size, dtype=torch.long, device="cuda")
+    accepted_row_idx = req_offsets * (mtp_step + 1) + (accept_len - 1)
+    if is_eagle:
+        # EAGLE draft scratch slots (n_real * mtp_step), mirroring _draft_decode_eagle. Allocated
+        # once and reused across steps (throughput bench overwrites draft KV; no correctness check).
+        eagle_mem_indexes = main_model.req_manager.mem_manager.alloc(batch_size * mtp_step).cuda()
+
+    # Prize-sizing profiler (need-to-fix #22): env-gated, eagle-only, additive. Times the verify
+    # forward vs the S-step draft chain to decide whether collapsing the chain into a CUDA graph is
+    # worth it. host_bound_ratio ~1 (or per_step flat across bs) => host/launch-bound => graph wins.
+    _mtp_profile = os.environ.get("MTP_PROFILE", "0") == "1"
+    _prof = {"verify_ms": 0.0, "draft_ms": 0.0, "draft_host_ms": 0.0, "n": 0, "per_step_ms": [0.0] * mtp_step}
+
     # Main decode
     for i in range(0, output_len, mtp_step + 1):
         torch.cuda.synchronize()
         step_start_time = time.time()
-        model_output = main_model.forward(
-            model_input,
-        )
-        prob_out = torch.softmax(model_output.logits, dim=-1)
-        predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
 
-        # draft decode: mtp_step forwards, reusing draft_models[_step % num_instances]
-        # (eagle: one instance reused mtp_step times; vanilla: a distinct instance per step).
-        model_input.input_ids = predict_ids.reshape(-1)
-        model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
+        # --- main VERIFY forward: mtp_step+1 rows/req through the fused GDN verify kernel ---
+        if _mtp_profile and not warmup:
+            _ev_v0 = torch.cuda.Event(enable_timing=True)
+            _ev_v1 = torch.cuda.Event(enable_timing=True)
+            _ev_v0.record()
+        model_output = main_model.forward(model_input)
+        if _mtp_profile and not warmup:
+            _ev_v1.record()
+        predict_ids = torch.argmax(model_output.logits, dim=1, keepdim=True)
 
-        for _step in range(mtp_step):
-            draft_model = draft_models[_step % num_instances]
-            model_output = draft_model.forward(
-                model_input,
+        if is_eagle:
+            # EAGLE draft: shrink to the single accepted row per request (1 row/req), then run the
+            # draft model mtp_step times. The Qwen3.5 MTP draft is full-attention and takes the
+            # plain decode layout (b_num_accepted_tokens=None). Mirrors chunked_prefill
+            # _build_eagle_accepted_draft_input + _draft_decode_eagle so the measured draft cost is
+            # the real n_real-row cost, not the (mtp_step+1)x-inflated full-batch cost.
+            main_mem = model_input.mem_indexes.view(batch_size, mtp_step + 1)
+            eagle_mem_by_req = eagle_mem_indexes.view(mtp_step, batch_size).transpose(0, 1).contiguous()
+            mem_index_plan = torch.cat([main_mem, eagle_mem_by_req], dim=1)
+
+            draft_model_input = copy.copy(model_input)
+            draft_model_input.batch_size = batch_size
+            draft_model_input.total_token_num = batch_size * model_input.max_kv_seq_len
+            draft_model_input.b_num_accepted_tokens = None
+            draft_model_input.mem_indexes_cpu = None
+            draft_model_input.b_req_idx = model_input.b_req_idx.index_select(0, accepted_row_idx)
+            draft_model_input.b_seq_len = model_input.b_seq_len.index_select(0, accepted_row_idx)
+            draft_model_input.b_mtp_index = model_input.b_mtp_index.index_select(0, accepted_row_idx)
+            draft_model_input.input_ids = predict_ids.reshape(-1).index_select(0, accepted_row_idx)
+            draft_model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens.index_select(
+                0, accepted_row_idx
             )
-            prob_out = torch.softmax(model_output.logits, dim=-1)
-            predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
-            model_input.input_ids = predict_ids.reshape(-1)
-            model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
+            draft_model_input.multimodal_params = [{"images": [], "audios": []} for _ in range(batch_size)]
 
-        # accept all draft ids by default.
-        model_input.input_ids = predict_ids.reshape(-1)
-        model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
+            if _mtp_profile and not warmup:
+                _step_evs = []
+                _ev_d0 = torch.cuda.Event(enable_timing=True)
+                _ev_d1 = torch.cuda.Event(enable_timing=True)
+                _host_t0 = time.time()
+                _ev_d0.record()
+            for _step in range(mtp_step):
+                draft_model_input.mem_indexes = mem_index_plan[req_offsets, (accept_len - 1) + _step]
+                draft_model = draft_models[_step % num_instances]
+                if _mtp_profile and not warmup:
+                    _es = torch.cuda.Event(enable_timing=True)
+                    _ee = torch.cuda.Event(enable_timing=True)
+                    _es.record()
+                draft_output = draft_model.forward(draft_model_input)
+                if _mtp_profile and not warmup:
+                    _ee.record()
+                    _step_evs.append((_es, _ee))
+                draft_model_input.input_ids = torch.argmax(draft_output.logits, dim=1, keepdim=True).reshape(-1)
+                draft_model_input.mtp_draft_input_hiddens = draft_output.mtp_main_output_hiddens
+                draft_model_input.b_seq_len = draft_model_input.b_seq_len + 1
+                draft_model_input.max_kv_seq_len += 1
+            if _mtp_profile and not warmup:
+                _ev_d1.record()
+                _host_t1 = time.time()
+        else:
+            # VANILLA draft: full (mtp_step+1)-expanded batch, plain decode layout. Mirrors
+            # chunked_prefill _draft_decode_vanilla (b_num_accepted_tokens cleared on a copy so the
+            # MTP draft model does not inherit the main model's verify layout / cudagraph key).
+            draft_model_input = copy.copy(model_input)
+            draft_model_input.b_num_accepted_tokens = None
+            draft_model_input.input_ids = predict_ids.reshape(-1)
+            draft_model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
+            for _step in range(mtp_step):
+                draft_model = draft_models[_step % num_instances]
+                draft_output = draft_model.forward(draft_model_input)
+                draft_model_input.input_ids = torch.argmax(draft_output.logits, dim=1, keepdim=True).reshape(-1)
+                draft_model_input.mtp_draft_input_hiddens = draft_output.mtp_main_output_hiddens
+
         torch.cuda.synchronize()
+        if _mtp_profile and not warmup and is_eagle and i >= 3 * (mtp_step + 1):
+            # skip first 3 macro-steps (lazy cudagraph capture / cache warmup)
+            _prof["verify_ms"] += _ev_v0.elapsed_time(_ev_v1)
+            _prof["draft_ms"] += _ev_d0.elapsed_time(_ev_d1)
+            _prof["draft_host_ms"] += (_host_t1 - _host_t0) * 1000.0
+            for _k, (_es, _ee) in enumerate(_step_evs):
+                _prof["per_step_ms"][_k] += _es.elapsed_time(_ee)
+            _prof["n"] += 1
         if i % 100 == 0 or i == output_len - 1:
             step_end_time = time.time()
             if get_current_rank_in_dp() == 0 and not warmup:
                 step_time = step_end_time - step_start_time
                 print(i, " step cost time:", step_time * 1000)
+                # Peak (all-accepted) throughput: mtp_step+1 candidate tokens per req per step.
                 print(f"Decode throughput: {batch_size * (mtp_step + 1) * args.dp / step_time} tokens/s")
+
+    if _mtp_profile and is_eagle and _prof["n"] > 0 and get_current_rank_in_dp() == 0 and not warmup:
+        n = _prof["n"]
+        ps = ", ".join(f"{v / n:.3f}" for v in _prof["per_step_ms"])
+        print(f"[MTP_PROFILE] bs={batch_size} S={mtp_step} steps={n}")
+        print(f"[MTP_PROFILE]   verify_gpu_ms         = {_prof['verify_ms'] / n:.3f}")
+        print(f"[MTP_PROFILE]   draft_chain_gpu_ms    = {_prof['draft_ms'] / n:.3f}")
+        print(f"[MTP_PROFILE]   draft_chain_host_ms   = {_prof['draft_host_ms'] / n:.3f}  (host-enqueue, no sync)")
+        print(f"[MTP_PROFILE]   per_draft_step_gpu_ms = [{ps}]")
+        print(
+            f"[MTP_PROFILE]   host_bound_ratio      = "
+            f"{_prof['draft_host_ms'] / max(_prof['draft_ms'], 1e-9):.3f}  (~1 => host-bound => graph wins)"
+        )
 
     main_model.mem_manager.free_all()
     main_model.req_manager.free_all()

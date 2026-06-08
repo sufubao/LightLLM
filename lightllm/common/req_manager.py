@@ -19,6 +19,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Width of req_to_next_token_ids: holds the seed token + up to (WIDTH - 1) MTP draft tokens.
+REQ_NEXT_TOKEN_IDS_WIDTH = 8
+
+
+def assert_mtp_step_within_next_token_ids_width(mtp_step: int) -> None:
+    assert mtp_step <= REQ_NEXT_TOKEN_IDS_WIDTH - 1, (
+        f"mtp_step={mtp_step} exceeds {REQ_NEXT_TOKEN_IDS_WIDTH - 1}; "
+        f"req_to_next_token_ids width is {REQ_NEXT_TOKEN_IDS_WIDTH} "
+        "(widening it is an explicit follow-up, spec §9)"
+    )
+
+
 class _ReqNode:
     def __init__(self, index):
         self.index = index
@@ -117,7 +129,7 @@ class ReqSamplingParamsManager:
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_next_token_ids = torch.zeros(
-            (max_request_num + 1, 8),
+            (max_request_num + 1, REQ_NEXT_TOKEN_IDS_WIDTH),
             dtype=torch.int64,
             device="cuda",
         )
@@ -236,10 +248,7 @@ class ReqManagerForMamba(ReqManager):
         self.big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
-        assert self.mtp_step <= 7, (
-            f"mtp_step={self.mtp_step} exceeds 7; req_to_next_token_ids width is 8 "
-            "(widening it is an explicit follow-up, spec §9)"
-        )
+        assert_mtp_step_within_next_token_ids_width(self.mtp_step)
         self.linear_config = linear_config
 
         self.req_to_conv_state = LayerCache(

@@ -1,41 +1,17 @@
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, QKVROWNMMWeight
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35TransformerLayerWeight,
 )
+from lightllm.models.qwen3_5_mtp.layer_weights.mtp_retarget_mixin import MTPRetargetMixin
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
-class Qwen3_5MTPTransformerLayerWeight(Qwen35TransformerLayerWeight):
-
-    _MAIN_PREFIX = "model.layers."
-    _MTP_PREFIX = "mtp.layers."
-
-    def _retarget(self, name):
-        if name is None:
-            return None
-        return name.replace(self._MAIN_PREFIX, self._MTP_PREFIX, 1)
-
+class Qwen3_5MTPTransformerLayerWeight(MTPRetargetMixin, Qwen35TransformerLayerWeight):
     def _init_weight_names(self):
         super()._init_weight_names()
         # Retarget all main-model layer key names to the mtp.* namespace.
-        self._q_weight_name = self._retarget(self._q_weight_name)
-        self._q_norm_name = self._retarget(self._q_norm_name)
-        self._q_bias_name = self._retarget(self._q_bias_name)
-        self._k_weight_name = self._retarget(self._k_weight_name)
-        self._k_norm_name = self._retarget(self._k_norm_name)
-        self._k_bias_name = self._retarget(self._k_bias_name)
-        self._v_weight_name = self._retarget(self._v_weight_name)
-        self._v_bias_name = self._retarget(self._v_bias_name)
-        self._kv_weight_name = self._retarget(self._kv_weight_name)
-        self._kv_bias_name = self._retarget(self._kv_bias_name)
-        self._o_weight_name = self._retarget(self._o_weight_name)
-        self._o_bias_name = self._retarget(self._o_bias_name)
-        self._att_norm_weight_name = self._retarget(self._att_norm_weight_name)
-        self._att_norm_bias_name = self._retarget(self._att_norm_bias_name)
-        self._ffn_norm_weight_name = self._retarget(self._ffn_norm_weight_name)
-        self._ffn_norm_bias_name = self._retarget(self._ffn_norm_bias_name)
+        self._retarget_attn_norm_names()
         # MLP (dense) projection names retargeted by Qwen35TransformerLayerWeight.
         self._gate_weight_name = self._retarget(self._gate_weight_name)
         self._gate_bias_name = self._retarget(self._gate_bias_name)
@@ -45,26 +21,3 @@ class Qwen3_5MTPTransformerLayerWeight(Qwen35TransformerLayerWeight):
         self._gate_up_bias_name = self._retarget(self._gate_up_bias_name)
         self._down_weight_name = self._retarget(self._down_weight_name)
         self._down_bias_name = self._retarget(self._down_bias_name)
-
-    def _init_qkv(self):
-        in_dim = self.n_embed
-        q_out_dim = self.q_head_num_ * self.head_dim
-        self.qkv_proj = QKVROWNMMWeight(
-            in_dim=in_dim,
-            q_head_num=self.q_head_num_,
-            kv_head_num=self.k_head_num_,
-            head_dim=self.head_dim,
-            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
-            data_type=self.data_type_,
-            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
-            quant_method=self.get_quant_method("qkv_proj"),
-        )
-        self._o_gate_weight_name = f"{self._MTP_PREFIX}{self.layer_num_}.self_attn.o_gate_proj.weight"
-        self._o_gate_proj = ROWMMWeight(
-            in_dim=in_dim,
-            out_dims=[q_out_dim],
-            weight_names=[self._o_gate_weight_name],
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=self.get_quant_method("o_gate_proj"),
-        )

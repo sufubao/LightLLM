@@ -1,65 +1,19 @@
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     COLMMWeight,
     FusedMoeWeight,
-    QKVROWNMMWeight,
     ROWMMWeight,
 )
 from lightllm.models.qwen3_5_moe.layer_weights.transformer_layer_weight import (
     Qwen35MOETransformerLayerWeight,
 )
+from lightllm.models.qwen3_5_mtp.layer_weights.mtp_retarget_mixin import MTPRetargetMixin
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-class Qwen3_5MoeMTPTransformerLayerWeight(Qwen35MOETransformerLayerWeight):
-    _MAIN_PREFIX = "model.layers."
-    _MTP_PREFIX = "mtp.layers."
-
-    def _retarget(self, name):
-        if name is None:
-            return None
-        return name.replace(self._MAIN_PREFIX, self._MTP_PREFIX, 1)
-
+class Qwen3_5MoeMTPTransformerLayerWeight(MTPRetargetMixin, Qwen35MOETransformerLayerWeight):
     def _init_weight_names(self):
         super()._init_weight_names()
-        self._q_weight_name = self._retarget(self._q_weight_name)
-        self._q_norm_name = self._retarget(self._q_norm_name)
-        self._q_bias_name = self._retarget(self._q_bias_name)
-        self._k_weight_name = self._retarget(self._k_weight_name)
-        self._k_norm_name = self._retarget(self._k_norm_name)
-        self._k_bias_name = self._retarget(self._k_bias_name)
-        self._v_weight_name = self._retarget(self._v_weight_name)
-        self._v_bias_name = self._retarget(self._v_bias_name)
-        self._kv_weight_name = self._retarget(self._kv_weight_name)
-        self._kv_bias_name = self._retarget(self._kv_bias_name)
-        self._o_weight_name = self._retarget(self._o_weight_name)
-        self._o_bias_name = self._retarget(self._o_bias_name)
-        self._att_norm_weight_name = self._retarget(self._att_norm_weight_name)
-        self._att_norm_bias_name = self._retarget(self._att_norm_bias_name)
-        self._ffn_norm_weight_name = self._retarget(self._ffn_norm_weight_name)
-        self._ffn_norm_bias_name = self._retarget(self._ffn_norm_bias_name)
-
-    def _init_qkv(self):
-        in_dim = self.n_embed
-        q_out_dim = self.q_head_num_ * self.head_dim
-        self.qkv_proj = QKVROWNMMWeight(
-            in_dim=in_dim,
-            q_head_num=self.q_head_num_,
-            kv_head_num=self.k_head_num_,
-            head_dim=self.head_dim,
-            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
-            data_type=self.data_type_,
-            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
-            quant_method=self.get_quant_method("qkv_proj"),
-        )
-        self._o_gate_weight_name = f"{self._MTP_PREFIX}{self.layer_num_}.self_attn.o_gate_proj.weight"
-        self._o_gate_proj = ROWMMWeight(
-            in_dim=in_dim,
-            out_dims=[q_out_dim],
-            weight_names=[self._o_gate_weight_name],
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=self.get_quant_method("o_gate_proj"),
-        )
+        self._retarget_attn_norm_names()
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]

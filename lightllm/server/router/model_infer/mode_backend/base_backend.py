@@ -43,10 +43,6 @@ from lightllm.distributed.communication_op import (
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
-from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
@@ -346,32 +342,11 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            # Select MTP model class based on model type
+            # Select MTP model class based on model type (single source of truth: #10).
+            from lightllm.server.router.model_infer.mode_backend.mtp_model_factory import create_mtp_draft_model
+
             model_type = mtp_model_cfg.get("model_type", "")
-            if model_type == "deepseek_v3":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-            elif model_type == "qwen3_moe":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-            elif model_type == "mistral":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
-            elif model_type in ("qwen3_5", "qwen3_5_text"):
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
-
-                self.draft_models.append(Qwen3_5MTPModel(mtp_model_kvargs))
-            elif model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
-
-                self.draft_models.append(Qwen3_5MoeMTPModel(mtp_model_kvargs))
-            else:
-                raise ValueError(f"Unsupported MTP model type: {model_type}")
+            self.draft_models.append(create_mtp_draft_model(model_type, self.args.mtp_mode, mtp_model_kvargs))
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return

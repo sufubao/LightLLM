@@ -12,10 +12,6 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.core.objs.start_args_type import StartArgs
 from torch.profiler import profile, ProfilerActivity
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
-from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 
 logger = init_logger(__name__)
 
@@ -63,30 +59,9 @@ def init_mtp_model(args: StartArgs, kvargs, main_model):
             "mtp_mode": args.mtp_mode,
         }
 
-        if model_type == "deepseek_v3":
-            assert args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-            draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-        elif model_type == "qwen3_moe":
-            assert args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-            draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-        elif model_type == "mistral":
-            assert args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-            draft_models.append(MistralMTPModel(mtp_model_kvargs))
-        elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
-            assert args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-            draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
-        elif model_type in ("qwen3_5", "qwen3_5_text"):
-            assert args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-            from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+        from lightllm.server.router.model_infer.mode_backend.mtp_model_factory import create_mtp_draft_model
 
-            draft_models.append(Qwen3_5MTPModel(mtp_model_kvargs))
-        elif model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
-            assert args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-            from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
-
-            draft_models.append(Qwen3_5MoeMTPModel(mtp_model_kvargs))
-        else:
-            raise ValueError(f"Unsupported MTP model type: {model_type}")
+        draft_models.append(create_mtp_draft_model(model_type, args.mtp_mode, mtp_model_kvargs))
 
         logger.info(f"loaded mtp model class {draft_models[i].__class__}")
     return draft_models

@@ -76,7 +76,6 @@ def test_mtp_decode_cuda_graph_keys_verify_and_normal_layouts():
     graph.graph = {}
     graph.normal_cuda_graph_batch_sizes = [1, 2, 4, 8]
     graph.mtp_verify_cuda_graph_batch_sizes = [3, 6, 9, 12]
-    graph.cuda_graph_batch_sizes = graph.mtp_verify_cuda_graph_batch_sizes
 
     verify_state = SimpleNamespace(
         input_ids=torch.ones(6, dtype=torch.int64),

@@ -33,13 +33,11 @@ class CudaGraph:
             self.mtp_verify_cuda_graph_batch_sizes = self._build_cuda_graph_batch_sizes(
                 batch_size_multiple=self.mtp_step + 1
             )
-            self.cuda_graph_batch_sizes = self.mtp_verify_cuda_graph_batch_sizes
             logger.info(f"normal cuda graph batch_sizes: {self.normal_cuda_graph_batch_sizes}")
             logger.info(f"mtp verify cuda graph batch_sizes: {self.mtp_verify_cuda_graph_batch_sizes}")
         else:
             self.mtp_verify_cuda_graph_batch_sizes = self.normal_cuda_graph_batch_sizes
-            self.cuda_graph_batch_sizes = self.normal_cuda_graph_batch_sizes
-            logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
+            logger.info(f"cuda graph batch_sizes: {self.normal_cuda_graph_batch_sizes}")
 
     def _build_cuda_graph_batch_sizes(self, batch_size_multiple: int):
         # gen cuda graph batch_sizes
@@ -83,8 +81,6 @@ class CudaGraph:
             assert False, "dead code"
 
     def _get_graph_batch_sizes(self, is_mtp_verify_decode=False):
-        if not hasattr(self, "normal_cuda_graph_batch_sizes"):
-            return self.cuda_graph_batch_sizes
         if is_mtp_verify_decode:
             return self.mtp_verify_cuda_graph_batch_sizes
         return self.normal_cuda_graph_batch_sizes

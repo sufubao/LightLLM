@@ -383,15 +383,12 @@ def causal_conv1d_update(
         assert conv_state_indices is not None
         batch = conv_state_indices.size(0)
         dim = x.size(1)
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            # Qwen3.5 MTP verify capture uses a uniform S+1 layout. Avoid a
-            # device-to-host sync on query_start_loc; .item() is illegal while a
-            # CUDA graph is being captured.
-            assert x.size(0) % batch == 0
-            seqlen = x.size(0) // batch
-        else:
-            # max query len across the varlen batch
-            seqlen = int((query_start_loc[1:] - query_start_loc[:-1]).max().item())
+        # The MTP verify layout is uniform (mtp_step+1) tokens per request, so seqlen is
+        # structurally x.size(0) // batch. Compute it without a D2H sync on query_start_loc on
+        # BOTH the capture and eager paths (#8a) — the eager .item() ran once per GDN layer per
+        # decode step. .item() is also illegal during CUDA-graph capture.
+        assert x.size(0) % batch == 0, "varlen conv update expects a uniform per-request length"
+        seqlen = x.size(0) // batch
     _, width = weight.shape
     # conv_state: (num_slots, dim, state_len), where state_len >= width - 1
     num_cache_lines, _, state_len = conv_state.size()

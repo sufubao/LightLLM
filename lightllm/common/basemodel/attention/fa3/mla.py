@@ -8,6 +8,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
+from lightllm.common.basemodel.batch_objs import is_mtp_verify_decode as is_mtp_verify_decode_fn
 
 
 class MlaFa3AttBackend(BaseAttBackend):
@@ -108,7 +109,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def init_state(self):
         self.backend: MlaFa3AttBackend = self.backend
         args_mtp_step = get_env_start_args().mtp_step
-        is_mtp_verify_decode = args_mtp_step > 0 and self.infer_state.b_num_accepted_tokens is not None
+        is_mtp_verify_decode = is_mtp_verify_decode_fn(args_mtp_step, self.infer_state.b_num_accepted_tokens)
 
         if is_mtp_verify_decode:
             # 修正 mtp 在 fa3 下的输入。

@@ -9,6 +9,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.batch_objs import is_mtp_verify_decode as is_mtp_verify_decode_fn
 from .infer_struct import InferStateInfo
 
 
@@ -70,7 +71,7 @@ class CudaGraph:
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
 
     def _decode_graph_key(self, infer_state: InferStateInfo):
-        is_mtp_verify_decode = self.mtp_step > 0 and infer_state.b_num_accepted_tokens is not None
+        is_mtp_verify_decode = is_mtp_verify_decode_fn(self.mtp_step, infer_state.b_num_accepted_tokens)
         return (infer_state.input_ids.shape[0], is_mtp_verify_decode)
 
     def need_capture(self, batch_size, is_mtp_verify_decode=False):

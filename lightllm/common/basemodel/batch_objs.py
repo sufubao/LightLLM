@@ -6,6 +6,13 @@ from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
+def is_mtp_verify_decode(mtp_step: int, b_num_accepted_tokens) -> bool:
+    """Single source of truth for the MTP verify-decode predicate (#21).
+    A decode forward is a verify pass iff MTP is enabled and the per-real-request accept tensor is
+    present — decode_mtp sets it on the main verify and clears it (None) on every draft forward."""
+    return mtp_step > 0 and b_num_accepted_tokens is not None
+
+
 @dataclass
 class ModelInput:
     # 通用变量

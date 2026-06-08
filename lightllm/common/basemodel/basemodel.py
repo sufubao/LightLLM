@@ -38,6 +38,7 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.batch_objs import is_mtp_verify_decode as is_mtp_verify_decode_fn
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import (
@@ -374,7 +375,9 @@ class TpPartBaseModel:
 
     def _get_decode_padding_unit(self, model_input: ModelInput) -> int:
         padding_unit = self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1
-        if self.args.mtp_step > 0 and (not model_input.is_prefill) and model_input.b_num_accepted_tokens is not None:
+        if (not model_input.is_prefill) and is_mtp_verify_decode_fn(
+            self.args.mtp_step, model_input.b_num_accepted_tokens
+        ):
             padding_unit = math.lcm(padding_unit, self.args.mtp_step + 1)
         return padding_unit
 
@@ -392,8 +395,8 @@ class TpPartBaseModel:
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = new_batch_size
 
-        is_mtp_verify_decode = (
-            self.args.mtp_step > 0 and (not model_input.is_prefill) and model_input.b_num_accepted_tokens is not None
+        is_mtp_verify_decode = (not model_input.is_prefill) and is_mtp_verify_decode_fn(
+            self.args.mtp_step, model_input.b_num_accepted_tokens
         )
         if is_mtp_verify_decode:
             mtp_size = self.args.mtp_step + 1
@@ -681,7 +684,7 @@ class TpPartBaseModel:
 
         origin_batch_size = model_input.batch_size
         infer_batch_size = self._get_decode_infer_batch_size(model_input)
-        is_mtp_verify_decode = self.args.mtp_step > 0 and model_input.b_num_accepted_tokens is not None
+        is_mtp_verify_decode = is_mtp_verify_decode_fn(self.args.mtp_step, model_input.b_num_accepted_tokens)
 
         if self.graph is not None and self.graph.can_run(
             batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
@@ -936,7 +939,7 @@ class TpPartBaseModel:
         origin_batch_size = model_input0.batch_size
         max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
         infer_batch_size = self._get_decode_infer_batch_size(model_input0)
-        is_mtp_verify_decode = self.args.mtp_step > 0 and model_input0.b_num_accepted_tokens is not None
+        is_mtp_verify_decode = is_mtp_verify_decode_fn(self.args.mtp_step, model_input0.b_num_accepted_tokens)
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(

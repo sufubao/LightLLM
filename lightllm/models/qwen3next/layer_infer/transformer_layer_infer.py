@@ -477,8 +477,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
         assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
-        if not torch.cuda.is_current_stream_capturing():
-            assert (infer_state.b_num_accepted_tokens >= 1).all(), "num_accepted must be >= 1"
+        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream (init sets accept_len=1; the
+        # offload/snapshot guards bound it to [1, mtp_step+1]). The old per-layer per-step .all()
+        # D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,

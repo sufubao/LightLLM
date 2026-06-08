@@ -258,9 +258,7 @@ class ChunkedPrefillBackend(ModeBackend):
             # arange(n_real)*(mtp_step+1). Compute on device instead of a per-step Python
             # list-comp + pinned pack + H2D (#22).
             n_real = model_input.batch_size // (self.mtp_step + 1)
-            b_req_mtp_start_loc = torch.arange(
-                n_real, dtype=torch.int32, device="cuda"
-            ) * (self.mtp_step + 1)
+            b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * (self.mtp_step + 1)
 
             mtp_accept_len, accepted_index = self._verify_mtp_v2(
                 new_next_token_ids=next_token_ids,
@@ -389,62 +387,6 @@ class ChunkedPrefillBackend(ModeBackend):
         )
         return None
 
-    def _build_eagle_accepted_draft_input(
-        self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-    ):
-        accepted_row_idx = b_req_mtp_start_loc + mtp_accept_len - 1
-        accepted_row_idx_long = accepted_row_idx.long()
-
-        draft_model_input = copy.copy(main_model_input)
-        draft_model_input.batch_size = accepted_row_idx.shape[0]
-        draft_model_input.total_token_num = draft_model_input.batch_size * main_model_input.max_kv_seq_len
-        draft_model_input.input_ids = next_token_ids.index_select(0, accepted_row_idx_long)
-        draft_model_input.mtp_draft_input_hiddens = main_model_output.mtp_main_output_hiddens.index_select(
-            0, accepted_row_idx_long
-        )
-        draft_model_input.b_req_idx = main_model_input.b_req_idx.index_select(0, accepted_row_idx_long)
-        draft_model_input.b_mtp_index = main_model_input.b_mtp_index.index_select(0, accepted_row_idx_long)
-        draft_model_input.b_seq_len = main_model_input.b_seq_len.index_select(0, accepted_row_idx_long)
-        draft_model_input.b_num_accepted_tokens = None
-        if main_model_input.mem_indexes is not None:
-            draft_model_input.mem_indexes = main_model_input.mem_indexes.index_select(0, accepted_row_idx_long)
-            draft_model_input.mem_indexes_cpu = None
-        if main_model_input.b_shared_seq_len is not None:
-            draft_model_input.b_shared_seq_len = main_model_input.b_shared_seq_len.index_select(
-                0, accepted_row_idx_long
-            )
-        if main_model_input.b_mark_shared_group is not None:
-            draft_model_input.b_mark_shared_group = main_model_input.b_mark_shared_group.index_select(
-                0, accepted_row_idx_long
-            )
-
-        if accepted_row_idx.device.type == "cpu":
-            selected_rows = accepted_row_idx.tolist()
-            draft_model_input.multimodal_params = [main_model_input.multimodal_params[i] for i in selected_rows]
-        else:
-            draft_model_input.multimodal_params = [
-                {"images": [], "audios": []} for _ in range(draft_model_input.batch_size)
-            ]
-
-        accepted_next_token_ids = draft_model_input.input_ids
-        accepted_req_idx = draft_model_input.b_req_idx
-        return draft_model_input, accepted_next_token_ids, accepted_req_idx
-
-    def _scatter_accepted_next_token_ids(self, accepted_req_idx: torch.Tensor, all_next_token_ids: torch.Tensor):
-        req_to_next_token_ids = self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
-        width = all_next_token_ids.shape[1]
-        req_to_next_token_ids[:, :width].index_copy_(
-            0,
-            accepted_req_idx.long(),
-            all_next_token_ids.to(dtype=req_to_next_token_ids.dtype),
-        )
-        return
-
     def _draft_decode_eagle(
         self,
         main_model_input: ModelInput,
@@ -461,7 +403,11 @@ class ChunkedPrefillBackend(ModeBackend):
         g_infer_state_lock.release()
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
-        (draft_model_input, draft_next_token_ids, accepted_req_idx,) = self._build_eagle_accepted_draft_input(
+        (
+            draft_model_input,
+            draft_next_token_ids,
+            accepted_req_idx,
+        ) = self._build_eagle_accepted_draft_input(
             main_model_input=main_model_input,
             main_model_output=main_model_output,
             next_token_ids=next_token_ids,

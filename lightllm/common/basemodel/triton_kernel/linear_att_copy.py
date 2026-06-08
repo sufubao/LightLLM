@@ -89,6 +89,18 @@ def copy_linear_att_state_to_kv_buffer(
 
     assert gpu_conv_state.dim() >= 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
     assert cpu_kv_conv_state.dim() >= 4, "cpu_kv_conv_state must be [size, layer, conv_dim, width_narrow]"
+    # #6: the byte snapshot hardcodes gpu_conv_stride_d=conv_itemsize, which is only valid when the
+    # widened-width axis is element-contiguous (stride 1). Fail fast instead of snapshotting wrong bytes.
+    assert gpu_conv_state.stride(3) == 1, (
+        "gpu_conv_state widened-width axis must be element-contiguous (stride 1); "
+        "gpu_conv_stride_d=conv_itemsize assumes it"
+    )
+    # #18: canonical_off = accept_len - 1 indexes into the widened slot; bound it to [0, mtp_step]
+    # (accept_len in [1, mtp_step+1]) so a stale/oversized accept-count can't slice past the slot.
+    assert int(b_num_accepted_tokens.min()) >= 1 and int(b_num_accepted_tokens.max()) <= mtp_step + 1, (
+        f"b_num_accepted_tokens out of range [1, {mtp_step + 1}]: "
+        f"min={int(b_num_accepted_tokens.min())} max={int(b_num_accepted_tokens.max())}"
+    )
     conv_itemsize = gpu_conv_state.element_size()
     gpu_conv_state = gpu_conv_state.view(
         gpu_conv_state.shape[0], gpu_conv_state.shape[1], gpu_conv_state.shape[2], -1

@@ -57,12 +57,6 @@ class LinearAttCacheConfig:
         # S = mtp_step (a verify step has seqlen=S+1 -> width-1+(seqlen-1)).
         return (self.get_conv_dim(), (self.conv_kernel_size - 1) + mtp_step)
 
-    # Backward-compatible alias: anything that persists / sizes the CPU page
-    # must use the NARROW shape. Kept as the default so existing callers stay
-    # correct; the GPU buffer alloc is migrated to get_gpu_conv_state_shape.
-    def get_conv_state_shape(self):
-        return self.get_persisted_conv_state_shape()
-
     def get_ssm_state_shape(self):
         return (self.num_linear_v_heads, self.head_linear_k_dim, self.head_linear_v_dim)
 

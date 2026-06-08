@@ -251,16 +251,16 @@ class ChunkedPrefillBackend(ModeBackend):
             )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            b_mtp_index_cpu = model_input.b_mtp_index
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
-            # verify the next_token_ids
-            b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
-            b_req_mtp_start_loc = g_pin_mem_manager.gen_from_list(
-                key="b_req_mtp_start_loc",
-                data=b_req_mtp_start_loc,
-                dtype=torch.int32,
-            ).cuda(non_blocking=True)
+            # verify the next_token_ids. The chunked decode batch is the contiguous
+            # (mtp_step+1)-expanded layout, so request starts are structurally
+            # arange(n_real)*(mtp_step+1). Compute on device instead of a per-step Python
+            # list-comp + pinned pack + H2D (#22).
+            n_real = model_input.batch_size // (self.mtp_step + 1)
+            b_req_mtp_start_loc = torch.arange(
+                n_real, dtype=torch.int32, device="cuda"
+            ) * (self.mtp_step + 1)
 
             mtp_accept_len, accepted_index = self._verify_mtp_v2(
                 new_next_token_ids=next_token_ids,
@@ -358,8 +358,13 @@ class ChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
     ):
-        # share some inference info with the main model
-        draft_model_input = main_model_input
+        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
+        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型 decode_mtp 设置的
+        # verify 布局，命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError
+        # （cudagraph 关闭时则会在扁平的 draft batch 上误用 S+1 分组的 verify attention）。
+        # 镜像 eagle 路径 _build_eagle_accepted_draft_input 中清空 b_num_accepted_tokens 的处理。
+        draft_model_input = copy.copy(main_model_input)
+        draft_model_input.b_num_accepted_tokens = None
         draft_model_output = main_model_output
         draft_next_token_ids = next_token_ids
         all_next_token_ids = []

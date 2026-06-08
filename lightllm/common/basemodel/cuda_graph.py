@@ -147,7 +147,7 @@ class CudaGraph:
         )
 
     def _is_mtp_draft_model(self, model):
-        return "MTPModel" in str(model.__class__)
+        return getattr(model, "is_mtp_draft_model", False)
 
     def _iter_warmup_graph_layouts(self, model):
         if self.mtp_step > 0:

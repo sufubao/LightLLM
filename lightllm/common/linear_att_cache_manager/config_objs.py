@@ -1,7 +1,7 @@
 import torch
 import dataclasses
 import triton
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, _mtp_added_layer_num
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
@@ -9,12 +9,8 @@ logger = init_logger(__name__)
 
 
 def get_mtp_draft_full_att_layer_num(args) -> int:
-    mtp_mode = getattr(args, "mtp_mode", None)
-    if mtp_mode == "eagle_with_att":
-        return 1
-    if mtp_mode == "vanilla_with_att":
-        return getattr(args, "mtp_step", 0)
-    return 0
+    # Delegates to the single source of truth in envs_utils (#9).
+    return _mtp_added_layer_num(getattr(args, "mtp_mode", None), getattr(args, "mtp_step", 0))
 
 
 @dataclasses.dataclass

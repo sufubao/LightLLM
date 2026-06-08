@@ -410,6 +410,10 @@ class InferenceContext:
                         self.radix_cache.linear_att_small_page_buffers.alloc_one_state_cache()
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
+                        assert 1 <= req.mtp_accept_len <= self.args.mtp_step + 1, (
+                            f"mtp_accept_len={req.mtp_accept_len} out of range "
+                            f"[1, {self.args.mtp_step + 1}]; would slice past the widened conv slot"
+                        )
                         canonical_off = req.mtp_accept_len - 1
                         conv_src_idx = req.req_idx
                         ssm_src_idx = req.req_idx * (self.args.mtp_step + 1) + canonical_off

@@ -148,38 +148,6 @@ def mtp_scatter_next_token_ids(
     )
 
 
-@triton.jit
-def _fwd_kernel_gen_b_req_mtp_start_loc(
-    b_mtp_index,
-    b_req_mtp_start_loc,
-    num_reqs: tl.constexpr,
-    batch_size: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    offset = tl.arange(0, BLOCK_SIZE)
-    cur_mtp_index = tl.load(b_mtp_index + offset, mask=offset < batch_size, other=-1)
-    non_zero_mask = tl.where(cur_mtp_index == 0, 1, 0)  # 1 0 1 0 0
-    output_offset = tl.cumsum(non_zero_mask) - 1
-    tl.store(b_req_mtp_start_loc + output_offset, offset, mask=non_zero_mask == 1)
-    return
-
-
-def gen_b_req_mtp_start_loc(b_mtp_index: torch.Tensor, num_reqs: int):
-    b_req_mtp_start_loc = torch.empty((num_reqs,), dtype=torch.int32, device=b_mtp_index.device)
-    BLOCK_SIZE = triton.next_power_of_2(b_mtp_index.shape[0])
-    batch_size = b_mtp_index.shape[0]
-    grid = (1,)
-    _fwd_kernel_gen_b_req_mtp_start_loc[grid](
-        b_mtp_index=b_mtp_index,
-        b_req_mtp_start_loc=b_req_mtp_start_loc,
-        num_reqs=num_reqs,
-        batch_size=batch_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=8,
-    )
-    return b_req_mtp_start_loc
-
-
 def test_mtp_verify():
     req_to_next_token_ids = torch.tensor(
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"
@@ -201,13 +169,5 @@ def test_mtp_verify():
     print(accepted_index)
 
 
-def test_gen_b_req_mtp_start_loc():
-    b_mtp_index = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32, device="cuda")
-    gt_output = torch.where(b_mtp_index == 0)[0]
-    b_req_mtp_start_loc = gen_b_req_mtp_start_loc(b_mtp_index, 2)
-    print(b_req_mtp_start_loc, gt_output)
-
-
 if __name__ == "__main__":
     test_mtp_verify()
-    # test_gen_b_req_mtp_start_loc()

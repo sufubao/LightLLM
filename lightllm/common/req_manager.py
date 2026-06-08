@@ -260,9 +260,11 @@ class ReqManagerForMamba(ReqManager):
 
     def init_linear_att_state(self, req: "InferReq"):
         conv_index = req.req_idx
-        ssm_index = req.req_idx * (self.mtp_step + 1)
+        ssm_start = req.req_idx * (self.mtp_step + 1)
         self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
-        self.req_to_ssm_state.buffer[:, ssm_index, ...].fill_(0)
+        # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
+        # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
+        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
         req.mtp_accept_len = 1
         return
 

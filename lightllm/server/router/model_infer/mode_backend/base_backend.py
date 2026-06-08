@@ -808,8 +808,9 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        probs = torch.softmax(logits, dim=-1)
-        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        # softmax is strictly monotonic, so argmax(softmax(logits)) == argmax(logits);
+        # skip the softmax to shorten the per-step MTP draft critical chain (need-to-fix #16).
+        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
         return draft_next_token_ids_gpu
 
     def _sample_and_scatter_token(

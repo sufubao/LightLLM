@@ -1,4 +1,5 @@
 import os
+import copy
 import numpy as np
 import torch
 import time
@@ -41,10 +42,6 @@ from lightllm.distributed.communication_op import (
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
-from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
@@ -328,22 +325,11 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            # Select MTP model class based on model type
+            # Select MTP model class based on model type (single source of truth: #10).
+            from lightllm.server.router.model_infer.mode_backend.mtp_model_factory import create_mtp_draft_model
+
             model_type = mtp_model_cfg.get("model_type", "")
-            if model_type == "deepseek_v3":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-            elif model_type == "qwen3_moe":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-            elif model_type == "mistral":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
-            else:
-                raise ValueError(f"Unsupported MTP model type: {model_type}")
+            self.draft_models.append(create_mtp_draft_model(model_type, self.args.mtp_mode, mtp_model_kvargs))
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
@@ -584,7 +570,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -761,11 +746,69 @@ class ModeBackend:
         )
         return mtp_accept_len, accepted_index
 
+    def _build_eagle_accepted_draft_input(
+        self,
+        main_model_input: ModelInput,
+        main_model_output: ModelOutput,
+        next_token_ids: torch.Tensor,
+        mtp_accept_len: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
+    ):
+        accepted_row_idx = b_req_mtp_start_loc + mtp_accept_len - 1
+        accepted_row_idx_long = accepted_row_idx.long()
+
+        draft_model_input = copy.copy(main_model_input)
+        draft_model_input.batch_size = accepted_row_idx.shape[0]
+        draft_model_input.total_token_num = draft_model_input.batch_size * main_model_input.max_kv_seq_len
+        draft_model_input.input_ids = next_token_ids.index_select(0, accepted_row_idx_long)
+        draft_model_input.mtp_draft_input_hiddens = main_model_output.mtp_main_output_hiddens.index_select(
+            0, accepted_row_idx_long
+        )
+        draft_model_input.b_req_idx = main_model_input.b_req_idx.index_select(0, accepted_row_idx_long)
+        draft_model_input.b_mtp_index = main_model_input.b_mtp_index.index_select(0, accepted_row_idx_long)
+        draft_model_input.b_seq_len = main_model_input.b_seq_len.index_select(0, accepted_row_idx_long)
+        draft_model_input.b_num_accepted_tokens = None
+        if main_model_input.mem_indexes is not None:
+            draft_model_input.mem_indexes = main_model_input.mem_indexes.index_select(0, accepted_row_idx_long)
+            draft_model_input.mem_indexes_cpu = None
+        if main_model_input.b_shared_seq_len is not None:
+            draft_model_input.b_shared_seq_len = main_model_input.b_shared_seq_len.index_select(
+                0, accepted_row_idx_long
+            )
+        if main_model_input.b_mark_shared_group is not None:
+            draft_model_input.b_mark_shared_group = main_model_input.b_mark_shared_group.index_select(
+                0, accepted_row_idx_long
+            )
+
+        if accepted_row_idx.device.type == "cpu":
+            selected_rows = accepted_row_idx.tolist()
+            draft_model_input.multimodal_params = [main_model_input.multimodal_params[i] for i in selected_rows]
+        else:
+            draft_model_input.multimodal_params = [
+                {"images": [], "audios": []} for _ in range(draft_model_input.batch_size)
+            ]
+
+        accepted_next_token_ids = draft_model_input.input_ids
+        accepted_req_idx = draft_model_input.b_req_idx
+        return draft_model_input, accepted_next_token_ids, accepted_req_idx
+
+    def _scatter_accepted_next_token_ids(self, accepted_req_idx: torch.Tensor, all_next_token_ids: torch.Tensor):
+        req_to_next_token_ids = self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
+        width = all_next_token_ids.shape[1]
+        req_to_next_token_ids[:, :width].index_copy_(
+            0,
+            accepted_req_idx.long(),
+            all_next_token_ids.to(dtype=req_to_next_token_ids.dtype),
+        )
+        return
+
     def _update_mtp_accept_ratio(
         self,
         decode_reqs: List[InferReq],
         mtp_accept_len_cpu: torch.Tensor,
     ):
+        # Master-only accept-ratio statistics. Unlike the phase-2 mtp_accept_len commit
+        # (inlined in decode_mtp) this only feeds metrics, so it may stay in phase 3.
         if self.is_master_in_dp:
             for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
@@ -773,8 +816,9 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        probs = torch.softmax(logits, dim=-1)
-        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        # softmax is strictly monotonic, so argmax(softmax(logits)) == argmax(logits);
+        # skip the softmax to shorten the per-step MTP draft critical chain (need-to-fix #16).
+        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
         return draft_next_token_ids_gpu
 
     def _sample_and_scatter_token(
@@ -787,7 +831,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

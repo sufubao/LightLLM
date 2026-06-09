@@ -11,12 +11,29 @@ from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
 from lightllm.utils.config_utils import get_config_json, get_dtype
 
 
+def parse_batch_size(value):
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("batch_size must contain at least one integer")
+
+    batch_sizes = []
+    for part in parts:
+        size = int(part)
+        if size <= 0:
+            raise ValueError("batch_size values must be positive integers")
+        batch_sizes.append(size)
+
+    if len(batch_sizes) == 1:
+        return batch_sizes[0]
+    return batch_sizes
+
+
 class TestModelInfer(unittest.TestCase):
     def test_model_infer(self):
         args = get_env_start_args()
         if args.data_type is None:
             args.data_type = get_dtype(args.model_dir)
-        if args.mtp_mode == "deepseekv3":
+        if args.mtp_mode is not None:
             test_model_inference_mtp(args)
         else:
             test_model_inference(args)
@@ -27,7 +44,7 @@ if __name__ == "__main__":
     import torch
 
     parser = make_argument_parser()
-    parser.add_argument("--batch_size", type=int, default=None, help="batch size")
+    parser.add_argument("--batch_size", type=parse_batch_size, default=None, help="batch size, e.g. 8 or 1,2,4,8")
     parser.add_argument("--input_len", type=int, default=64, help="input sequence length")
     parser.add_argument("--output_len", type=int, default=128, help="output sequence length")
     parser.add_argument(

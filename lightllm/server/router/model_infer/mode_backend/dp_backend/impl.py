@@ -1,3 +1,4 @@
+import copy
 import torch
 import time
 import torch.nn.functional as F
@@ -267,7 +268,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
 
             if (req_num0 + req_num1) > 0:
-
                 _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                     logits=logits,
                     b_req_idx=b_req_idx,
@@ -409,7 +409,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
-
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
@@ -436,9 +435,21 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
-        model_input, run_reqs, _ = padded_prepare_decode_inputs(decode_reqs)
+        model_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(decode_reqs)
         b_mtp_index_cpu = model_input.b_mtp_index
         req_num = len(run_reqs)
+
+        if self.mtp_step > 0:
+            # 标记 verify decode 布局：每个 req 一个 accept 数量（padding 出来的 fake req 记为 1）。
+            # 不设置 b_num_accepted_tokens 会让主模型的 verify forward 走非 verify 的 GDN/FA3 布局，
+            # 并命中 hybrid 主模型从未捕获的 cudagraph key (bs, False) -> KeyError。
+            # 与 chunked_prefill/impl.py 的 decode_mtp 保持一致。
+            accept_lens = [req.mtp_accept_len for req in decode_reqs] + [1] * padded_req_num
+            model_input.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
+                key="b_num_accepted_tokens",
+                data=accept_lens,
+                dtype=torch.int32,
+            )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
@@ -500,6 +511,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
+            # 写回每个 req 的本步 accept 数量，供下一步 verify 经 b_num_accepted_tokens 传入
+            # GDN/linear-att verify kernel（据此提交 conv/ssm 递归状态的正确偏移）。chunked 路径
+            # 在 chunked_prefill/impl.py 同样写回；dp 缺失会让状态停留在 accept=1 -> 状态错乱、精度崩塌。
+            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
+                req.mtp_accept_len = int(accept_len)
             verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
@@ -542,8 +558,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num: int,
     ):
         all_next_token_ids = []
-        # share some inference info with the main model
-        draft_model_input = model_input
+        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
+        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型设置的 verify 布局，
+        # 命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        draft_model_input = copy.copy(model_input)
+        draft_model_input.b_num_accepted_tokens = None
         draft_model_output = model_output
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
         if req_num > 0:
@@ -553,7 +572,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
-
             draft_model_input.input_ids = draft_next_token_ids_gpu
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -573,6 +591,64 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
         return None
 
+    def _build_padding_draft_input(self, model_input: ModelInput, model_output: ModelOutput, common_req_num: int):
+        """
+        构造一个纯 padding 的 draft 输入，用于本 rank 没有真实 decode 请求 (real_req_num == 0)
+        但其它 dp rank 仍有请求、需要本 rank 同步参与 mtp_step 次 draft forward 的集合通信的场景。
+
+        从已 padding 的 main model_input 中按 (mtp_step+1) 分组取每组首行 (mtp_index==0) 即可，
+        这些行均为 HOLD_REQUEST_ID / HOLD_TOKEN_MEMINDEX 的占位行。step0 的 hiddens 沿用主模型
+        对应占位行的 mtp_main_output_hiddens, 与原 DP 实现 (step0 使用 model_output.mtp_main_output_hiddens)
+        保持一致, 避免 None 触发 draft forward 崩溃。
+        """
+        mtp_size = self.mtp_step + 1
+        select_idx = torch.arange(common_req_num, dtype=torch.long, device=model_input.b_req_idx.device) * mtp_size
+
+        draft_model_input = copy.copy(model_input)
+        draft_model_input.batch_size = common_req_num
+        draft_model_input.total_token_num = common_req_num * model_input.max_kv_seq_len
+        draft_model_input.b_num_accepted_tokens = None
+        draft_model_input.b_req_idx = model_input.b_req_idx.index_select(0, select_idx)
+        draft_model_input.b_mtp_index = model_input.b_mtp_index.index_select(0, select_idx)
+        draft_model_input.b_seq_len = model_input.b_seq_len.index_select(0, select_idx)
+        draft_model_input.mem_indexes = model_input.mem_indexes.index_select(0, select_idx)
+        draft_model_input.mem_indexes_cpu = None
+        draft_model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens.index_select(0, select_idx)
+        draft_model_input.multimodal_params = [{"images": [], "audios": []} for _ in range(common_req_num)]
+        return draft_model_input
+
+    def _pad_draft_input_to(self, draft_model_input: ModelInput, target_req_num: int):
+        """
+        将 shrink 到 real_req_num 行的 draft 输入再 padding 回 target_req_num (= common_req_num) 行，
+        使本 rank 的 draft forward 行数与其它 dp rank 对齐，保证 MoE all-to-all / dp all-gather 的
+        shape 一致。padding 行采用与 padded_prepare_decode_inputs 相同的占位约定：
+        b_req_idx -> HOLD_REQUEST_ID, mem_indexes -> HOLD_TOKEN_MEMINDEX。
+        """
+        cur_req_num = draft_model_input.batch_size
+        pad_num = target_req_num - cur_req_num
+        if pad_num <= 0:
+            return draft_model_input
+
+        hold_req_id = g_infer_context.req_manager.HOLD_REQUEST_ID
+        hold_mem_idx = g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX
+
+        draft_model_input.input_ids = F.pad(draft_model_input.input_ids, (0, pad_num), value=0)
+        draft_model_input.b_req_idx = F.pad(draft_model_input.b_req_idx, (0, pad_num), value=hold_req_id)
+        draft_model_input.b_mtp_index = F.pad(draft_model_input.b_mtp_index, (0, pad_num), value=0)
+        # padding 行用一个合法的小 seq_len (沿用 padded_prepare_decode_inputs 中 fake req 的约定值 2)
+        draft_model_input.b_seq_len = F.pad(draft_model_input.b_seq_len, (0, pad_num), value=2)
+        draft_model_input.mem_indexes = F.pad(draft_model_input.mem_indexes, (0, pad_num), value=hold_mem_idx)
+        # mtp_draft_input_hiddens 为 (rows, hidden)，沿 dim0 在尾部补 0 行
+        draft_model_input.mtp_draft_input_hiddens = F.pad(
+            draft_model_input.mtp_draft_input_hiddens, (0, 0, 0, pad_num), value=0
+        )
+        draft_model_input.multimodal_params = draft_model_input.multimodal_params + [
+            {"images": [], "audios": []} for _ in range(pad_num)
+        ]
+        draft_model_input.batch_size = target_req_num
+        draft_model_input.total_token_num = target_req_num * draft_model_input.max_kv_seq_len
+        return draft_model_input
+
     def _draft_decode_eagle(
         self,
         model_input: ModelInput,
@@ -582,19 +658,12 @@ class DPChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         req_num: int,
     ):
-        all_next_token_ids = []
-        # share some inference info with the main model
-        draft_model_input = model_input
-        draft_model_output = model_output
-        all_next_token_ids.append(next_token_ids)
-        draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
-        if req_num > 0:
-            draft_next_token_ids_gpu[:req_num].copy_(next_token_ids, non_blocking=True)
+        mtp_size = self.mtp_step + 1
+        real_req_num = req_num // mtp_size
+        common_req_num = model_input.batch_size // mtp_size
+        padded_req_num = common_req_num - real_req_num
 
-        real_req_num = req_num // (self.mtp_step + 1)
-        padded_req_num = model_input.batch_size // (self.mtp_step + 1) - real_req_num
-        eagle_mem_indexes_cpu = None
-
+        # 即使本 rank 没有真实请求, 也要为其它 rank 同步运行 mtp_step 次 draft forward 的集合通信。
         g_infer_state_lock.acquire()
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
@@ -602,40 +671,54 @@ class DPChunkedPrefillBackend(ModeBackend):
         g_infer_state_lock.release()
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
-        # process the draft model output
-        for _step in range(self.mtp_step):
+        if real_req_num > 0:
+            (draft_model_input, draft_next_token_ids, accepted_req_idx,) = self._build_eagle_accepted_draft_input(
+                main_model_input=model_input,
+                main_model_output=model_output,
+                next_token_ids=next_token_ids,
+                mtp_accept_len=mtp_accept_len,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
+            if padded_req_num > 0:
+                draft_model_input = self._pad_draft_input_to(draft_model_input, common_req_num)
+                draft_next_token_ids = F.pad(draft_next_token_ids, (0, padded_req_num), value=0)
 
-            draft_model_input.input_ids = draft_next_token_ids_gpu
-            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
-            # spec decode: MTP
+            main_mem_indexes = model_input.mem_indexes.view(common_req_num, mtp_size)
+            eagle_padded = F.pad(
+                eagle_mem_indexes.view(self.mtp_step, real_req_num).transpose(0, 1).contiguous(),
+                (0, 0, 0, padded_req_num),
+                value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
+            )  # (common_req_num, mtp_step)
+            mem_index_plan = torch.cat([main_mem_indexes, eagle_padded], dim=1)
+            accepted_offsets = F.pad(mtp_accept_len.long() - 1, (0, padded_req_num), value=0)
+            req_offsets = torch.arange(common_req_num, dtype=torch.long, device=mem_index_plan.device)
+        else:
+            # 本 rank 无真实请求: 纯 padding draft 输入, 仅用于跟随集合通信, 结果不写回。
+            draft_model_input = self._build_padding_draft_input(model_input, model_output, common_req_num)
+            draft_next_token_ids = torch.zeros((common_req_num,), dtype=torch.int64, device="cuda")
+            mem_index_plan = model_input.mem_indexes.view(common_req_num, mtp_size)
+            accepted_offsets = torch.zeros((common_req_num,), dtype=torch.long, device=mem_index_plan.device)
+            req_offsets = torch.arange(common_req_num, dtype=torch.long, device=mem_index_plan.device)
+
+        draft_model_output = model_output
+        all_next_token_ids = [draft_next_token_ids]
+        for _step in range(self.mtp_step):
+            draft_model_input.input_ids = draft_next_token_ids
+            if _step > 0:
+                draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
+            draft_model_input.mem_indexes = mem_index_plan[req_offsets, accepted_offsets + _step]
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
-            # update the meta info of the inference
+            draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
             draft_model_input.b_seq_len += 1
             draft_model_input.max_kv_seq_len += 1
-            eagle_mem_indexes_i = eagle_mem_indexes[_step * real_req_num : (_step + 1) * real_req_num]
-            eagle_mem_indexes_i = F.pad(
-                input=eagle_mem_indexes_i,
-                pad=(0, padded_req_num),
-                mode="constant",
-                value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
-            )
-            draft_model_input.mem_indexes = torch.cat(
-                [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-            all_next_token_ids.append(draft_next_token_ids_gpu)
+            all_next_token_ids.append(draft_next_token_ids)
 
-        if req_num > 0:
-            all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
-            all_next_token_ids = all_next_token_ids[0:req_num, :]
-            mtp_scatter_next_token_ids(
-                req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                b_req_mtp_start_loc=b_req_mtp_start_loc,
+        if real_req_num > 0:
+            all_next_token_ids = torch.stack(all_next_token_ids, dim=1)[:real_req_num, :]
+            self._scatter_accepted_next_token_ids(
+                accepted_req_idx=accepted_req_idx[:real_req_num],
                 all_next_token_ids=all_next_token_ids,
-                b_req_idx=model_input.b_req_idx[:req_num],
-                mtp_accept_len=mtp_accept_len,
             )
         return eagle_mem_indexes_cpu
 
@@ -689,7 +772,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_output0, draft_model_output1 = model_output0, model_output1
 
             for draft_model_idx in range(self.num_mtp_models):
-
                 draft_model_input0 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input0,
                     b_next_token_ids=draft_next_token_ids_gpu0,
@@ -741,17 +823,36 @@ class DPChunkedPrefillBackend(ModeBackend):
         (
             model_input0,
             run_reqs0,
-            _,
+            padded_req_num0,
             model_input1,
             run_reqs1,
-            _,
+            padded_req_num1,
         ) = padded_overlap_prepare_decode_inputs(decode_reqs)
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
         all_next_token_ids = []
         b_mtp_index_cpu0 = model_input0.b_mtp_index
         b_mtp_index_cpu1 = model_input1.b_mtp_index
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
+        if self.mtp_step > 0:
+            # 标记两个 micro-batch 的 verify decode 布局，每个 req 一个 accept 数量
+            # （padding 出来的 fake req 记为 1）。run_reqs* 内每个真实 req 占 mtp_step+1 行，
+            # 取每组首行即可得到逐 req 的列表。不设置会让主模型 verify forward 走非 verify 布局，
+            # 命中 hybrid 主模型从未捕获的 cudagraph key (bs, False) -> KeyError。
+            mtp_size = self.mtp_step + 1
+            accept_lens0 = [r.mtp_accept_len for r in run_reqs0[::mtp_size]] + [1] * padded_req_num0
+            accept_lens1 = [r.mtp_accept_len for r in run_reqs1[::mtp_size]] + [1] * padded_req_num1
+            model_input0.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
+                key="b_num_accepted_tokens_0",
+                data=accept_lens0,
+                dtype=torch.int32,
+            )
+            model_input1.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
+                key="b_num_accepted_tokens_1",
+                data=accept_lens1,
+                dtype=torch.int32,
+            )
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
@@ -820,6 +921,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num0 + req_num1 > 0:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
+            # 写回每个 req 的本步 accept 数量，供下一步 verify 经 b_num_accepted_tokens 传入
+            # GDN/linear-att verify kernel（据此提交 conv/ssm 递归状态的正确偏移）。chunked 路径
+            # 在 chunked_prefill/impl.py 同样写回；dp 缺失会让状态停留在 accept=1 -> 状态错乱、精度崩塌。
+            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
+                req.mtp_accept_len = int(accept_len)
             verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
@@ -882,22 +988,26 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
-        # share some inference info with the main model
-        draft_model_input0, draft_model_input1 = model_input0, model_input1
+        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
+        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型设置的 verify 布局，
+        # 命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        draft_model_input0 = copy.copy(model_input0)
+        draft_model_input1 = copy.copy(model_input1)
+        draft_model_input0.b_num_accepted_tokens = None
+        draft_model_input1.b_num_accepted_tokens = None
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
         draft_next_token_ids_gpu1 = torch.zeros((model_input1.batch_size), dtype=torch.int64, device="cuda")
         if req_num0 > 0:
             draft_next_token_ids_gpu0[0:req_num0].copy_(next_token_ids[0:req_num0], non_blocking=True)
-        if req_num1 > 1:
+        if req_num1 > 0:
             draft_next_token_ids_gpu1[0:req_num1].copy_(
                 next_token_ids[req_num0 : (req_num0 + req_num1)], non_blocking=True
             )
 
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
-
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
             draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1
@@ -940,15 +1050,20 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
-        # share some inference info with the main model
-        draft_model_input0, draft_model_input1 = model_input0, model_input1
+        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
+        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型设置的 verify 布局，
+        # 命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        draft_model_input0 = copy.copy(model_input0)
+        draft_model_input1 = copy.copy(model_input1)
+        draft_model_input0.b_num_accepted_tokens = None
+        draft_model_input1.b_num_accepted_tokens = None
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
         draft_next_token_ids_gpu1 = torch.zeros((model_input1.batch_size), dtype=torch.int64, device="cuda")
         if req_num0 > 0:
             draft_next_token_ids_gpu0[0:req_num0].copy_(next_token_ids[0:req_num0], non_blocking=True)
-        if req_num1 > 1:
+        if req_num1 > 0:
             draft_next_token_ids_gpu1[0:req_num1].copy_(
                 next_token_ids[req_num0 : (req_num0 + req_num1)], non_blocking=True
             )
@@ -968,7 +1083,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for _step in range(self.mtp_step):
-
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
             draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1

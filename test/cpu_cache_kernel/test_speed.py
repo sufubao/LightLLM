@@ -104,7 +104,7 @@ gpu_full_att_kv_state = torch.empty(
 buffer_count = triton.cdiv(SEQ_LEN, big_page_token_num) + 2  # matches Qwen3NextMemManager
 
 
-conv_shape = linear_config.get_conv_state_shape()
+conv_shape = linear_config.get_persisted_conv_state_shape()
 cpu_kv_conv_state = torch.empty(
     (buffer_count, linear_config.linear_layer_num, *conv_shape),
     dtype=linear_config.conv_state_dtype,

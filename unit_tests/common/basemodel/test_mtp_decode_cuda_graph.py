@@ -103,7 +103,7 @@ def test_mtp_decode_cuda_graph_warmup_layouts_split_main_and_draft_models():
         pass
 
     class Qwen3_5MoeMTPModel:
-        pass
+        is_mtp_draft_model = True
 
     graph = CudaGraph.__new__(CudaGraph)
     graph.mtp_step = 2

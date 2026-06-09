@@ -361,6 +361,11 @@ class InferenceContext:
         if not self.is_linear_att_mixed_model:
             return
 
+        # 当 dynamic prompt cache 被禁用时 radix_cache 为 None，没有大页/小页缓冲可写，
+        # 线性层状态仅存于 req_manager 的 GPU buffer 即可，直接跳过跨请求缓存拷贝。
+        if self.radix_cache is None:
+            return
+
         # 大页对应的 linear att 的拷贝
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_buffer_ids = []
@@ -384,6 +389,10 @@ class InferenceContext:
 
             from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
+            b_num_accepted_tokens = torch.tensor(
+                [req.mtp_accept_len for req in reqs], dtype=torch.int32, requires_grad=False, device="cpu"
+            ).cuda(non_blocking=True)
+
             copy_linear_att_state_to_kv_buffer(
                 b_req_idx=b_req_idx,
                 big_page_buffer_ids=big_page_buffer_ids,
@@ -392,6 +401,7 @@ class InferenceContext:
                 cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
                 cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
                 mtp_step=self.args.mtp_step,
+                b_num_accepted_tokens=b_num_accepted_tokens,
             )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
@@ -407,9 +417,18 @@ class InferenceContext:
                         self.radix_cache.linear_att_small_page_buffers.alloc_one_state_cache()
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
-                        src_buffer_idx = req.req_idx * (self.args.mtp_step + 1)
-                        gpu_conv_state = self.req_manager.req_to_conv_state.buffer[:, src_buffer_idx, ...]
-                        gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...]
+                        assert 1 <= req.mtp_accept_len <= self.args.mtp_step + 1, (
+                            f"mtp_accept_len={req.mtp_accept_len} out of range "
+                            f"[1, {self.args.mtp_step + 1}]; would slice past the widened conv slot"
+                        )
+                        canonical_off = req.mtp_accept_len - 1
+                        conv_src_idx = req.req_idx
+                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1) + canonical_off
+                        narrow_w = self.req_manager.linear_config.get_persisted_conv_state_shape()[-1]
+                        gpu_conv_state = self.req_manager.req_to_conv_state.buffer[
+                            :, conv_src_idx, ..., canonical_off : canonical_off + narrow_w
+                        ]
+                        gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, ssm_src_idx, ...]
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id
 
                         dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_small_page_buffers.get_state_cache(
@@ -558,6 +577,8 @@ class InferReq:
             self.decode_need_token_num = self._mtp_decode_need_token_num
         else:
             self.decode_need_token_num = self._normal_decode_need_token_num
+
+        self.mtp_accept_len: int = 1
 
         if g_infer_context.is_linear_att_mixed_model:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_linear_att

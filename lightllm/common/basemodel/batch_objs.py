@@ -6,6 +6,13 @@ from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
+def is_mtp_verify_decode(mtp_step: int, b_num_accepted_tokens) -> bool:
+    """Single source of truth for the MTP verify-decode predicate (#21).
+    A decode forward is a verify pass iff MTP is enabled and the per-real-request accept tensor is
+    present — decode_mtp sets it on the main verify and clears it (None) on every draft forward."""
+    return mtp_step > 0 and b_num_accepted_tokens is not None
+
+
 @dataclass
 class ModelInput:
     # 通用变量
@@ -53,6 +60,8 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    b_num_accepted_tokens: Optional[torch.Tensor] = None
+
     def to_cuda(self):
         if self.input_ids is not None:
             self.input_ids = self.input_ids.cuda(non_blocking=True)
@@ -66,6 +75,8 @@ class ModelInput:
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
+        if self.b_num_accepted_tokens is not None:
+            self.b_num_accepted_tokens = self.b_num_accepted_tokens.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_prefill_start_loc is not None:

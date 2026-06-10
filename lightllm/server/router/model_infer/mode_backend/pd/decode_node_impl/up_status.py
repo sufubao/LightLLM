@@ -4,12 +4,12 @@ import asyncio
 import threading
 import websockets
 import inspect
-import setproctitle
 import pickle
+import setproctitle
 
 from typing import Dict
 from dataclasses import asdict
-from lightllm.server.pd_io_struct import UpKVStatus
+from lightllm.server.pd_io_struct import PDUpKVStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
@@ -20,10 +20,9 @@ logger = init_logger(__name__)
 
 
 class UpStatusManager:
-    def __init__(self, args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
+    def __init__(self, args, task_in_queue: mp.SimpleQueue):
         self.args = args
-        self.task_queue: mp.Queue[UpKVStatus] = task_in_queue
-        self.task_out_queue = task_out_queue
+        self.task_queue: mp.SimpleQueue[PDUpKVStatus] = task_in_queue
         self.daemon_thread = threading.Thread(target=self.thread_loop, daemon=True)
         self.daemon_thread.start()
 
@@ -67,7 +66,7 @@ class UpStatusManager:
         while True:
             try:
                 loop = asyncio.get_event_loop()
-                upkv_status: UpKVStatus = await loop.run_in_executor(None, self.task_queue.get)
+                upkv_status: PDUpKVStatus = await loop.run_in_executor(None, self.task_queue.get)
                 if upkv_status.pd_master_node_id in self.id_to_handle_queue:
                     await self.id_to_handle_queue[upkv_status.pd_master_node_id].put(upkv_status)
                 else:
@@ -90,9 +89,9 @@ class UpStatusManager:
                         try:
                             if pd_master_obj.node_id in self.id_to_handle_queue:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
-                                upkv_status: UpKVStatus = await task_queue.get()
+                                upkv_status: PDUpKVStatus = await task_queue.get()
                                 await websocket.send(pickle.dumps(upkv_status))
-                                logger.info(f"up status: {upkv_status}")
+                                logger.info(f"up kv status: {upkv_status}")
                             else:
                                 await asyncio.sleep(3)
                         except BaseException as e:
@@ -109,18 +108,18 @@ class UpStatusManager:
                 logger.info("reconnection to pd_master")
 
 
-def _init_env(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
+def _init_env(args, task_in_queue: mp.SimpleQueue):
     graceful_registry(inspect.currentframe().f_code.co_name)
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::up_kv_status")
-    up_kv_manager = UpStatusManager(args, task_in_queue, task_out_queue)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::pd_up_kv_status")
+    up_kv_manager = UpStatusManager(args, task_in_queue)
     logger.info(f"up kv manager {str(up_kv_manager)} start ok")
     while True:
         time.sleep(666)
     return
 
 
-def start_up_kv_status_process(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
-    proc = mp.Process(target=_init_env, args=(args, task_in_queue, task_out_queue))
+def start_up_kv_status_process(args, task_in_queue: mp.SimpleQueue):
+    proc = mp.Process(target=_init_env, args=(args, task_in_queue))
     proc.start()
     assert proc.is_alive()
     logger.info("up_kv_status_process start")

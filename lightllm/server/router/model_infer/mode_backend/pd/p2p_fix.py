@@ -120,7 +120,7 @@ def reduce_tensor(tensor):
         shared_cache[handle] = StorageWeakRef(storage)
         # _backward_hooks purposely omitted here, see
         # Note [Don't serialize hooks]
-        from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import (
+        from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import (
             p2p_fix_rebuild_cuda_tensor,
         )
 

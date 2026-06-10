@@ -647,10 +647,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sampling_backend",
         type=str,
-        choices=["triton", "sglang_kernel"],
+        choices=["triton", "flashinfer"],
         default="triton",
         help="""sampling used impl. 'triton' is use torch and triton kernel,
-        sglang_kernel use sglang_kernel impl""",
+        flashinfer use flashinfer sampling impl""",
     )
     parser.add_argument(
         "--penalty_counter_mode",

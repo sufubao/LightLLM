@@ -1,5 +1,6 @@
 import gzip
 import os
+import threading
 import pytest
 from lightllm.server.core.objs.io_objs import StartProfileCmd, StopProfileCmd
 from lightllm.server.core.objs.profile_status_board import (
@@ -51,6 +52,12 @@ def start_cmd(tmp_path, **kw):
     defaults = dict(profile_id=1, output_dir=str(tmp_path), activities=["CPU"], with_stack=False)
     defaults.update(kw)
     return StartProfileCmd(**defaults)
+
+
+def run_in_thread(fn):
+    t = threading.Thread(target=fn)
+    t.start()
+    t.join()
 
 
 def test_auto_stop_after_num_steps(tmp_path, board):
@@ -171,6 +178,42 @@ def test_export_failure_leaves_no_partial_files(tmp_path, board):
     mgr.on_step_boundary()
     assert board.get_slot(0)["error_code"] == ERROR_EXPORT_FAILED
     assert os.listdir(tmp_path) == []
+
+
+def test_cross_thread_stop_deferred_to_owner(tmp_path, board):
+    fake = FakeProfiler()
+    mgr = make_manager(board, lambda cmd: fake)
+    mgr.on_cmd(start_cmd(tmp_path, num_steps=None))
+    mgr.on_step_boundary()  # owner = 当前线程
+    run_in_thread(lambda: mgr.on_cmd(StopProfileCmd()))
+    assert not fake.stopped  # 非 owner 线程不能 stop, 只做标记
+    assert board.get_slot(0)["state"] == "running"
+    mgr.on_step_boundary()  # owner 线程下一个 boundary 真正 stop
+    assert fake.stopped
+    assert board.get_slot(0)["state"] == "idle"
+
+
+def test_pass_boundary_flushes_pending_stop(tmp_path, board):
+    fake = FakeProfiler()
+    mgr = make_manager(board, lambda cmd: fake)
+    mgr.on_cmd(start_cmd(tmp_path, num_steps=None))
+    mgr.on_step_boundary()
+    run_in_thread(lambda: mgr.on_cmd(StopProfileCmd()))
+    assert not fake.stopped
+    mgr.on_pass_boundary()  # owner 线程空转时补执行 stop
+    assert fake.stopped
+
+
+def test_target_reached_on_non_owner_thread_defers(tmp_path, board):
+    fake = FakeProfiler()
+    mgr = make_manager(board, lambda cmd: fake)
+    mgr.on_cmd(start_cmd(tmp_path, num_steps=2))
+    mgr.on_step_boundary()  # forward 1, owner = 当前线程
+    mgr.on_step_boundary()  # forward 2
+    run_in_thread(mgr.on_step_boundary)  # forward 3 的 boundary 在另一线程命中 target
+    assert not fake.stopped
+    mgr.on_step_boundary()  # owner 线程 boundary: 真正 stop (窗口多了 1 个 forward)
+    assert fake.stopped
 
 
 def test_idle_fast_path_counts_forwards(tmp_path, board):

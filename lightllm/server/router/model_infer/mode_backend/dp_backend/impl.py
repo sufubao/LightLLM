@@ -134,6 +134,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     )
                     continue
                 elif run_way.is_pass():
+                    self.profiler_manager.on_pass_boundary()
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()

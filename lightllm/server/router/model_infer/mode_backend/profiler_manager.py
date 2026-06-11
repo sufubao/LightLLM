@@ -41,11 +41,17 @@ def _default_profiler_factory(cmd: StartProfileCmd):
 class WorkerProfilerManager:
     """
     每个推理 rank 进程一个实例, 状态机: IDLE -> ARMED -> RUNNING -> FLUSHING -> IDLE。
-    一个 "step" 是一次真实的模型 forward batch, 不包含 infer_loop 的空转迭代。
+    一个 "step" 是调度器的一个 forward step, 不包含 infer_loop 的空转迭代;
+    同一 step 内的 MTP draft forward 和 DP-overlap microbatch 都只算一个 step。
     on_cmd 和 on_step_boundary 都只会被持有 overlap event 令牌的 infer_loop 线程调用
     (令牌串行化了两个线程的 launch 区段), 锁只是防御性的。
+    kineto (torch.profiler) 的 start/stop 必须发生在同一线程: 跨线程 stop 会直接抛
+    RuntimeError 并泄漏 profiler callback。因此 start 时记录 owner 线程, 非 owner 线程
+    命中停止条件时只标记 _pending_stop, 由 owner 线程在下一个 step/pass boundary 真正
+    执行 stop —— 生产中 num_steps 的捕获窗口因此可能多出一个 forward (±1 step)。
     停止时先 torch.cuda.synchronize() 排空两个线程已发射的全部 GPU 工作, 再 stop/export,
-    保证捕获窗口正好覆盖 num_steps 个完整 forward。
+    保证捕获窗口覆盖完整的 forward。stop/export 在 infer 线程内同步执行, FLUSHING 期间
+    服务会停顿 (状态板上可观测), 这是接受的取舍。
     """
 
     def __init__(
@@ -69,6 +75,8 @@ class WorkerProfilerManager:
         self._profiler = None
         self._start_at_ct = 0
         self._target_ct: Optional[int] = None
+        self._owner_thread_ident: Optional[int] = None
+        self._pending_stop = False
         self.forward_ct = 0
         self.status_board.set_slot(
             self._slot, state=STATE_IDLE, profile_id=0, forward_ct=0, target_ct=0, error_code=ERROR_NONE
@@ -97,11 +105,11 @@ class WorkerProfilerManager:
                     logger.warning(f"ignore stale stop_profile cmd for profile_id {cmd.profile_id}")
                     return
                 if self._state == STATE_RUNNING:
-                    self._stop_and_export()
+                    self._try_stop_and_export()
                 elif self._state == STATE_ARMED:
                     self._state = STATE_IDLE
                     self._cmd = None
-                    self.status_board.set_slot(self._slot, state=STATE_IDLE)
+                    self.status_board.set_slot(self._slot, state=STATE_IDLE, profile_id=0, target_ct=0)
         return
 
     def on_step_boundary(self):
@@ -112,19 +120,41 @@ class WorkerProfilerManager:
         with self._lock:
             self.forward_ct += 1
             if self._state == STATE_RUNNING:
-                if self._target_ct is not None and self.forward_ct >= self._target_ct:
-                    # 在本次 forward 发射之前停止, 捕获窗口正好是 num_steps 个 forward。
-                    self._stop_and_export()
+                if self._pending_stop or (self._target_ct is not None and self.forward_ct >= self._target_ct):
+                    # 在本次 forward 发射之前停止; 若停止条件上次命中在非 owner 线程, 窗口可能多一个 forward。
+                    self._try_stop_and_export()
                 else:
                     self.status_board.set_slot(self._slot, forward_ct=self.forward_ct)
             elif self._state == STATE_ARMED and self.forward_ct >= self._start_at_ct:
                 self._do_start()
         return
 
+    def on_pass_boundary(self):
+        """空转迭代中只用于补执行被推迟到 owner 线程的 stop, 不计步。"""
+        if not self._pending_stop:
+            return
+        with self._lock:
+            if self._state == STATE_RUNNING and self._pending_stop:
+                self._try_stop_and_export()
+        return
+
+    def _try_stop_and_export(self):
+        # kineto 的 start/stop 必须发生在同一线程 (跨线程 stop 实测直接抛错并泄漏 callback),
+        # 非 owner 线程命中停止条件时只做标记, 由 owner 线程在下一个 boundary 真正执行 stop。
+        # 因此生产中 num_steps 的捕获窗口可能多出一个 forward (±1)。
+        if threading.get_ident() == self._owner_thread_ident:
+            self._stop_and_export()
+        else:
+            if not self._pending_stop:
+                logger.info("profiler stop deferred to owner thread")
+            self._pending_stop = True
+        return
+
     def _do_start(self):
         try:
             self._profiler = self._profiler_factory(self._cmd)
             self._profiler.start()
+            self._owner_thread_ident = threading.get_ident()
             self._target_ct = self.forward_ct + self._cmd.num_steps if self._cmd.num_steps is not None else None
             self._state = STATE_RUNNING
             self.status_board.set_slot(
@@ -173,5 +203,7 @@ class WorkerProfilerManager:
             self._profiler = None
             self._cmd = None
             self._target_ct = None
+            self._pending_stop = False
+            self._owner_thread_ident = None
             self._state = STATE_IDLE
         return

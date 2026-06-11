@@ -35,7 +35,6 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 
-
 logger = init_logger(__name__)
 
 
@@ -241,10 +240,11 @@ class RouterManager:
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
                         logger.debug(self.router_statics.log_str())
-                        self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
+                    self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
+                self.metric_client.gauge_set("lightllm_num_running_reqs", len(self.running_batch.reqs))
                 self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
                 self.metric_client.gauge_set(
                     "lightllm_batch_current_max_tokens",
@@ -257,6 +257,7 @@ class RouterManager:
                 self.req_queue.update_token_load(self.running_batch, force_update=True)
                 if counter_count % 300 == 0:
                     self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
+                    self.metric_client.gauge_set("lightllm_num_running_reqs", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
                     self.metric_client.gauge_set("lightllm_queue_size", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)

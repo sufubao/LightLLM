@@ -340,6 +340,12 @@ class RouterManager:
     async def _handle_profile_control_req(self, profile_req: ProfileControlReq):
         if "worker" not in profile_req.targets:
             return
+        try:
+            worker_cmd = profile_req.to_worker_cmd()
+        except ValueError as e:
+            # zmq 端口上任何本地进程都能投递消息, 不能让畸形 action 打挂 router 主循环。
+            logger.error(f"invalid profile cmd dropped: {e}")
+            return
         # 有界等待: profile cmd 不能让 router 主循环无限自旋 (buffer 可能被卡住的 rank 占住)。
         for _ in range(5000):
             if self.shm_reqs_io_buffer.is_empty():
@@ -357,7 +363,7 @@ class RouterManager:
                 error_code=ERROR_CMD_DELIVERY_FAILED,
             )
             return
-        self.shm_reqs_io_buffer.write_obj([profile_req.to_worker_cmd()])
+        self.shm_reqs_io_buffer.write_obj([worker_cmd])
         self.shm_reqs_io_buffer.set_ready()
         self.profile_status_board.set_slot(
             self.profile_status_board.router_slot,

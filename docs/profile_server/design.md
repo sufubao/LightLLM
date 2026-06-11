@@ -207,16 +207,27 @@ Owned by `ModeBackend`; mirrors SGLang's `SchedulerProfilerManager`:
   predicate). The cmd received in `_read_reqs_buffer_and_init_reqs()` only
   *arms* the state machine; transitions happen at forward boundaries.
 - **Overlap-mode hazard (LightLLM-specific)**: overlap mode runs **two**
-  `infer_loop` threads per process (`base_backend.py:243-248`), with the
-  second thread potentially mid-launch on a separate overlap stream when a
-  start/stop fires. `torch.profiler` is process-global, so: (a) one shared
-  state machine (IDLE → ARMED → RUNNING → FLUSHING) + shared forward counter
-  guarded by a lock, transitions idempotent; (b) before `start()` and before
-  `export`, **synchronize/drain the overlap pipeline** (wait for the other
-  thread's in-flight forward events) so captures don't begin or end mid-step.
-  MVP fallback if draining proves fiddly: refuse `/start_profile` in overlap
-  mode unless a `force` flag is set, and document profiling with overlap
-  disabled.
+  `infer_loop` threads per process (`base_backend.py:243-248`). Their CPU
+  launch sections are serialized by the overlap-event "baton"
+  (`wait_to_forward` → `notify_forward_*`), so `on_cmd`/`on_step_boundary`
+  never race — one shared state machine (IDLE → ARMED → RUNNING → FLUSHING)
+  with a defensive lock suffices, and `torch.cuda.synchronize()` before stop
+  drains both threads' in-flight GPU work.
+- **Kineto thread-affinity (found in review, confirmed empirically on torch
+  2.9.1)**: `torch.profiler` start/stop must happen on the **same thread** —
+  a cross-thread `stop()` raises and leaks the kineto callback. Since forwards
+  alternate between the two infer threads, the stop condition often fires on
+  the non-owner thread. Resolution: record the owner `thread.ident` at start;
+  a stop condition hit on another thread only sets a pending flag, and the
+  owner thread performs the real stop at its next forward or pass boundary.
+  Consequence: in production the `num_steps` capture window is **±1 forward**.
+  Second consequence (verify on GPU in Task 8): CPU-op rows from the
+  non-owner thread may be missing from the trace (kernel rows still present).
+- **Export stall (accepted trade-off)**: stop/export/gzip run synchronously in
+  the infer thread while holding the baton — serving on the node stalls for
+  the duration of the flush. This is observable as the FLUSHING state on
+  `/profile_status` (SGLang has the same stall). Keep `num_steps` small and
+  `with_stack` off for low-stall captures.
 - **Export**: `export_chrome_trace` to
   `{output_dir}/{prefix}-{profile_id}-TP-{t}[-DP-{d}].trace.json.gz`, one file
   per rank, with a `dist.barrier()` before/after export like SGLang

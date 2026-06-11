@@ -53,7 +53,7 @@ class ProfileStatusBoard:
         return
 
     def get_slot(self, slot) -> dict:
-        row = self.arr[slot]
+        row = self.arr[slot].copy()
         return {
             "state": STATE_NAMES.get(int(row[_FIELD_STATE]), "unknown"),
             "profile_id": int(row[_FIELD_PROFILE_ID]),

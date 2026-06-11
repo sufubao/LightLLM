@@ -21,7 +21,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
+from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd, StartProfileCmd, StopProfileCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -49,6 +49,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from .profiler_manager import WorkerProfilerManager
 
 
 class ModeBackend:
@@ -232,6 +233,13 @@ class ModeBackend:
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         # 只会在 pd pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
+
+        # profile 状态机, 由 /start_profile http 接口经 router 广播的 cmd 驱动。
+        self.profiler_manager = WorkerProfilerManager(
+            rank_in_node=self.rank_in_node,
+            dp_rank_in_node=self.dp_rank_in_node,
+            node_world_size=self.node_world_size,
+        )
 
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
@@ -428,6 +436,9 @@ class ModeBackend:
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
+                elif isinstance(obj, (StartProfileCmd, StopProfileCmd)):
+                    # 只会在持有 overlap event 令牌的 infer 线程中执行, 与 on_step_boundary 天然串行。
+                    self.profiler_manager.on_cmd(obj)
                 else:
                     assert False, f"error type {type(obj)}"
             if init_reqs:

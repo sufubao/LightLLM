@@ -117,7 +117,7 @@ g_objs = G_Objs()
 
 LIGHTLLM_PROFILE_DIR_ROOT = os.getenv("LIGHTLLM_TORCH_PROFILER_DIR", "/tmp/lightllm_profile")
 _PROFILE_ALLOWED_ACTIVITIES = {"CPU", "GPU"}
-_PROFILE_PREFIX_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_PROFILE_PREFIX_RE = re.compile(r"^(?!\.+$)[A-Za-z0-9._-]+$")  # 单个路径分量, 且不允许纯点 (.., ...)
 
 app = FastAPI()
 g_objs.app = app
@@ -267,11 +267,7 @@ async def start_profile(request: Request) -> Response:
         return create_error_response(HTTPStatus.NOT_IMPLEMENTED, "only the 'worker' target is supported")
 
     activities = body.get("activities", ["CPU", "GPU"])
-    if (
-        not isinstance(activities, list)
-        or not activities
-        or not set(activities).issubset(_PROFILE_ALLOWED_ACTIVITIES)
-    ):
+    if not isinstance(activities, list) or not activities or not set(activities).issubset(_PROFILE_ALLOWED_ACTIVITIES):
         return create_error_response(
             HTTPStatus.BAD_REQUEST,
             f"activities must be a non-empty list, subset of {sorted(_PROFILE_ALLOWED_ACTIVITIES)}",

@@ -1,4 +1,5 @@
 import pickle
+import pytest
 from lightllm.server.core.objs.io_objs import ProfileControlReq, StartProfileCmd, StopProfileCmd
 
 
@@ -54,3 +55,9 @@ def test_defaults():
     assert req.num_steps is None
     assert req.start_step is None
     assert req.profile_prefix == "lightllm"
+
+
+def test_unknown_action_raises():
+    req = ProfileControlReq(action="bogus", profile_id=1)
+    with pytest.raises(ValueError):
+        req.to_worker_cmd()

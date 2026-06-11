@@ -16,6 +16,7 @@ class StartProfileCmd:
 
 @dataclass
 class StopProfileCmd:
+    # 0 表示 "停止当前任意 capture": 无状态的 /stop_profile 接口不知道原始 profile_id。
     profile_id: int = 0
 
 
@@ -25,6 +26,7 @@ class ProfileControlReq:
 
     action: str  # "start" or "stop"
     profile_id: int
+    # router 层路由用, 不会转发给 worker cmd
     targets: List[str] = field(default_factory=lambda: ["worker"])
     output_dir: str = ""
     num_steps: Optional[int] = None
@@ -46,4 +48,6 @@ class ProfileControlReq:
                 record_shapes=self.record_shapes,
                 profile_prefix=self.profile_prefix,
             )
-        return StopProfileCmd(profile_id=self.profile_id)
+        if self.action == "stop":
+            return StopProfileCmd(profile_id=self.profile_id)
+        raise ValueError(f"unknown profile action: {self.action!r}")

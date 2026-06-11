@@ -270,6 +270,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
     parser.add_argument("--disable_log_stats", action="store_true", help="disable logging throughput stats.")
+    parser.add_argument(
+        "--enable_profiling",
+        action="store_true",
+        help="""enable the /start_profile /stop_profile /profile_status http endpoints for on-demand
+        torch.profiler capture. trace output is restricted to subdirs of LIGHTLLM_TORCH_PROFILER_DIR
+        (default /tmp/lightllm_profile).""",
+    )
     parser.add_argument("--log_stats_interval", type=int, default=10, help="log stats interval in second.")
     parser.add_argument(
         "--disable_shm_warning",

@@ -41,6 +41,7 @@ from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisco
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
+from lightllm.server.core.objs.io_objs import ProfileControlReq
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -112,6 +113,9 @@ class G_Objs:
 
 
 g_objs = G_Objs()
+
+LIGHTLLM_PROFILE_DIR_ROOT = os.getenv("LIGHTLLM_TORCH_PROFILER_DIR", "/tmp/lightllm_profile")
+_PROFILE_ALLOWED_ACTIVITIES = {"CPU", "GPU"}
 
 app = FastAPI()
 g_objs.app = app
@@ -227,6 +231,88 @@ async def token_load(request: Request):
         ans_dict = {k: v[0] for k, v in ans_dict.items()}
 
     return JSONResponse(ans_dict, status_code=200)
+
+
+def _check_profiling_enabled():
+    if not g_objs.args.enable_profiling:
+        return create_error_response(
+            HTTPStatus.NOT_IMPLEMENTED, "profiling is not enabled, launch the server with --enable_profiling"
+        )
+    return None
+
+
+@app.post("/start_profile", summary="Arm an on-demand torch.profiler capture on all worker ranks")
+async def start_profile(request: Request) -> Response:
+    error = _check_profiling_enabled()
+    if error is not None:
+        return error
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    targets = body.get("targets", ["worker"])
+    if any(target != "worker" for target in targets):
+        return create_error_response(HTTPStatus.NOT_IMPLEMENTED, "only the 'worker' target is supported")
+
+    activities = body.get("activities", ["CPU", "GPU"])
+    if not activities or not set(activities).issubset(_PROFILE_ALLOWED_ACTIVITIES):
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST, f"activities must be a non-empty subset of {sorted(_PROFILE_ALLOWED_ACTIVITIES)}"
+        )
+
+    num_steps = body.get("num_steps")
+    start_step = body.get("start_step")
+    for name, value in (("num_steps", num_steps), ("start_step", start_step)):
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+            return create_error_response(HTTPStatus.BAD_REQUEST, f"{name} must be a positive integer")
+
+    root_dir = os.path.realpath(LIGHTLLM_PROFILE_DIR_ROOT)
+    output_dir = os.path.realpath(body.get("output_dir") or root_dir)
+    if output_dir != root_dir and not output_dir.startswith(root_dir + os.sep):
+        return create_error_response(HTTPStatus.BAD_REQUEST, f"output_dir must be under {root_dir}")
+
+    profile_id = int(time.time() * 1000)
+    profile_req = ProfileControlReq(
+        action="start",
+        profile_id=profile_id,
+        targets=targets,
+        output_dir=output_dir,
+        num_steps=num_steps,
+        start_step=start_step,
+        activities=activities,
+        with_stack=bool(body.get("with_stack", True)),
+        record_shapes=bool(body.get("record_shapes", False)),
+        profile_prefix=str(body.get("profile_prefix", "lightllm")),
+    )
+    await g_objs.httpserver_manager.send_profile_control(profile_req)
+    # 202: 仅代表命令已入队, worker 实际状态请轮询 /profile_status。
+    return JSONResponse({"status": "accepted", "profile_id": profile_id, "output_dir": output_dir}, status_code=202)
+
+
+@app.post("/stop_profile", summary="Stop a running capture and flush traces")
+async def stop_profile(request: Request) -> Response:
+    error = _check_profiling_enabled()
+    if error is not None:
+        return error
+    profile_req = ProfileControlReq(action="stop", profile_id=0)
+    await g_objs.httpserver_manager.send_profile_control(profile_req)
+    return JSONResponse({"status": "accepted"}, status_code=202)
+
+
+@app.get("/profile_status", summary="Per-rank profiler state")
+async def profile_status(request: Request) -> Response:
+    error = _check_profiling_enabled()
+    if error is not None:
+        return error
+    board = g_objs.httpserver_manager.profile_status_board
+    return JSONResponse(
+        {
+            "workers": [board.get_slot(slot) for slot in range(board.num_worker_slots)],
+            "router": board.get_slot(board.router_slot),
+        },
+        status_code=200,
+    )
 
 
 @app.post("/generate")

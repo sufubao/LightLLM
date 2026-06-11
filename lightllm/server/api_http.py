@@ -18,6 +18,7 @@
 
 import asyncio
 import collections
+import re
 import time
 
 import uvloop
@@ -116,6 +117,7 @@ g_objs = G_Objs()
 
 LIGHTLLM_PROFILE_DIR_ROOT = os.getenv("LIGHTLLM_TORCH_PROFILER_DIR", "/tmp/lightllm_profile")
 _PROFILE_ALLOWED_ACTIVITIES = {"CPU", "GPU"}
+_PROFILE_PREFIX_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 app = FastAPI()
 g_objs.app = app
@@ -238,6 +240,10 @@ def _check_profiling_enabled():
         return create_error_response(
             HTTPStatus.NOT_IMPLEMENTED, "profiling is not enabled, launch the server with --enable_profiling"
         )
+    if getattr(g_objs.httpserver_manager, "profile_status_board", None) is None:
+        return create_error_response(
+            HTTPStatus.NOT_IMPLEMENTED, f"profiling is not supported in run_mode {g_objs.args.run_mode!r}"
+        )
     return None
 
 
@@ -251,14 +257,30 @@ async def start_profile(request: Request) -> Response:
     except Exception:
         body = {}
 
+    if not isinstance(body, dict):
+        return create_error_response(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
+
     targets = body.get("targets", ["worker"])
+    if not isinstance(targets, list) or not targets or any(not isinstance(t, str) for t in targets):
+        return create_error_response(HTTPStatus.BAD_REQUEST, "targets must be a non-empty list of strings")
     if any(target != "worker" for target in targets):
         return create_error_response(HTTPStatus.NOT_IMPLEMENTED, "only the 'worker' target is supported")
 
     activities = body.get("activities", ["CPU", "GPU"])
-    if not activities or not set(activities).issubset(_PROFILE_ALLOWED_ACTIVITIES):
+    if (
+        not isinstance(activities, list)
+        or not activities
+        or not set(activities).issubset(_PROFILE_ALLOWED_ACTIVITIES)
+    ):
         return create_error_response(
-            HTTPStatus.BAD_REQUEST, f"activities must be a non-empty subset of {sorted(_PROFILE_ALLOWED_ACTIVITIES)}"
+            HTTPStatus.BAD_REQUEST,
+            f"activities must be a non-empty list, subset of {sorted(_PROFILE_ALLOWED_ACTIVITIES)}",
+        )
+
+    profile_prefix = str(body.get("profile_prefix", "lightllm"))
+    if not _PROFILE_PREFIX_RE.match(profile_prefix):
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST, "profile_prefix must match [A-Za-z0-9._-]+ (single path component)"
         )
 
     num_steps = body.get("num_steps")
@@ -283,7 +305,7 @@ async def start_profile(request: Request) -> Response:
         activities=activities,
         with_stack=bool(body.get("with_stack", True)),
         record_shapes=bool(body.get("record_shapes", False)),
-        profile_prefix=str(body.get("profile_prefix", "lightllm")),
+        profile_prefix=profile_prefix,
     )
     await g_objs.httpserver_manager.send_profile_control(profile_req)
     # 202: 仅代表命令已入队, worker 实际状态请轮询 /profile_status。

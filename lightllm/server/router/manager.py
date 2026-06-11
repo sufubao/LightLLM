@@ -20,11 +20,19 @@ from lightllm.server.core.objs.io_objs import (
     GroupReqIndexes,
     AbortedReqCmd,
     StopStrMatchedReqCmd,
+    ProfileControlReq,
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
+from lightllm.server.core.objs.profile_status_board import (
+    ProfileStatusBoard,
+    STATE_ERROR,
+    STATE_IDLE,
+    ERROR_CMD_DELIVERY_FAILED,
+    ERROR_NONE,
+)
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
@@ -95,6 +103,16 @@ class RouterManager:
         self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
         self.is_pd_decode_mode = self.args.run_mode == "decode"
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
+        self.profile_status_board = ProfileStatusBoard(num_worker_slots=self.node_world_size)
+        # /dev/shm 段可能跨次启动残留, router 启动时清零自己的 slot。
+        self.profile_status_board.set_slot(
+            self.profile_status_board.router_slot,
+            state=STATE_IDLE,
+            profile_id=0,
+            forward_ct=0,
+            target_ct=0,
+            error_code=ERROR_NONE,
+        )
 
         self.cpu_cache_client = (
             None
@@ -319,6 +337,36 @@ class RouterManager:
         self.shm_reqs_io_buffer.set_ready()
         return
 
+    async def _handle_profile_control_req(self, profile_req: ProfileControlReq):
+        if "worker" not in profile_req.targets:
+            return
+        # 有界等待: profile cmd 不能让 router 主循环无限自旋 (buffer 可能被卡住的 rank 占住)。
+        for _ in range(5000):
+            if self.shm_reqs_io_buffer.is_empty():
+                break
+            await asyncio.sleep(0.001)
+        else:
+            logger.error(
+                f"profile cmd '{profile_req.action}' (id={profile_req.profile_id}) dropped: "
+                f"shm_reqs_io_buffer busy for 5s"
+            )
+            self.profile_status_board.set_slot(
+                self.profile_status_board.router_slot,
+                state=STATE_ERROR,
+                profile_id=profile_req.profile_id,
+                error_code=ERROR_CMD_DELIVERY_FAILED,
+            )
+            return
+        self.shm_reqs_io_buffer.write_obj([profile_req.to_worker_cmd()])
+        self.shm_reqs_io_buffer.set_ready()
+        self.profile_status_board.set_slot(
+            self.profile_status_board.router_slot,
+            state=STATE_IDLE,
+            profile_id=profile_req.profile_id,
+            error_code=ERROR_NONE,
+        )
+        return
+
     def _add_new_batch_to_running_batch(self, new_batch: Batch):
         if self.running_batch is None:
             self.running_batch = new_batch
@@ -497,6 +545,8 @@ class RouterManager:
                 recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GroupReqIndexes):
                     self._add_req(recv_req)
+                elif isinstance(recv_req, ProfileControlReq):
+                    await self._handle_profile_control_req(recv_req)
                 else:
                     assert False, f"Error Req Inf {recv_req}"
 

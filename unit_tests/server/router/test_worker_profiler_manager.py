@@ -33,7 +33,12 @@ class FakeProfiler:
 def board(request):
     board = ProfileStatusBoard(num_worker_slots=2, name=f"test_wpm_board_{request.node.name}")
     board.arr[:] = 0  # 清掉可能残留的上次运行数据
-    return board
+    yield board
+    board.shm.close()
+    try:
+        board.shm.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def make_manager(board, factory):
@@ -142,6 +147,30 @@ def test_export_failure_reports_error(tmp_path, board):
     mgr.on_step_boundary()  # stop -> export fails
     assert board.get_slot(0)["state"] == "error"
     assert board.get_slot(0)["error_code"] == ERROR_EXPORT_FAILED
+
+
+def test_stop_while_idle_is_noop(tmp_path, board):
+    fake = FakeProfiler()
+    mgr = make_manager(board, lambda cmd: fake)
+    mgr.on_cmd(StopProfileCmd())
+    assert not fake.stopped
+    assert board.get_slot(0)["state"] == "idle"
+
+
+def test_export_failure_leaves_no_partial_files(tmp_path, board):
+    class BadExportProfiler(FakeProfiler):
+        def export_chrome_trace(self, path):
+            with open(path, "w") as f:
+                f.write("partial")
+            raise RuntimeError("export boom")
+
+    fake = BadExportProfiler()
+    mgr = make_manager(board, lambda cmd: fake)
+    mgr.on_cmd(start_cmd(tmp_path, num_steps=1))
+    mgr.on_step_boundary()
+    mgr.on_step_boundary()
+    assert board.get_slot(0)["error_code"] == ERROR_EXPORT_FAILED
+    assert os.listdir(tmp_path) == []
 
 
 def test_idle_fast_path_counts_forwards(tmp_path, board):

@@ -28,6 +28,9 @@ _ACTIVITY_MAP = {
 
 def _default_profiler_factory(cmd: StartProfileCmd):
     activities = [_ACTIVITY_MAP[a] for a in cmd.activities if a in _ACTIVITY_MAP]
+    if not activities:
+        # torch 把空 activities 列表当成 "全部都采", 这里显式报错而不是静默放大采集范围。
+        raise ValueError(f"no valid activities in {cmd.activities!r}, expected subset of {sorted(_ACTIVITY_MAP)}")
     return torch.profiler.profile(
         activities=activities,
         with_stack=cmd.with_stack,
@@ -89,6 +92,10 @@ class WorkerProfilerManager:
                     error_code=ERROR_NONE,
                 )
             elif isinstance(cmd, StopProfileCmd):
+                # profile_id=0 表示停止任意 capture; 非 0 时只停止匹配的 capture
+                if cmd.profile_id and self._cmd is not None and cmd.profile_id != self._cmd.profile_id:
+                    logger.warning(f"ignore stale stop_profile cmd for profile_id {cmd.profile_id}")
+                    return
                 if self._state == STATE_RUNNING:
                     self._stop_and_export()
                 elif self._state == STATE_ARMED:
@@ -124,7 +131,7 @@ class WorkerProfilerManager:
                 self._slot, state=STATE_RUNNING, forward_ct=self.forward_ct, target_ct=self._target_ct or 0
             )
             logger.info(f"profiler started at forward_ct {self.forward_ct}, target_ct {self._target_ct}")
-        except BaseException as e:
+        except Exception as e:
             logger.exception(f"profiler start failed: {e}")
             self._profiler = None
             self._cmd = None
@@ -135,22 +142,32 @@ class WorkerProfilerManager:
     def _stop_and_export(self):
         self.status_board.set_slot(self._slot, state=STATE_FLUSHING, forward_ct=self.forward_ct)
         cmd = self._cmd
+        json_tmp_path = None
+        gz_tmp_path = None
         try:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             self._profiler.stop()
             os.makedirs(cmd.output_dir, exist_ok=True)
             trace_name = f"{cmd.profile_prefix}-{cmd.profile_id}-TP-{self.rank_in_node}-DP-{self.dp_rank_in_node}"
-            tmp_path = os.path.join(cmd.output_dir, trace_name + ".trace.json")
-            self._profiler.export_chrome_trace(tmp_path)
-            final_path = tmp_path + ".gz"
-            with open(tmp_path, "rb") as f_in, gzip.open(final_path, "wb") as f_out:
+            final_path = os.path.join(cmd.output_dir, trace_name + ".trace.json.gz")
+            json_tmp_path = final_path + ".json.tmp"
+            gz_tmp_path = final_path + ".gz.tmp"
+            self._profiler.export_chrome_trace(json_tmp_path)
+            with open(json_tmp_path, "rb") as f_in, gzip.open(gz_tmp_path, "wb", compresslevel=6) as f_out:
                 shutil.copyfileobj(f_in, f_out)
-            os.remove(tmp_path)
-            self.status_board.set_slot(self._slot, state=STATE_IDLE, error_code=ERROR_NONE)
+            os.remove(json_tmp_path)
+            os.rename(gz_tmp_path, final_path)
+            self.status_board.set_slot(self._slot, state=STATE_IDLE, error_code=ERROR_NONE, target_ct=0)
             logger.info(f"profiler trace exported to {final_path}")
-        except BaseException as e:
+        except Exception as e:
             logger.exception(f"profiler stop/export failed: {e}")
+            for stale_path in (json_tmp_path, gz_tmp_path):
+                if stale_path is not None:
+                    try:
+                        os.remove(stale_path)
+                    except OSError:
+                        pass
             self.status_board.set_slot(self._slot, state=STATE_ERROR, error_code=ERROR_EXPORT_FAILED)
         finally:
             self._profiler = None

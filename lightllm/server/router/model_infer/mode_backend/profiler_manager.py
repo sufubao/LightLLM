@@ -38,6 +38,19 @@ def _default_profiler_factory(cmd: StartProfileCmd):
     )
 
 
+class NullProfilerManager:
+    """--enable_profiling 未开启时的空实现, 不创建任何 shm 状态, 热路径开销为一次空方法调用。"""
+
+    def on_cmd(self, cmd):
+        return
+
+    def on_step_boundary(self):
+        return
+
+    def on_pass_boundary(self):
+        return
+
+
 class WorkerProfilerManager:
     """
     每个推理 rank 进程一个实例, 状态机: IDLE -> ARMED -> RUNNING -> FLUSHING -> IDLE。

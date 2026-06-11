@@ -51,6 +51,9 @@ slots return to `idle` with `error_code` 0.
   `num_steps` ≤ ~20 and `with_stack` off for low-stall captures.
 - **±1 step window**: kineto start/stop must happen on the same thread, so a
   stop condition hit on the other infer thread is deferred one boundary.
-- **Multi-node**: each node's HTTP port profiles that node's ranks only.
+- **Multi-node**: multi-node *tensor-parallel* mode (`nnodes>1, dp=1`) is not
+  supported (501) — injecting the command locally would desynchronize the
+  nodes' lockstep command buffers and hang NCCL. Multi-node *data-parallel*
+  works; each node's HTTP port profiles that node's ranks only.
 - Covered infer loops: chunked_prefill (default; incl. constraint/reward/PD
   subclasses) and dp_backend.

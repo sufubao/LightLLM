@@ -49,7 +49,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
-from .profiler_manager import WorkerProfilerManager
+from .profiler_manager import WorkerProfilerManager, NullProfilerManager
 
 
 class ModeBackend:
@@ -235,11 +235,15 @@ class ModeBackend:
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
         # profile 状态机, 由 /start_profile http 接口经 router 广播的 cmd 驱动。
-        self.profiler_manager = WorkerProfilerManager(
-            rank_in_node=self.rank_in_node,
-            dp_rank_in_node=self.dp_rank_in_node,
-            node_world_size=self.node_world_size,
-        )
+        # 未开启 --enable_profiling 时使用空实现, 不创建 shm 状态板。
+        if self.args.enable_profiling:
+            self.profiler_manager = WorkerProfilerManager(
+                rank_in_node=self.rank_in_node,
+                dp_rank_in_node=self.dp_rank_in_node,
+                node_world_size=self.node_world_size,
+            )
+        else:
+            self.profiler_manager = NullProfilerManager()
 
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:

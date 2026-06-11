@@ -103,16 +103,20 @@ class RouterManager:
         self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
         self.is_pd_decode_mode = self.args.run_mode == "decode"
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
-        self.profile_status_board = ProfileStatusBoard(num_worker_slots=self.node_world_size)
-        # /dev/shm 段可能跨次启动残留, router 启动时清零自己的 slot。
-        self.profile_status_board.set_slot(
-            self.profile_status_board.router_slot,
-            state=STATE_IDLE,
-            profile_id=0,
-            forward_ct=0,
-            target_ct=0,
-            error_code=ERROR_NONE,
-        )
+        # 未开启 --enable_profiling 时不创建 shm 状态板。
+        if args.enable_profiling:
+            self.profile_status_board = ProfileStatusBoard(num_worker_slots=self.node_world_size)
+            # /dev/shm 段可能跨次启动残留, router 启动时清零自己的 slot。
+            self.profile_status_board.set_slot(
+                self.profile_status_board.router_slot,
+                state=STATE_IDLE,
+                profile_id=0,
+                forward_ct=0,
+                target_ct=0,
+                error_code=ERROR_NONE,
+            )
+        else:
+            self.profile_status_board = None
 
         self.cpu_cache_client = (
             None
@@ -338,7 +342,12 @@ class RouterManager:
         return
 
     async def _handle_profile_control_req(self, profile_req: ProfileControlReq):
-        if "worker" not in profile_req.targets:
+        if self.profile_status_board is None or "worker" not in profile_req.targets:
+            return
+        if self.is_multinode_tp:
+            # 多机纯 tp 模式下各节点 router 锁步写入内容一致的 cmd buffer, 本地注入 profile cmd
+            # 会让各节点 buffer 序列发散, worker 端 all_gather 锁步读取后 NCCL 集合通信会挂死。
+            logger.error("profile cmd dropped: not supported in multinode tensor-parallel mode")
             return
         try:
             worker_cmd = profile_req.to_worker_cmd()

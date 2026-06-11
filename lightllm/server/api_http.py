@@ -244,6 +244,11 @@ def _check_profiling_enabled():
         return create_error_response(
             HTTPStatus.NOT_IMPLEMENTED, f"profiling is not supported in run_mode {g_objs.args.run_mode!r}"
         )
+    if g_objs.args.nnodes > 1 and g_objs.args.dp == 1:
+        # 多机纯 tp: 本地注入 profile cmd 会让各节点锁步的 cmd buffer 序列发散, 导致 NCCL 挂死。
+        return create_error_response(
+            HTTPStatus.NOT_IMPLEMENTED, "profiling is not supported in multinode tensor-parallel mode"
+        )
     return None
 
 

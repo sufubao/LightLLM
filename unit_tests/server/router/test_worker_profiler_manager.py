@@ -223,3 +223,12 @@ def test_idle_fast_path_counts_forwards(tmp_path, board):
     mgr.on_step_boundary()
     assert mgr.forward_ct == 2
     assert not fake.started
+
+
+def test_null_profiler_manager_is_noop():
+    from lightllm.server.router.model_infer.mode_backend.profiler_manager import NullProfilerManager
+
+    null_mgr = NullProfilerManager()
+    null_mgr.on_cmd(StopProfileCmd())
+    null_mgr.on_step_boundary()
+    null_mgr.on_pass_boundary()

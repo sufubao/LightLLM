@@ -25,7 +25,8 @@ from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
-from lightllm.server.core.objs.io_objs import GroupReqObjs
+from lightllm.server.core.objs.io_objs import GroupReqObjs, ProfileControlReq
+from lightllm.server.core.objs.profile_status_board import ProfileStatusBoard
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -97,6 +98,11 @@ class HttpServerManager:
             self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
 
         self.shm_req_manager = ShmReqManager()
+
+        if args.enable_profiling:
+            self.profile_status_board = ProfileStatusBoard(num_worker_slots=args.tp // args.nnodes)
+        else:
+            self.profile_status_board = None
 
         # recv from detokenization
         self.zmq_recv_socket = context.socket(zmq.SUB)
@@ -621,6 +627,10 @@ class HttpServerManager:
                 )
 
         await self.transfer_to_next_module(group_req_objs)
+        return
+
+    async def send_profile_control(self, profile_req: ProfileControlReq):
+        self.send_to_router.send_pyobj(profile_req, protocol=pickle.HIGHEST_PROTOCOL)
         return
 
     async def transfer_to_next_module(

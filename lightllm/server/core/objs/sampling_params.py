@@ -304,6 +304,7 @@ class SamplingParams(ctypes.Structure):
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
+        ("return_logprobs", ctypes.c_bool),  # whether generated token logprobs are required by the caller
         ("seed", ctypes.c_int64),  # random seed
     ]
 
@@ -340,6 +341,7 @@ class SamplingParams(ctypes.Structure):
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
+        self.return_logprobs = kwargs.get("return_logprobs", True)
         self.seed = kwargs.get("seed", -1)
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
@@ -486,6 +488,7 @@ class SamplingParams(ctypes.Structure):
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
             "print_eos_token": self.print_eos_token,
             "disable_prompt_cache": self.disable_prompt_cache,
+            "return_logprobs": self.return_logprobs,
             "seed": self.seed,
         }
 

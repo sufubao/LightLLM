@@ -100,6 +100,24 @@ class CustomProcessGroup:
             return
         return dist.all_reduce(input_, group=self.device_group)
 
+    def all_reduce_residual_rmsnorm(
+        self,
+        input_: torch.Tensor,
+        residual: torch.Tensor,
+        norm_weight: torch.Tensor,
+        eps: float,
+        alloc_func=torch.empty,
+    ):
+        if self.flashinfer_reduce is None:
+            return None
+        return self.flashinfer_reduce.all_reduce_residual_rmsnorm(
+            input_,
+            residual=residual,
+            norm_weight=norm_weight,
+            eps=eps,
+            alloc_func=alloc_func,
+        )
+
     def all_gather_into_tensor(self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False) -> None:
         return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
 
@@ -233,6 +251,27 @@ def all_reduce(
             return group.all_reduce(input_)
         return dist.all_reduce(input_, op, group.device_group, async_op)
     return dist.all_reduce(input_, op, group, async_op)
+
+
+def all_reduce_residual_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps: float,
+    group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
+    alloc_func=torch.empty,
+):
+    if _is_single_group(group=group):
+        return None
+    if isinstance(group, CustomProcessGroup):
+        return group.all_reduce_residual_rmsnorm(
+            input_,
+            residual=residual,
+            norm_weight=norm_weight,
+            eps=eps,
+            alloc_func=alloc_func,
+        )
+    return None
 
 
 def all_gather_into_tensor(

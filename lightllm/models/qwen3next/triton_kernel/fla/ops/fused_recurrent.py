@@ -54,6 +54,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    stride_q_tok: tl.constexpr,
+    stride_k_tok: tl.constexpr,
+    stride_v_tok: tl.constexpr,
+    stride_a_tok: tl.constexpr,
+    stride_b_tok: tl.constexpr,
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
@@ -94,15 +99,15 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + (bos * H + i_h) * K + o_k
-    p_k = k + (bos * H + i_h) * K + o_k
-    p_v = v + (bos * HV + i_hv) * V + o_v
+    p_q = q + bos * stride_q_tok + i_h * K + o_k
+    p_k = k + bos * stride_k_tok + i_h * K + o_k
+    p_v = v + bos * stride_v_tok + i_hv * V + o_v
     if FUSE_GATING:
         # Fused gating: load per-head constants once, compute g/beta inline per token
         b_A_log = tl.load(A_log + i_hv).to(tl.float32)
         b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
-        p_a_raw = a_raw + bos * HV + i_hv
-        p_b_raw = b_raw + bos * HV + i_hv
+        p_a_raw = a_raw + bos * stride_a_tok + i_hv
+        p_b_raw = b_raw + bos * stride_b_tok + i_hv
     else:
         if IS_BETA_HEADWISE:
             p_beta = beta + (bos * HV + i_hv) * V + o_v
@@ -193,19 +198,56 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
-        p_q += H * K
-        p_k += H * K
+        p_q += stride_q_tok
+        p_k += stride_k_tok
         p_o += HV * V
-        p_v += HV * V
+        p_v += stride_v_tok
         if FUSE_GATING:
-            p_a_raw += HV
-            p_b_raw += HV
+            p_a_raw += stride_a_tok
+            p_b_raw += stride_b_tok
         else:
             if not IS_KDA:
                 p_g += HV
             else:
                 p_gk += HV * K
             p_beta += HV * (V if IS_BETA_HEADWISE else 1)
+
+
+def _token_stride(x: torch.Tensor, inner_numel: int, cu_seqlens) -> int:
+    """Per-token element stride of x addressed as [tokens, ...inner dims...].
+
+    The kernel reads token ``i`` at ``base + i * token_stride`` with the inner
+    dims packed, which supports column views of one wider projection output
+    (token stride larger than inner_numel). Returns -1 if x's layout cannot be
+    addressed that way (caller must fall back to .contiguous()).
+    """
+    if x.dim() == 2:
+        # [tokens, inner] (a_raw / b_raw)
+        return x.stride(0) if x.stride(1) == 1 else -1
+    # 4D q/k/v
+    if cu_seqlens is not None:
+        # varlen layout [1, tokens, head, dim]
+        token_dim = 1
+    elif x.shape[1] == 1:
+        # decode layout [tokens, 1, head, dim]
+        token_dim = 0
+    else:
+        # [B, T>1, head, dim]: a single token stride only exists if contiguous
+        return inner_numel if x.is_contiguous() else -1
+    if x.stride(-1) == 1 and x.stride(-2) == x.shape[-1]:
+        return x.stride(token_dim)
+    return -1
+
+
+def _ensure_token_strided(x: torch.Tensor, inner_numel: int, cu_seqlens):
+    """Return (tensor, token_stride); copies to contiguous only when needed."""
+    if x is None:
+        return None, 0
+    stride = _token_stride(x, inner_numel, cu_seqlens)
+    if stride < 0:
+        x = x.contiguous()
+        stride = inner_numel
+    return x, stride
 
 
 def fused_recurrent_gated_delta_rule_fwd(
@@ -232,6 +274,11 @@ def fused_recurrent_gated_delta_rule_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    q, stride_q_tok = _ensure_token_strided(q, H * K, cu_seqlens)
+    k, stride_k_tok = _ensure_token_strided(k, H * K, cu_seqlens)
+    v, stride_v_tok = _ensure_token_strided(v, HV * V, cu_seqlens)
+    a_raw, stride_a_tok = _ensure_token_strided(a_raw, HV, cu_seqlens)
+    b_raw, stride_b_tok = _ensure_token_strided(b_raw, HV, cu_seqlens)
     BK = triton.next_power_of_2(K)
     if T == 1:
         # Decode path: use larger BV to reduce kernel instances (4 blocks instead of 16)
@@ -261,20 +308,23 @@ def fused_recurrent_gated_delta_rule_fwd(
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
 
-    # Strides for read indices
+    # Strides for read indices. The kernel advances along a row with `+ i_t`
+    # (token stride 1), so 2D index tensors must have contiguous rows.
     if ssm_state_indices is None:
         stride_indices_seq, stride_indices_tok = 1, 1
     elif ssm_state_indices.ndim == 1:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
+        assert ssm_state_indices.stride(-1) == 1, "2D ssm_state_indices must have contiguous rows"
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    # Strides for write indices (if provided)
+    # Strides for write indices (if provided); same contiguous-row requirement
     if ssm_state_write_indices is None:
         stride_write_indices_seq, stride_write_indices_tok = 1, 1
     elif ssm_state_write_indices.ndim == 1:
         stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride(0), 1
     else:
+        assert ssm_state_write_indices.stride(-1) == 1, "2D ssm_state_write_indices must have contiguous rows"
         stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride()
 
     grid = (NK, NV, N * HV)
@@ -305,6 +355,11 @@ def fused_recurrent_gated_delta_rule_fwd(
         V=V,
         BK=BK,
         BV=BV,
+        stride_q_tok=stride_q_tok,
+        stride_k_tok=stride_k_tok,
+        stride_v_tok=stride_v_tok,
+        stride_a_tok=stride_a_tok,
+        stride_b_tok=stride_b_tok,
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
@@ -348,10 +403,12 @@ class FusedRecurrentFunction(torch.autograd.Function):
         b_raw: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
     ):
+        # q/k/v/a_raw/b_raw may be non-contiguous column views of one projection
+        # output; the kernel handles them via per-token strides (no copies).
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
-            q=q.contiguous(),
-            k=k.contiguous(),
-            v=v.contiguous(),
+            q=q,
+            k=k,
+            v=v,
             g=g.contiguous() if g is not None else None,
             beta=beta.contiguous() if beta is not None else None,
             scale=scale,
@@ -364,8 +421,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             A_log=A_log,
             dt_bias=dt_bias,
-            a_raw=a_raw.contiguous() if a_raw is not None else None,
-            b_raw=b_raw.contiguous() if b_raw is not None else None,
+            a_raw=a_raw,
+            b_raw=b_raw,
             out=out,
         )
 

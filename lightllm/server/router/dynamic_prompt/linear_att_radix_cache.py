@@ -365,18 +365,12 @@ class LinearAttPagedRadixCache:
             ans_node_list=ans_node_list,
             update_refs=update_refs,
         )
-        # _match_prefix_helper 进入时一定对 root 自增了一次 ref_counter。命中链非空时，调用方最终会
-        # 通过 dec_node_ref_counter(ans_node) 沿父链回收（含 root），增减平衡；但下面两个 "命中为空"
-        # 的提前返回会把 None 交给调用方，调用方不会再回收，root 自增就无人抵消，导致 root.ref_counter
-        # 在每次 miss / trim 到空时持续漂移。这里显式补偿这一次 root 自增。
         if len(ans_node_list) == 0:
-            self.dec_node_ref_counter(self.root_node)
             return None, 0, None
 
         # 判定真正可以用的匹配节点。
         ans_node_list = self._trim_unusable_match_tail(ans_node_list)
         if len(ans_node_list) == 0:
-            self.dec_node_ref_counter(self.root_node)
             return None, 0, None
 
         ans_node = ans_node_list[-1]
@@ -491,9 +485,6 @@ class LinearAttPagedRadixCache:
             iter_node = iter_node.parent
 
         if iter_node is self.root_node:
-            # 没有可承接的 big-page 节点交给调用方释放：root 在 match 阶段同样被 +1，
-            # 这里必须补偿，否则与 match_prefix miss 路径同类的 root ref 漂移。
-            self.dec_node_ref_counter(self.root_node)
             return None
         else:
             return iter_node

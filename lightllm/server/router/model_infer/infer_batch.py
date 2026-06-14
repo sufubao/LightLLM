@@ -226,6 +226,19 @@ class InferenceContext:
 
         if shared_kv_len <= req.cur_kv_len:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+            # 该分支不会把 prefill 阶段累积的 big page id 插入 radix cache（典型为 pause/abort
+            # 在 prefill 跨过 big page 边界后、到达末尾前触发），需在此显式释放，避免泄漏。
+
+            # 释放本请求 prefill 阶段在 big page 边界上申请、但尚未插入 radix cache 的 big page
+            # state buffer。仅当请求未走 insert 分支(小页/大页插入)就被释放时才会有残留，典型场景：
+            # big page 模式下请求在 prefill 跨过 big page 边界后、到达末尾前被 pause / abort。
+            # 若不释放，会泄漏 big page state slot，并触发 free_a_req_mem 中 dict 为空的断言。
+            if req.linear_att_len_to_big_page_id:
+                self.radix_cache.linear_att_big_page_buffers.free_state_cache(
+                    list(req.linear_att_len_to_big_page_id.values())
+                )
+                req.linear_att_len_to_big_page_id.clear()
+
             req.cur_kv_len = shared_kv_len
             assert req.tail_linear_att_small_page_buffer_id is None
             if req.shared_kv_node is not None:

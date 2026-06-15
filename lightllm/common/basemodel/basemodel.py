@@ -683,10 +683,7 @@ class TpPartBaseModel:
         if self.graph is not None and self.graph.can_run(
             batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
         ):
-            infer_batch_size = self.graph.find_closest_graph_batch_size(
-                batch_size=infer_batch_size,
-                is_mtp_verify_decode=is_mtp_verify_decode,
-            )
+            infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
@@ -936,10 +933,7 @@ class TpPartBaseModel:
         is_mtp_verify_decode = is_mtp_verify_decode_fn(self.args.mtp_step, model_input0.b_num_accepted_tokens)
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
-            infer_batch_size = self.graph.find_closest_graph_batch_size(
-                infer_batch_size,
-                is_mtp_verify_decode=is_mtp_verify_decode,
-            )
+            infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
             # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)

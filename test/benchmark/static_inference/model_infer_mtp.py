@@ -269,8 +269,6 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
     accept_len = 1
     is_eagle = args.mtp_mode.startswith("eagle")
     model_input.b_num_accepted_tokens = torch.full((batch_size,), accept_len, dtype=torch.int32, device="cuda")
-    req_offsets = torch.arange(batch_size, dtype=torch.long, device="cuda")
-    accepted_row_idx = req_offsets * (mtp_step + 1) + (accept_len - 1)
     if is_eagle:
         # EAGLE draft scratch slots (n_real * mtp_step), mirroring _draft_decode_eagle. Allocated
         # once and reused across steps (throughput bench overwrites draft KV; no correctness check).
@@ -298,28 +296,14 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
         predict_ids = torch.argmax(model_output.logits, dim=1, keepdim=True)
 
         if is_eagle:
-            # EAGLE draft: shrink to the single accepted row per request (1 row/req), then run the
-            # draft model mtp_step times. The Qwen3.5 MTP draft is full-attention and takes the
-            # plain decode layout (b_num_accepted_tokens=None). Mirrors chunked_prefill
-            # _build_eagle_accepted_draft_input + _draft_decode_eagle so the measured draft cost is
-            # the real n_real-row cost, not the (mtp_step+1)x-inflated full-batch cost.
-            main_mem = model_input.mem_indexes.view(batch_size, mtp_step + 1)
-            eagle_mem_by_req = eagle_mem_indexes.view(mtp_step, batch_size).transpose(0, 1).contiguous()
-            mem_index_plan = torch.cat([main_mem, eagle_mem_by_req], dim=1)
-
+            # EAGLE draft: full (mtp_step+1)-expanded batch, plain decode layout (the Qwen3.5 MTP
+            # draft is full-attention and takes b_num_accepted_tokens=None). Mirrors chunked_prefill
+            # _draft_decode_eagle: run the draft model mtp_step times, allocating fresh KV slots and
+            # shifting mem_indexes one column per step.
             draft_model_input = copy.copy(model_input)
-            draft_model_input.batch_size = batch_size
-            draft_model_input.total_token_num = batch_size * model_input.max_kv_seq_len
             draft_model_input.b_num_accepted_tokens = None
-            draft_model_input.mem_indexes_cpu = None
-            draft_model_input.b_req_idx = model_input.b_req_idx.index_select(0, accepted_row_idx)
-            draft_model_input.b_seq_len = model_input.b_seq_len.index_select(0, accepted_row_idx)
-            draft_model_input.b_mtp_index = model_input.b_mtp_index.index_select(0, accepted_row_idx)
-            draft_model_input.input_ids = predict_ids.reshape(-1).index_select(0, accepted_row_idx)
-            draft_model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens.index_select(
-                0, accepted_row_idx
-            )
-            draft_model_input.multimodal_params = [{"images": [], "audios": []} for _ in range(batch_size)]
+            draft_model_input.input_ids = predict_ids.reshape(-1)
+            draft_model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
 
             if _mtp_profile and not warmup:
                 _step_evs = []
@@ -328,7 +312,6 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
                 _host_t0 = time.time()
                 _ev_d0.record()
             for _step in range(mtp_step):
-                draft_model_input.mem_indexes = mem_index_plan[req_offsets, (accept_len - 1) + _step]
                 draft_model = draft_models[_step % num_instances]
                 if _mtp_profile and not warmup:
                     _es = torch.cuda.Event(enable_timing=True)
@@ -342,6 +325,11 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
                 draft_model_input.mtp_draft_input_hiddens = draft_output.mtp_main_output_hiddens
                 draft_model_input.b_seq_len = draft_model_input.b_seq_len + 1
                 draft_model_input.max_kv_seq_len += 1
+                eagle_mem_indexes_i = eagle_mem_indexes[_step * batch_size : (_step + 1) * batch_size]
+                draft_model_input.mem_indexes = torch.cat(
+                    [draft_model_input.mem_indexes.view(-1, mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
+                    dim=1,
+                ).view(-1)
             if _mtp_profile and not warmup:
                 _ev_d1.record()
                 _host_t1 = time.time()

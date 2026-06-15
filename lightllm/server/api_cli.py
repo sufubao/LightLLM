@@ -553,10 +553,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
     parser.add_argument(
-        "--enable_prefill_cudagraph",
+        "--disable_prefill_cudagraph",
         action="store_true",
-        help="Enable the cudagraph of the prefill stage,"
-        " currently only for llama and qwen model, not support ep moe model",
+        help="Disable the cudagraph of the prefill stage. The prefill cudagraph is enabled by default and"
+        " currently only for llama and qwen model; it is automatically skipped for ep moe models and"
+        " dp prefill balance.",
     )
     parser.add_argument(
         "--prefill_cudagraph_max_handle_token",

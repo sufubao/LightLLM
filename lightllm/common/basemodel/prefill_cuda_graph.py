@@ -161,7 +161,7 @@ class PrefillCudaGraph:
 
     @torch.no_grad()
     def warmup(self, model):
-        logger.info("Begin capture prefill cudagraph, remove the --enable_prefill_cudagraph to disable it.")
+        logger.info("Begin capture prefill cudagraph, use the --disable_prefill_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
@@ -220,7 +220,7 @@ class PrefillCudaGraph:
 
     @torch.no_grad()
     def warmup_overlap(self, model):
-        logger.info("Begin capture prefill overlap cudagraph, remove the --enable_prefill_cudagraph to disable it.")
+        logger.info("Begin capture prefill overlap cudagraph, use the --disable_prefill_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 

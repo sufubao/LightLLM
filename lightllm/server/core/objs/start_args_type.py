@@ -122,7 +122,7 @@ class StartArgs:
     audio_infer_batch_size: Optional[int] = field(default=None)
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
-    enable_prefill_cudagraph: bool = field(default=False)
+    disable_prefill_cudagraph: bool = field(default=False)
     prefill_cudagraph_max_handle_token: int = field(default=8192)
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)

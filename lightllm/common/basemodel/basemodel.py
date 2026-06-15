@@ -275,10 +275,21 @@ class TpPartBaseModel:
                 self.graph.warmup(self)
 
     def _init_prefill_cuda_graph(self):
+        args = get_env_start_args()
+        enable_prefill_cudagraph = not args.disable_prefill_cudagraph
+        # prefill cudagraph currently only supports llama/qwen-style models. It is incompatible with
+        # ep moe and dp prefill balance, so auto-skip those configs even when not explicitly disabled.
+        if enable_prefill_cudagraph and args.enable_ep_moe:
+            logger.warning("prefill cudagraph does not support ep moe, disabling it.")
+            enable_prefill_cudagraph = False
+        if enable_prefill_cudagraph and args.enable_dp_prefill_balance:
+            logger.warning("prefill cudagraph does not support dp prefill balance, disabling it.")
+            enable_prefill_cudagraph = False
+
         self.prefill_graph = (
-            None
-            if not get_env_start_args().enable_prefill_cudagraph
-            else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
+            PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
+            if enable_prefill_cudagraph
+            else None
         )
         if self.prefill_graph is not None:
             if get_env_start_args().enable_prefill_microbatch_overlap:
@@ -598,10 +609,9 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
-            assert not self.args.enable_prefill_cudagraph, "not support now"
+            assert self.prefill_graph is None, "not support now"
             infer_state.prepare_prefill_dp_balance()
             input_embs = infer_state._all_to_all_balance_get(data=input_embs)
 
@@ -889,7 +899,7 @@ class TpPartBaseModel:
 
         # 决定是否进行 dp balance 优化，可以提升dp > 1 时的 prefill 效率。
         if get_env_start_args().enable_dp_prefill_balance:
-            assert not self.args.enable_prefill_cudagraph, "not support now"
+            assert self.prefill_graph is None, "not support now"
             infer_state.prepare_prefill_dp_balance()
             infer_state1.prepare_prefill_dp_balance()
             input_embs = infer_state._all_to_all_balance_get(data=input_embs)

@@ -27,8 +27,8 @@ description: >-
 
 | # | 名称 | `api_server` 相对上一场景的增量 | `lm_eval` |
 |---|------|----------------------------------|-----------|
-| 1 | 基线 | **`--model_dir` / `--tp 2` / `--port`** | 1 次 |
-| 2 | Prefill CUDA Graph | **`--enable_prefill_cudagraph`** | 1 次 |
+| 1 | 基线（关闭 Prefill CUDA Graph） | **`--model_dir` / `--tp 2` / `--port` / `--disable_prefill_cudagraph`** | 1 次 |
+| 2 | Prefill CUDA Graph（默认开启） | 去掉 **`--disable_prefill_cudagraph`**（Prefill CUDA Graph 现为默认行为） | 1 次 |
 | 3 | Linear-Attention 参数 | **`--linear_att_cache_size 10`**、**`--linear_att_hash_page_size 256`**、**`--linear_att_page_block_num 2`**、**`--max_total_token_num 270000`** | 1 次 |
 | 4 | CPU Cache + Linear-Att | 在场景 3 同类参数基础上增加 **`--enable_cpu_cache`**、**`--cpu_cache_storage_size 128`**（**`--max_total_token_num` 仍为 `270000`**） | **2 次** |
 | 5 | Disk Cache | **`LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH=128`**；**`--linear_att_cache_size 128`** 等一组参数，及 **`--enable_cpu_cache`**、**`--enable_disk_cache`**、**`--disk_cache_dir`** 等（见下文命令块） | **2 次** |
@@ -122,23 +122,23 @@ lm_eval --model local-completions \
 
 以下命令块仅列出 **`api_server` 参数差异**。实际执行时须在 **`export http_proxy=`、`export https_proxy=`** 之后，按仓库其它 acc 测试惯例自行补全：**`LOADWORKER=18 CUDA_VISIBLE_DEVICES=…`**、**`nohup`**、以及 **`>> "${LOG_DIR}/server.log" 2>&1 &`**。
 
-### 场景 1：基线
-
-```bash
-python -m lightllm.server.api_server \
-  --model_dir "${MODEL_DIR}" \
-  --tp 2 \
-  --port "${PORT}"
-```
-
-### 场景 2：Prefill CUDA Graph
+### 场景 1：基线（关闭 Prefill CUDA Graph）
 
 ```bash
 python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --tp 2 \
   --port "${PORT}" \
-  --enable_prefill_cudagraph
+  --disable_prefill_cudagraph
+```
+
+### 场景 2：Prefill CUDA Graph（默认开启）
+
+```bash
+python -m lightllm.server.api_server \
+  --model_dir "${MODEL_DIR}" \
+  --tp 2 \
+  --port "${PORT}"
 ```
 
 ### 场景 3：Linear-Attention 参数

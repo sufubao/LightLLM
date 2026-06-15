@@ -357,7 +357,6 @@ class ChunkedPrefillBackend(ModeBackend):
         # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型 decode_mtp 设置的
         # verify 布局，命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError
         # （cudagraph 关闭时则会在扁平的 draft batch 上误用 S+1 分组的 verify attention）。
-        # 镜像 eagle 路径 _build_eagle_accepted_draft_input 中清空 b_num_accepted_tokens 的处理。
         draft_model_input = copy.copy(main_model_input)
         draft_model_input.b_num_accepted_tokens = None
         draft_model_output = main_model_output
@@ -392,47 +391,46 @@ class ChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
     ):
-        num_reqs = b_req_mtp_start_loc.shape[0]
+        batch_size = main_model_input.batch_size
+        num_reqs = batch_size // (self.mtp_step + 1)
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_reqs * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * self.mtp_step)
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
-        (draft_model_input, draft_next_token_ids, accepted_req_idx,) = self._build_eagle_accepted_draft_input(
-            main_model_input=main_model_input,
-            main_model_output=main_model_output,
-            next_token_ids=next_token_ids,
-            mtp_accept_len=mtp_accept_len,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-        )
+        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
+        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型 decode_mtp 设置的
+        # verify 布局，命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        draft_model_input = copy.copy(main_model_input)
+        draft_model_input.b_num_accepted_tokens = None
         draft_model_output = main_model_output
+        draft_next_token_ids = next_token_ids
         all_next_token_ids = []
-        all_next_token_ids.append(draft_next_token_ids)
-
-        mtp_size = self.mtp_step + 1
-        main_mem_indexes = main_model_input.mem_indexes.view(num_reqs, mtp_size)
-        eagle_mem_indexes_by_req = eagle_mem_indexes.view(self.mtp_step, num_reqs).transpose(0, 1).contiguous()
-        mem_index_plan = torch.cat([main_mem_indexes, eagle_mem_indexes_by_req], dim=1)
-        accepted_offsets = mtp_accept_len.long() - 1
-        req_offsets = torch.arange(num_reqs, dtype=torch.long, device=mtp_accept_len.device)
-
+        all_next_token_ids.append(next_token_ids)
+        # process the draft model output
         for _step in range(self.mtp_step):
             draft_model_input.input_ids = draft_next_token_ids
-            if _step > 0:
-                draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
-            draft_model_input.mem_indexes = mem_index_plan[req_offsets, accepted_offsets + _step]
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
             draft_model_input.b_seq_len += 1
             draft_model_input.max_kv_seq_len += 1
+            eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
+            draft_model_input.mem_indexes = torch.cat(
+                [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
+                dim=1,
+            ).view(-1)
             all_next_token_ids.append(draft_next_token_ids)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
 
-        self._scatter_accepted_next_token_ids(
-            accepted_req_idx=accepted_req_idx,
+        mtp_scatter_next_token_ids(
+            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
             all_next_token_ids=all_next_token_ids,
+            b_req_idx=main_model_input.b_req_idx,
+            mtp_accept_len=mtp_accept_len,
         )
         return eagle_mem_indexes_cpu

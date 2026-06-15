@@ -29,21 +29,15 @@ class CudaGraph:
         self.graph_max_len_in_batch = max_len_in_batch
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
 
-        self.normal_cuda_graph_batch_sizes = self._build_cuda_graph_batch_sizes(batch_size_multiple=1)
-        if self.mtp_step > 0:
-            self.mtp_verify_cuda_graph_batch_sizes = self._build_cuda_graph_batch_sizes(
-                batch_size_multiple=self.mtp_step + 1
-            )
-            logger.info(f"normal cuda graph batch_sizes: {self.normal_cuda_graph_batch_sizes}")
-            logger.info(f"mtp verify cuda graph batch_sizes: {self.mtp_verify_cuda_graph_batch_sizes}")
-        else:
-            self.mtp_verify_cuda_graph_batch_sizes = self.normal_cuda_graph_batch_sizes
-            logger.info(f"cuda graph batch_sizes: {self.normal_cuda_graph_batch_sizes}")
+        # With MTP enabled, both the main-model verify forward and the draft (MTP) forward run over
+        # the (mtp_step+1)-expanded decode layout, so all decode batch sizes are multiples of
+        # (mtp_step+1); a single graph batch-size set serves both. Verify vs normal graphs are told
+        # apart by the is_mtp_verify_decode component of the graph key, not by a separate set.
+        batch_size_multiple = self.mtp_step + 1 if self.mtp_step > 0 else 1
+        self.cuda_graph_batch_sizes = self._build_cuda_graph_batch_sizes(batch_size_multiple=batch_size_multiple)
+        logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 
     def _build_cuda_graph_batch_sizes(self, batch_size_multiple: int):
-        # gen cuda graph batch_sizes
-        # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
-        # and [graph_split_batch_size + graph_grow_step_size, ...]
         graph_split_batch_size = self.args.graph_split_batch_size * batch_size_multiple
         graph_grow_step_size = self.args.graph_grow_step_size * batch_size_multiple
 
@@ -75,22 +69,16 @@ class CudaGraph:
         return (infer_state.input_ids.shape[0], is_mtp_verify_decode)
 
     def need_capture(self, batch_size, is_mtp_verify_decode=False):
-        find_batch_size = self.find_closest_graph_batch_size(batch_size, is_mtp_verify_decode=is_mtp_verify_decode)
+        find_batch_size = self.find_closest_graph_batch_size(batch_size)
         if find_batch_size is not None:
             return (find_batch_size, is_mtp_verify_decode) not in self.graph
         else:
             assert False, "dead code"
 
-    def _get_graph_batch_sizes(self, is_mtp_verify_decode=False):
-        if is_mtp_verify_decode:
-            return self.mtp_verify_cuda_graph_batch_sizes
-        return self.normal_cuda_graph_batch_sizes
-
-    def find_closest_graph_batch_size(self, batch_size, is_mtp_verify_decode=False):
-        graph_batch_sizes = self._get_graph_batch_sizes(is_mtp_verify_decode=is_mtp_verify_decode)
-        index = bisect.bisect_left(graph_batch_sizes, batch_size)
-        if index < len(graph_batch_sizes):
-            find_batch_size = graph_batch_sizes[index]
+    def find_closest_graph_batch_size(self, batch_size):
+        index = bisect.bisect_left(self.cuda_graph_batch_sizes, batch_size)
+        if index < len(self.cuda_graph_batch_sizes):
+            find_batch_size = self.cuda_graph_batch_sizes[index]
             return find_batch_size
         else:
             return None
@@ -150,13 +138,12 @@ class CudaGraph:
         return getattr(model, "is_mtp_draft_model", False)
 
     def _iter_warmup_graph_layouts(self, model):
-        if self.mtp_step > 0:
-            if self._is_mtp_draft_model(model):
-                yield False, self.normal_cuda_graph_batch_sizes
-            else:
-                yield True, self.mtp_verify_cuda_graph_batch_sizes
+        # main-model decode is a verify forward; the draft (MTP) model takes the normal layout.
+        # Both warm up over the same batch-size set; only the verify flag (graph key + layout) differs.
+        if self.mtp_step > 0 and not self._is_mtp_draft_model(model):
+            yield True, self.cuda_graph_batch_sizes
         else:
-            yield False, self.normal_cuda_graph_batch_sizes
+            yield False, self.cuda_graph_batch_sizes
 
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
         graph_obj = torch.cuda.CUDAGraph()

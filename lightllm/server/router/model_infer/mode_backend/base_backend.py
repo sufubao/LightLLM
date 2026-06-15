@@ -1,5 +1,4 @@
 import os
-import copy
 import numpy as np
 import torch
 import time
@@ -17,7 +16,7 @@ from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
+from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -745,62 +744,6 @@ class ModeBackend:
             b_req_idx=b_req_idx,
         )
         return mtp_accept_len, accepted_index
-
-    def _build_eagle_accepted_draft_input(
-        self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-    ):
-        accepted_row_idx = b_req_mtp_start_loc + mtp_accept_len - 1
-        accepted_row_idx_long = accepted_row_idx.long()
-
-        draft_model_input = copy.copy(main_model_input)
-        draft_model_input.batch_size = accepted_row_idx.shape[0]
-        draft_model_input.total_token_num = draft_model_input.batch_size * main_model_input.max_kv_seq_len
-        draft_model_input.input_ids = next_token_ids.index_select(0, accepted_row_idx_long)
-        draft_model_input.mtp_draft_input_hiddens = main_model_output.mtp_main_output_hiddens.index_select(
-            0, accepted_row_idx_long
-        )
-        draft_model_input.b_req_idx = main_model_input.b_req_idx.index_select(0, accepted_row_idx_long)
-        draft_model_input.b_mtp_index = main_model_input.b_mtp_index.index_select(0, accepted_row_idx_long)
-        draft_model_input.b_seq_len = main_model_input.b_seq_len.index_select(0, accepted_row_idx_long)
-        draft_model_input.b_num_accepted_tokens = None
-        if main_model_input.mem_indexes is not None:
-            draft_model_input.mem_indexes = main_model_input.mem_indexes.index_select(0, accepted_row_idx_long)
-            draft_model_input.mem_indexes_cpu = None
-        if main_model_input.b_shared_seq_len is not None:
-            draft_model_input.b_shared_seq_len = main_model_input.b_shared_seq_len.index_select(
-                0, accepted_row_idx_long
-            )
-        if main_model_input.b_mark_shared_group is not None:
-            draft_model_input.b_mark_shared_group = main_model_input.b_mark_shared_group.index_select(
-                0, accepted_row_idx_long
-            )
-
-        if accepted_row_idx.device.type == "cpu":
-            selected_rows = accepted_row_idx.tolist()
-            draft_model_input.multimodal_params = [main_model_input.multimodal_params[i] for i in selected_rows]
-        else:
-            draft_model_input.multimodal_params = [
-                {"images": [], "audios": []} for _ in range(draft_model_input.batch_size)
-            ]
-
-        accepted_next_token_ids = draft_model_input.input_ids
-        accepted_req_idx = draft_model_input.b_req_idx
-        return draft_model_input, accepted_next_token_ids, accepted_req_idx
-
-    def _scatter_accepted_next_token_ids(self, accepted_req_idx: torch.Tensor, all_next_token_ids: torch.Tensor):
-        req_to_next_token_ids = self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
-        width = all_next_token_ids.shape[1]
-        req_to_next_token_ids[:, :width].index_copy_(
-            0,
-            accepted_req_idx.long(),
-            all_next_token_ids.to(dtype=req_to_next_token_ids.dtype),
-        )
-        return
 
     def _update_mtp_accept_ratio(
         self,

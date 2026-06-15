@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
+
     # weight class
     pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight

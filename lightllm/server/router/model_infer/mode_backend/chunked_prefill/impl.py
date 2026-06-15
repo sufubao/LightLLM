@@ -353,12 +353,11 @@ class ChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
     ):
-        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
-        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型 decode_mtp 设置的
-        # verify 布局，命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError
-        # （cudagraph 关闭时则会在扁平的 draft batch 上误用 S+1 分组的 verify attention）。
+        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
+        # 避免污染之后仍要用到的 main_model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
+        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
+        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
         draft_model_input = copy.copy(main_model_input)
-        draft_model_input.b_num_accepted_tokens = None
         draft_model_output = main_model_output
         draft_next_token_ids = next_token_ids
         all_next_token_ids = []
@@ -398,11 +397,11 @@ class ChunkedPrefillBackend(ModeBackend):
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * self.mtp_step)
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
-        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
-        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型 decode_mtp 设置的
-        # verify 布局，命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
+        # 避免污染之后仍要用到的 main_model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
+        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
+        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
         draft_model_input = copy.copy(main_model_input)
-        draft_model_input.b_num_accepted_tokens = None
         draft_model_output = main_model_output
         draft_next_token_ids = next_token_ids
         all_next_token_ids = []

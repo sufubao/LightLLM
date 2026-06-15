@@ -552,11 +552,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num: int,
     ):
         all_next_token_ids = []
-        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
-        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型设置的 verify 布局，
-        # 命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
+        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
+        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
+        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
         draft_model_input = copy.copy(model_input)
-        draft_model_input.b_num_accepted_tokens = None
         draft_model_output = model_output
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
         if req_num > 0:
@@ -595,11 +595,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num: int,
     ):
         all_next_token_ids = []
-        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
-        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型设置的 verify 布局，
-        # 命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
+        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
+        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
+        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
         draft_model_input = copy.copy(model_input)
-        draft_model_input.b_num_accepted_tokens = None
         draft_model_output = model_output
         all_next_token_ids.append(next_token_ids)
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
@@ -913,13 +913,12 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
-        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
-        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型设置的 verify 布局，
-        # 命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
+        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
+        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
+        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
         draft_model_input0 = copy.copy(model_input0)
         draft_model_input1 = copy.copy(model_input1)
-        draft_model_input0.b_num_accepted_tokens = None
-        draft_model_input1.b_num_accepted_tokens = None
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
@@ -975,13 +974,12 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
-        # share some inference info with the main model. copy.copy 后清空 b_num_accepted_tokens，
-        # 使 draft (MTP) forward 走普通 decode 布局 (bs, False)；否则会沿用主模型设置的 verify 布局，
-        # 命中 MTP draft 模型从未捕获的 cudagraph key (bs, True) -> KeyError。
+        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
+        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
+        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
+        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
         draft_model_input0 = copy.copy(model_input0)
         draft_model_input1 = copy.copy(model_input1)
-        draft_model_input0.b_num_accepted_tokens = None
-        draft_model_input1.b_num_accepted_tokens = None
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")

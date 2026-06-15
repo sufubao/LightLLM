@@ -34,7 +34,7 @@ def test_mtp_decode_cuda_graph_warmup_uses_verify_layout():
     assert model_input.total_token_num == 18
 
 
-def test_mtp_decode_cuda_graph_warmup_supports_normal_layout_for_draft():
+def test_mtp_decode_cuda_graph_warmup_builds_normal_layout_when_not_verify():
     from lightllm.common.basemodel.cuda_graph import CudaGraph
 
     graph = CudaGraph.__new__(CudaGraph)
@@ -96,7 +96,7 @@ def test_mtp_decode_cuda_graph_keys_distinguish_verify_and_normal():
     assert graph.need_capture(6, is_mtp_verify_decode=False) is True
 
 
-def test_mtp_decode_cuda_graph_warmup_layouts_split_main_and_draft_models():
+def test_mtp_decode_cuda_graph_warmup_layouts_use_verify_for_main_and_draft():
     from lightllm.common.basemodel.cuda_graph import CudaGraph
 
     class Qwen3_5MOETpPartModel:
@@ -109,9 +109,15 @@ def test_mtp_decode_cuda_graph_warmup_layouts_split_main_and_draft_models():
     graph.mtp_step = 2
     graph.cuda_graph_batch_sizes = [3, 6, 9]
 
-    # Same batch-size set for both; the main model warms up the verify layout, the draft the normal.
+    # Under MTP both the main verify forward and the pure-full-attention draft forward run the
+    # (mtp_step+1)-grouped verify decode layout (the draft reuses the main model_input and keeps
+    # b_num_accepted_tokens), so both warm up the verify graph key over the same batch-size set.
     assert list(graph._iter_warmup_graph_layouts(Qwen3_5MOETpPartModel())) == [(True, [3, 6, 9])]
-    assert list(graph._iter_warmup_graph_layouts(Qwen3_5MoeMTPModel())) == [(False, [3, 6, 9])]
+    assert list(graph._iter_warmup_graph_layouts(Qwen3_5MoeMTPModel())) == [(True, [3, 6, 9])]
+
+    # A non-MTP model (mtp_step == 0) warms up the normal layout instead.
+    graph.mtp_step = 0
+    assert list(graph._iter_warmup_graph_layouts(Qwen3_5MOETpPartModel())) == [(False, [3, 6, 9])]
 
 
 def test_mtp_decode_warmup_layout_marks_qwen3next_verify(monkeypatch):
@@ -205,7 +211,7 @@ def test_qwen3next_hybrid_mtp_keeps_decode_cuda_graph_enabled(monkeypatch):
     assert model.graph == "captured"
 
 
-def test_fa3_decode_uses_normal_layout_for_narrowed_mtp_draft(monkeypatch):
+def test_fa3_decode_uses_normal_layout_when_no_accept_tensor(monkeypatch):
     import lightllm.common.basemodel.attention.fa3.fp as fa3_fp
     from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState
 

@@ -134,13 +134,12 @@ class CudaGraph:
             **model._gen_special_model_input(batch_size),
         )
 
-    def _is_mtp_draft_model(self, model):
-        return getattr(model, "is_mtp_draft_model", False)
-
     def _iter_warmup_graph_layouts(self, model):
-        # main-model decode is a verify forward; the draft (MTP) model takes the normal layout.
-        # Both warm up over the same batch-size set; only the verify flag (graph key + layout) differs.
-        if self.mtp_step > 0 and not self._is_mtp_draft_model(model):
+        # Under MTP both the main verify forward and the (pure full-attention) draft forward run the
+        # (mtp_step+1)-grouped verify decode layout, so both warm up the verify graph key; only
+        # mtp_step == 0 models use the normal layout. (Matches upstream: the draft reuses the main
+        # model_input and keeps b_num_accepted_tokens, so its decode is a verify forward too.)
+        if self.mtp_step > 0:
             yield True, self.cuda_graph_batch_sizes
         else:
             yield False, self.cuda_graph_batch_sizes

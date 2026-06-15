@@ -45,6 +45,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _init_linear_layer_metadata(self, layer_num, network_config):
+
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
         self.num_k_heads = network_config["linear_num_key_heads"]
@@ -120,6 +121,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_tp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
+
         shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
 
         hidden_states = input.view(-1, self.embed_dim_)

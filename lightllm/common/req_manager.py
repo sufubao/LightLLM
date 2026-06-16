@@ -86,10 +86,7 @@ class ReqManager:
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
-        # MTP verify decode 的 per-req accept 数量：GPU 常驻、按 req_idx 索引（含 HOLD 槽）。
-        # 取代旧的 req.mtp_accept_len host 属性 —— verify 后在 GPU 上 scatter，下一步在 GDN 的
-        # init_mtp_verify_extra_state 里按 req_first gather 成 b_num_accepted_tokens，省掉每步的
-        # host 回写 + H2D 重建。HOLD 槽恒为 1，使 padding 组 gather 到 1。仅 mtp_step>0 时分配。
+
         self.req_to_accept_len = (
             torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
             if get_env_start_args().mtp_step > 0

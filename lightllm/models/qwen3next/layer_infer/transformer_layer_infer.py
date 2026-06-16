@@ -16,6 +16,7 @@ from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_ru
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
 from functools import partial
 
@@ -45,7 +46,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _init_linear_layer_metadata(self, layer_num, network_config):
-
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
         self.num_k_heads = network_config["linear_num_key_heads"]
@@ -121,12 +121,25 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_tp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-
-        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
-
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
-        router_logits = layer_weight.moe_gate.mm(hidden_states)
+
+        fused_w, fused_splits = layer_weight.get_fused_moe_gate_weight()
+        if fused_w is not None:
+            gate_up_cols, n_experts = fused_splits
+            fused_out = self.alloc_tensor((num_tokens, fused_w.shape[0]), hidden_states.dtype)
+            torch.mm(hidden_states, fused_w.t(), out=fused_out)
+            ffn1_out = self.alloc_tensor((num_tokens, gate_up_cols // 2), hidden_states.dtype)
+            silu_and_mul_fwd(fused_out[:, :gate_up_cols], ffn1_out)
+            shared_expert_out = layer_weight.down_proj.mm(ffn1_out)
+            ffn1_out = None
+            shared_gate = fused_out[:, gate_up_cols + n_experts : gate_up_cols + n_experts + 1].sigmoid_()
+            shared_expert_out.mul_(shared_gate)
+            router_logits = self.alloc_tensor((num_tokens, n_experts), hidden_states.dtype)
+            router_logits.copy_(fused_out[:, gate_up_cols : gate_up_cols + n_experts])
+        else:
+            shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
+            router_logits = layer_weight.moe_gate.mm(hidden_states)
         layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,

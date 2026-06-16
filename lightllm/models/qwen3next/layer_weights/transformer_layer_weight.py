@@ -17,8 +17,43 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
         num_full_attention_layers = network_config["full_attention_interval"]
         self.is_linear_attention_layer = (layer_num + 1) % num_full_attention_layers != 0
+        self._fused_moe_gate_weight = None
+        self._fused_moe_gate_splits = None
+        self._fused_moe_gate_checked = False
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
+
+    def get_fused_moe_gate_weight(self):
+        if self._fused_moe_gate_checked:
+            return self._fused_moe_gate_weight, self._fused_moe_gate_splits
+        if torch.cuda.is_current_stream_capturing():
+            return None, None
+        self._fused_moe_gate_checked = True
+        from lightllm.common.quantization.no_quant import NoQuantization
+
+        gate_up = getattr(self, "gate_up_proj", None)
+        moe_gate = getattr(self, "moe_gate", None)
+        ffn_gate = getattr(self, "ffn_gate", None)
+        if gate_up is None or moe_gate is None or ffn_gate is None:
+            return None, None
+        if get_env_start_args().enable_ep_moe:
+            return None, None
+        if not isinstance(gate_up.quant_method, NoQuantization):
+            return None, None
+        if gate_up.bias is not None or moe_gate.bias is not None or ffn_gate.bias is not None:
+            return None, None
+        w_gu = gate_up.mm_param.weight  # [2*inter_tp, hidden]
+        w_rg = moe_gate.mm_param.weight  # [n_routed_experts, hidden]
+        w_sg = ffn_gate.mm_param.weight  # [1, hidden]
+        if not (w_gu.dtype == w_rg.dtype == w_sg.dtype == self.data_type_):
+            return None, None
+        fused = torch.cat([w_gu, w_rg, w_sg], dim=0)
+        pad = (-fused.shape[0]) % 8
+        if pad:
+            fused = torch.cat([fused, fused.new_zeros((pad, fused.shape[1]))], dim=0)
+        self._fused_moe_gate_weight = fused
+        self._fused_moe_gate_splits = (w_gu.shape[0], w_rg.shape[0])
+        return self._fused_moe_gate_weight, self._fused_moe_gate_splits
 
     def _init_qkv(self):
         in_dim = self.n_embed

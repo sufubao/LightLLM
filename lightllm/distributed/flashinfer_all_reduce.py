@@ -132,4 +132,39 @@ class FlashInferAllReduce:
             input=inp,
             workspace=self._workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
+            launch_with_pdl=True,
         )
+
+    def all_reduce_residual_rmsnorm(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        norm_weight: torch.Tensor,
+        eps: float,
+        alloc_func=torch.empty,
+    ):
+        if (
+            residual.shape != inp.shape
+            or residual.dtype != inp.dtype
+            or not residual.is_cuda
+            or norm_weight.dtype != inp.dtype
+            or norm_weight.shape[0] != inp.shape[-1]
+        ):
+            return None
+        if not self.should_use(inp):
+            return None
+
+        residual_out = alloc_func(inp.shape, dtype=inp.dtype, device=inp.device)
+        norm_out = alloc_func(inp.shape, dtype=inp.dtype, device=inp.device)
+        flashinfer_comm.allreduce_fusion(
+            input=inp,
+            workspace=self._workspace,
+            pattern=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+            launch_with_pdl=True,
+            residual_in=residual,
+            residual_out=residual_out,
+            norm_out=norm_out,
+            rms_gamma=norm_weight,
+            rms_eps=eps,
+        )
+        return residual_out, norm_out

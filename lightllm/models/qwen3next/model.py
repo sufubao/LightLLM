@@ -20,6 +20,8 @@ from lightllm.common.linear_att_cache_manager.config_objs import (
     LinearAttCacheConfig,
     get_mtp_draft_full_att_layer_num,
 )
+from lightllm.common.basemodel.batch_objs import ModelOutput
+from lightllm.distributed import all_reduce, all_reduce_residual_rmsnorm
 
 logger = init_logger(__name__)
 
@@ -53,6 +55,29 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def autotune_layers(self):
         return self.config["full_attention_interval"]
+
+    def _autotune_extra_warmup(self):
+        if not self.trans_layers_weight:
+            return
+
+        norm_weight = self.trans_layers_weight[0].ffn_norm_weight_
+        add_rmsnorm = getattr(norm_weight, "add_rmsnorm", None)
+        if add_rmsnorm is None:
+            return
+
+        hidden_dim = norm_weight.weight.shape[0]
+        max_batch_size = min(self.graph_max_batch_size, self.batch_max_tokens)
+        warmup_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+        warmup_batch_sizes = [bs for bs in warmup_batch_sizes if bs <= max_batch_size]
+        if max_batch_size not in warmup_batch_sizes:
+            warmup_batch_sizes.append(max_batch_size)
+
+        for batch_size in sorted(set(warmup_batch_sizes)):
+            x = torch.zeros((batch_size, hidden_dim), dtype=self.data_type, device="cuda")
+            residual = torch.zeros_like(x)
+            out = torch.empty_like(x)
+            add_rmsnorm(input=x, residual=residual, eps=self.layers_infer[0].eps_, out=out)
+        return
 
     def _init_config(self):
         super()._init_config()
@@ -113,3 +138,80 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
         )
         return
+
+    def _token_forward(self, infer_state: Qwen3NextInferStateInfo):
+        input_ids = infer_state.input_ids
+        input_embs = self.pre_infer.token_forward(input_ids, infer_state, self.pre_post_weight)
+        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+
+        next_att_normed = None
+        for i in range(self.layers_num):
+            layer: Qwen3NextTransformerLayerInfer = self.layers_infer[i]
+            layer_weight: Qwen3NextTransformerLayerWeight = self.trans_layers_weight[i]
+
+            if next_att_normed is None:
+                input1 = layer._att_norm(input_embs, infer_state, layer_weight)
+            else:
+                input1 = next_att_normed
+                next_att_normed = None
+
+            if layer.is_linear_attention_layer:
+                o = layer.token_attention_forward(input1, infer_state, layer_weight)
+                input1 = layer._add_residual_ffn_norm(input_embs, o, infer_state, layer_weight)
+                o = None
+            else:
+                q, cache_kv = layer._get_qkv(input1, infer_state, layer_weight)
+                layer._post_cache_kv(cache_kv, infer_state, layer_weight)
+                o = layer._token_attention_kernel(q, infer_state, layer_weight)
+                q = None
+                o = layer._get_o_local(o, infer_state, layer_weight)
+                fused = None
+                if layer.tp_world_size_ > 1:
+                    fused = all_reduce_residual_rmsnorm(
+                        o,
+                        residual=input_embs.view(-1, layer.embed_dim_),
+                        norm_weight=layer_weight.ffn_norm_weight_.weight,
+                        eps=layer.eps_,
+                        group=infer_state.dist_group,
+                        alloc_func=layer.alloc_tensor,
+                    )
+                if fused is None:
+                    if layer.tp_world_size_ > 1:
+                        all_reduce(o, group=infer_state.dist_group)
+                    input1 = layer._add_residual_ffn_norm(input_embs, o, infer_state, layer_weight)
+                else:
+                    input_embs, input1 = fused
+                o = None
+
+            ffn_out = layer._ffn(input1, infer_state, layer_weight)
+            ffn_out = ffn_out.view(-1, layer.embed_dim_)
+
+            if i + 1 < self.layers_num:
+                next_layer: Qwen3NextTransformerLayerInfer = self.layers_infer[i + 1]
+                next_layer_weight: Qwen3NextTransformerLayerWeight = self.trans_layers_weight[i + 1]
+                add_rmsnorm = getattr(next_layer_weight.att_norm_weight_, "add_rmsnorm", None)
+                if add_rmsnorm is not None:
+                    next_att_normed = add_rmsnorm(
+                        input=input_embs,
+                        residual=ffn_out,
+                        eps=next_layer.eps_,
+                        alloc_func=next_layer.alloc_tensor,
+                    )
+                    continue
+
+            input_embs.add_(ffn_out)
+
+        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        predict_logits: torch.Tensor = self.post_infer.token_forward(
+            last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
+        )
+
+        model_output = ModelOutput(logits=predict_logits.contiguous())
+        if self.is_mtp_mode:
+            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+
+        if infer_state.is_cuda_graph:
+            model_output.to_no_ref_tensor()
+
+        return model_output

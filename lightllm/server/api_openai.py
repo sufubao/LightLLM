@@ -314,6 +314,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
+        "return_logprobs": request.logprobs is not None,
         "seed": request.seed,
     }
 
@@ -822,6 +823,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         "n": request.n,
         "best_of": request.best_of,
         "add_special_tokens": False,
+        "return_logprobs": request.logprobs is not None,
         "seed": request.seed,
     }
     if request.max_completion_tokens is not None:

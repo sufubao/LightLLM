@@ -28,6 +28,7 @@ from rich.text import Text
 
 # ───────────────────────── Prometheus 文本解析 ─────────────────────────
 
+
 def parse_prometheus(text):
     """解析 /metrics 文本 -> [(name, labels_dict, value), ...]"""
     samples = []
@@ -40,8 +41,8 @@ def parse_prometheus(text):
             brace_open = line.index("{")
             brace_close = line.rindex("}")
             name = line[:brace_open]
-            labels_str = line[brace_open + 1:brace_close]
-            value_str = line[brace_close + 1:].strip()
+            labels_str = line[brace_open + 1 : brace_close]
+            value_str = line[brace_close + 1 :].strip()
         else:
             parts = line.split(None, 1)
             name = parts[0]
@@ -76,7 +77,8 @@ def aggregate(text):
             le_f = float("inf") if le == "+Inf" else float(le)
             hist[base][le_f] = hist[base].get(le_f, 0.0) + value
         elif name.endswith("_sum") or name.endswith("_count"):
-            continue  # 分位数用 bucket 算, rate 用 base counter, 不需要 sum/count
+            # 分位数用 bucket 算, 但 histogram 的 _sum/_count 用来算均值 (sum/count), 故保留为 scalar
+            scalars[name] += value
         else:
             scalars[name] += value
     return hist, scalars
@@ -90,7 +92,7 @@ def quantile(buckets, q):
     if total <= 0:
         return None
     target = q * total
-    finite_les = sorted(l for l in buckets.keys() if l != float("inf"))
+    finite_les = sorted(le for le in buckets.keys() if le != float("inf"))
     if not finite_les:
         return None
     prev_le, prev_count = 0.0, 0.0
@@ -155,7 +157,10 @@ def _kv_table():
     return t
 
 
-def build_panel(hist, scalars, prev, now, ttft_history, gen_history, url, interval, status):
+MTP_METRIC = "lightllm_request_mtp_avg_token_per_step"
+
+
+def build_panel(hist, scalars, prev, now, ttft_history, gen_history, mtp_history, url, interval, status):
     # —— LATENCY ——
     lat = Table(box=None, padding=(0, 2), show_header=True, show_edge=False)
     lat.add_column("", style="bold")
@@ -180,22 +185,74 @@ def build_panel(hist, scalars, prev, now, ttft_history, gen_history, url, interv
 
     # —— THROUGHPUT ——
     thr = _kv_table()
-    thr.add_row("gen tok/s", fmt_float(gen_tps), "input tok/s", fmt_float(in_tps), "gen tput g",
-                fmt_float(scalars.get("lightllm_gen_throughput")))
-    thr.add_row("TPM", f"{tpm:,.0f}" if tpm is not None else "[dim]—[/dim]",
-                "req success", fmt_int(scalars.get("lightllm_request_success")),
-                "req fail", fmt_int(scalars.get("lightllm_request_failure")))
+    thr.add_row(
+        "gen tok/s",
+        fmt_float(gen_tps),
+        "input tok/s",
+        fmt_float(in_tps),
+        "gen tput g",
+        fmt_float(scalars.get("lightllm_gen_throughput")),
+    )
+    thr.add_row(
+        "TPM",
+        f"{tpm:,.0f}" if tpm is not None else "[dim]—[/dim]",
+        "req success",
+        fmt_int(scalars.get("lightllm_request_success")),
+        "req fail",
+        fmt_int(scalars.get("lightllm_request_failure")),
+    )
 
     # —— SERVER ——
     srv = _kv_table()
-    srv.add_row("running", fmt_int(scalars.get("lightllm_num_running_reqs")),
-                "queued", fmt_int(scalars.get("lightllm_queue_size")),
-                "batch", fmt_int(scalars.get("lightllm_batch_current_size")))
+    srv.add_row(
+        "running",
+        fmt_int(scalars.get("lightllm_num_running_reqs")),
+        "queued",
+        fmt_int(scalars.get("lightllm_queue_size")),
+        "batch",
+        fmt_int(scalars.get("lightllm_batch_current_size")),
+    )
     hit = scalars.get("lightllm_cache_hit_rate")
     hit_pct = f"{hit * 100:.0f}%" if hit is not None else "[dim]—[/dim]"
-    srv.add_row("cache hit", hit_pct,
-                "req total", fmt_int(scalars.get("lightllm_request_count")),
-                "infer steps", fmt_int(scalars.get("lightllm_batch_inference_count")))
+    srv.add_row(
+        "cache hit",
+        hit_pct,
+        "req total",
+        fmt_int(scalars.get("lightllm_request_count")),
+        "infer steps",
+        fmt_int(scalars.get("lightllm_batch_inference_count")),
+    )
+
+    # —— MTP 平均 accepted len (tokens/step, histogram sum/count) ——
+    # 累计均值 = sum/count; 窗口均值 = 相邻两次采样的 (Δsum/Δcount), 反映近期 accept 水平
+    sum_name, cnt_name = MTP_METRIC + "_sum", MTP_METRIC + "_count"
+    total_sum, total_cnt = scalars.get(sum_name), scalars.get(cnt_name)
+    mtp_cum = total_sum / total_cnt if total_sum is not None and total_cnt else None
+
+    mtp_win = None
+    if sum_name in prev and cnt_name in prev and total_sum is not None and total_cnt is not None:
+        d_sum = total_sum - prev[sum_name][0]
+        d_cnt = total_cnt - prev[cnt_name][0]
+        if d_cnt > 0:
+            mtp_win = d_sum / d_cnt
+
+    mtp = _kv_table()
+    mtp.add_row(
+        "accept len (cum)",
+        fmt_float(mtp_cum, 3),
+        "accept len (recent)",
+        fmt_float(mtp_win, 3),
+        "p50",
+        fmt_float(quantile(hist.get(MTP_METRIC, {}), 0.50), 3),
+    )
+    mtp.add_row(
+        "done reqs",
+        fmt_int(total_cnt),
+        "p95",
+        fmt_float(quantile(hist.get(MTP_METRIC, {}), 0.95), 3),
+        "p99",
+        fmt_float(quantile(hist.get(MTP_METRIC, {}), 0.99), 3),
+    )
 
     # —— 趋势火花线 ——
     def trend_line(name, values, unit):
@@ -211,11 +268,21 @@ def build_panel(hist, scalars, prev, now, ttft_history, gen_history, url, interv
     title = f"LightLLM Live Monitor   {clock}   ↻ {interval}s"
 
     body = Group(
-        section("LATENCY"), lat, Text(""),
-        section("THROUGHPUT"), thr, Text(""),
-        section("SERVER"), srv, Text(""),
+        section("LATENCY"),
+        lat,
+        Text(""),
+        section("THROUGHPUT"),
+        thr,
+        Text(""),
+        section("SERVER"),
+        srv,
+        Text(""),
+        section("MTP"),
+        mtp,
+        Text(""),
         trend_line("TTFT p50", ttft_history, "ms"),
         trend_line("gen tok/s", gen_history, "tok/s"),
+        trend_line("MTP accept", mtp_history, "tok/step"),
         Text(""),
         Text(f"{url}/metrics  ·  {status}", style="dim"),
     )
@@ -224,6 +291,7 @@ def build_panel(hist, scalars, prev, now, ttft_history, gen_history, url, interv
 
 
 # ───────────────────────── HTTP + 主循环 ─────────────────────────
+
 
 def fetch(url, timeout=5):
     with urllib.request.urlopen(url, timeout=timeout) as r:
@@ -240,8 +308,7 @@ def main():
     metrics_url = args.url.rstrip("/") + "/metrics"
     base_url = args.url.rstrip("/")
     prev = {}
-    ttft_history, gen_history = [], []
-    status = "connecting..."
+    ttft_history, gen_history, mtp_history = [], [], []
 
     console = Console()
     try:
@@ -271,13 +338,32 @@ def main():
                         if len(gen_history) > args.window:
                             gen_history.pop(0)
 
-                    panel = build_panel(hist, scalars, prev, now, ttft_history, gen_history,
-                                        base_url, args.interval, "ok")
+                    # 窗口 MTP accept len 用于趋势 (Δsum/Δcount)
+                    sn, cn = MTP_METRIC + "_sum", MTP_METRIC + "_count"
+                    if sn in prev and cn in prev and sn in scalars and cn in scalars:
+                        d_cnt = scalars[cn] - prev[cn][0]
+                        if d_cnt > 0:
+                            mtp_history.append((scalars[sn] - prev[sn][0]) / d_cnt)
+                            if len(mtp_history) > args.window:
+                                mtp_history.pop(0)
+
+                    panel = build_panel(
+                        hist, scalars, prev, now, ttft_history, gen_history, mtp_history, base_url, args.interval, "ok"
+                    )
                     prev = {k: (v, now) for k, v in scalars.items()}
-                    status = "ok"
                 except Exception as e:
-                    panel = build_panel(defaultdict(dict), {}, prev, time.time(),
-                                        ttft_history, gen_history, base_url, args.interval, f"error: {e}")
+                    panel = build_panel(
+                        defaultdict(dict),
+                        {},
+                        prev,
+                        time.time(),
+                        ttft_history,
+                        gen_history,
+                        mtp_history,
+                        base_url,
+                        args.interval,
+                        f"error: {e}",
+                    )
 
                 live.update(panel)
                 time.sleep(max(0.0, args.interval - (time.time() - t0)))

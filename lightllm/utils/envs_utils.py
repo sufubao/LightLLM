@@ -226,20 +226,16 @@ def enable_huge_page():
     return enable_env_vars("LIGHTLLM_HUGE_PAGE_ENABLE")
 
 
-def _mtp_added_layer_num(mtp_mode, mtp_step: int) -> int:
-    # Single source of truth for the mtp_mode -> added KV/full-att layer count (#9).
-    if mtp_mode == "eagle_with_att":
-        return 1
-    if mtp_mode == "vanilla_with_att":
-        return mtp_step
-    return 0
-
-
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
     # mtp 模式下需要在mem manger上扩展draft model使用的layer
-    args = get_env_start_args()
-    return _mtp_added_layer_num(args.mtp_mode, args.mtp_step)
+    added_mtp_layer_num = 0
+    if get_env_start_args().mtp_mode == "eagle_with_att":
+        added_mtp_layer_num += 1
+    elif get_env_start_args().mtp_mode == "vanilla_with_att":
+        added_mtp_layer_num += get_env_start_args().mtp_step
+
+    return added_mtp_layer_num
 
 
 @lru_cache(maxsize=None)

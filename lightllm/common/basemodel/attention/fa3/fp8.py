@@ -3,6 +3,7 @@ import torch
 from ..base_att import AttControl
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_fp8_quant
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 from typing import Union
@@ -44,12 +45,9 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             torch.arange(batch_size, device=device), self.infer_state.b_q_seq_len
         )
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = (
-            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        )
-        self.v_descale = (
-            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        )
+        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+
 
     def prefill_att(
         self,
@@ -125,12 +123,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         head_num = mem_manager.head_num
 
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = (
-            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        )
-        self.v_descale = (
-            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        )
+        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
 
         return
 

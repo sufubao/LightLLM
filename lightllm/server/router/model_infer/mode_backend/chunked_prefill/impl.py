@@ -252,10 +252,7 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
-            # verify the next_token_ids. The chunked decode batch is the contiguous
-            # (mtp_step+1)-expanded layout, so request starts are structurally
-            # arange(n_real)*(mtp_step+1). Compute on device instead of a per-step Python
-            # list-comp + pinned pack + H2D (#22).
+            # verify the next_token_ids
             n_real = model_input.batch_size // (self.mtp_step + 1)
             b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * (self.mtp_step + 1)
 

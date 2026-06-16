@@ -32,7 +32,11 @@ def fused_topk(
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
-    if sgl_ops is None:
+    # sgl topk_softmax requires a contiguous gating tensor; the triton
+    # softmax_topk reads per-row strides and casts internally, so for a strided
+    # gating view (e.g. a column slice of a fused gate GEMM output) it avoids a
+    # contiguous copy and is bit-identical for these shapes.
+    if sgl_ops is None or not gating_output.is_contiguous():
         return softmax_topk(gating_output, topk, renorm=renormalize)
     M, _ = hidden_states.shape
 

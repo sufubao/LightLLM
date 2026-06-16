@@ -28,9 +28,9 @@ def softmax_topk_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     if NEED_MASK:
         mask = offsets < n_cols
-        values = tl.load(row_input_ptr + offsets, mask=mask, other=-float("inf"))
+        values = tl.load(row_input_ptr + offsets, mask=mask, other=-float("inf")).to(tl.float32)
     else:
-        values = tl.load(row_input_ptr + offsets)
+        values = tl.load(row_input_ptr + offsets).to(tl.float32)
 
     current_max = tl.max(values, axis=0)
     values = values - current_max
@@ -68,9 +68,9 @@ def softmax_topk(gating_output: torch.Tensor, topk: int, renorm: bool = False):
     num_tokens, num_experts = gating_output.shape
     device = gating_output.device
 
-    if gating_output.dtype != torch.float32:
-        gating_output = gating_output.to(torch.float32)
-
+    # NOTE: the kernel reads per-row strides and casts to fp32 internally, so a
+    # non-contiguous / bf16 gating tensor (e.g. a column slice of a fused gate
+    # GEMM output) is consumed directly with no contiguous fp32 copy.
     topk_vals = torch.empty((num_tokens, topk), dtype=torch.float32, device=device)
     topk_idxs = torch.empty((num_tokens, topk), dtype=torch.int32, device=device)
 

@@ -135,8 +135,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             ffn1_out = None
             shared_gate = fused_out[:, gate_up_cols + n_experts : gate_up_cols + n_experts + 1].sigmoid_()
             shared_expert_out.mul_(shared_gate)
-            router_logits = self.alloc_tensor((num_tokens, n_experts), hidden_states.dtype)
-            router_logits.copy_(fused_out[:, gate_up_cols : gate_up_cols + n_experts])
+            router_logits = fused_out[:, gate_up_cols : gate_up_cols + n_experts]
         else:
             shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
             router_logits = layer_weight.moe_gate.mm(hidden_states)

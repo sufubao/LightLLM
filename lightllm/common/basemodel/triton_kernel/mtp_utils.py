@@ -148,6 +148,51 @@ def mtp_scatter_next_token_ids(
     )
 
 
+@triton.jit
+def _fwd_kernel_scatter_accept_len(
+    req_to_accept_len,
+    b_req_mtp_start_loc,
+    b_req_idx,
+    mtp_accept_len,
+):
+    cur_index = tl.program_id(0)
+    req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
+    cur_req_idx = tl.load(b_req_idx + req_start_loc)
+    accept_len = tl.load(mtp_accept_len + cur_index)
+    tl.store(req_to_accept_len + cur_req_idx, accept_len)
+    return
+
+
+def scatter_mtp_accept_len(
+    req_to_accept_len: torch.Tensor,
+    b_req_mtp_start_loc: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    mtp_accept_len: torch.Tensor,
+):
+    """
+    将本步每个真实请求(组首)的 accept 数量写入 GPU 常驻的 req_to_accept_len[req_idx]。
+    融合 `req_to_accept_len[b_req_idx[b_req_mtp_start_loc]] = mtp_accept_len` 的 gather+scatter
+    为单次 launch、无中间张量。每个 program 处理一个真实请求。
+    Args:
+        req_to_accept_len: (max_req_num + 1,)
+        b_req_mtp_start_loc: (num_reqs,)  每组首行在 batch 中的偏移
+        b_req_idx: (batch_size,)          grouped 布局的 req_idx（组首即该请求的 req_idx）
+        mtp_accept_len: (num_reqs,)
+    """
+    num_reqs = mtp_accept_len.shape[0]
+    if num_reqs == 0:
+        return
+    grid = (num_reqs,)
+    _fwd_kernel_scatter_accept_len[grid](
+        req_to_accept_len=req_to_accept_len,
+        b_req_mtp_start_loc=b_req_mtp_start_loc,
+        b_req_idx=b_req_idx,
+        mtp_accept_len=mtp_accept_len,
+        num_warps=1,
+        num_stages=1,
+    )
+
+
 def test_mtp_verify():
     req_to_next_token_ids = torch.tensor(
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"

@@ -20,6 +20,7 @@ from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
+    scatter_mtp_accept_len,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
@@ -241,14 +242,6 @@ class ChunkedPrefillBackend(ModeBackend):
         """
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
 
-        if self.mtp_step > 0:
-            accept_lens = [req.mtp_accept_len for req in decode_reqs]
-            model_input.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
-                key="b_num_accepted_tokens",
-                data=accept_lens,
-                dtype=torch.int32,
-            )
-
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
@@ -260,6 +253,9 @@ class ChunkedPrefillBackend(ModeBackend):
                 new_next_token_ids=next_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
+            scatter_mtp_accept_len(
+                self.model.req_manager.req_to_accept_len, b_req_mtp_start_loc, model_input.b_req_idx, mtp_accept_len
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
@@ -296,8 +292,6 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         verify_event.synchronize()
-        for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
-            req.mtp_accept_len = int(accept_len)
         verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
@@ -350,17 +344,15 @@ class ChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
     ):
-        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
-        # 避免污染之后仍要用到的 main_model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
-        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
-        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
-        draft_model_input = copy.copy(main_model_input)
+        # share some inference info with the main model
+        draft_model_input = main_model_input
         draft_model_output = main_model_output
         draft_next_token_ids = next_token_ids
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
+
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -394,17 +386,15 @@ class ChunkedPrefillBackend(ModeBackend):
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * self.mtp_step)
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
-        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
-        # 避免污染之后仍要用到的 main_model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
-        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
-        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
-        draft_model_input = copy.copy(main_model_input)
+        # share some inference info with the main model
+        draft_model_input = main_model_input
         draft_model_output = main_model_output
         draft_next_token_ids = next_token_ids
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
         for _step in range(self.mtp_step):
+
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP

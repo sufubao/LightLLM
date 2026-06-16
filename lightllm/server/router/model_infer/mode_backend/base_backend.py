@@ -569,6 +569,7 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
+
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -750,8 +751,6 @@ class ModeBackend:
         decode_reqs: List[InferReq],
         mtp_accept_len_cpu: torch.Tensor,
     ):
-        # Master-only accept-ratio statistics. Unlike the phase-2 mtp_accept_len commit
-        # (inlined in decode_mtp) this only feeds metrics, so it may stay in phase 3.
         if self.is_master_in_dp:
             for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
@@ -759,8 +758,6 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        # softmax is strictly monotonic, so argmax(softmax(logits)) == argmax(logits);
-        # skip the softmax to shorten the per-step MTP draft critical chain (need-to-fix #16).
         draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
         return draft_next_token_ids_gpu
 
@@ -774,6 +771,7 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
+
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

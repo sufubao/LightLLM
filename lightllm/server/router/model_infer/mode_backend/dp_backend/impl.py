@@ -21,7 +21,7 @@ from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
+from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids, scatter_mtp_accept_len
 from .control_state import DPControlState
 
 
@@ -264,6 +264,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
 
             if (req_num0 + req_num1) > 0:
+
                 _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                     logits=logits,
                     b_req_idx=b_req_idx,
@@ -405,6 +406,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
+
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
@@ -431,21 +433,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
-        model_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(decode_reqs)
+        model_input, run_reqs, _ = padded_prepare_decode_inputs(decode_reqs)
         b_mtp_index_cpu = model_input.b_mtp_index
         req_num = len(run_reqs)
-
-        if self.mtp_step > 0:
-            # 标记 verify decode 布局：每个 req 一个 accept 数量（padding 出来的 fake req 记为 1）。
-            # 不设置 b_num_accepted_tokens 会让主模型的 verify forward 走非 verify 的 GDN/FA3 布局，
-            # 并命中 hybrid 主模型从未捕获的 cudagraph key (bs, False) -> KeyError。
-            # 与 chunked_prefill/impl.py 的 decode_mtp 保持一致。
-            accept_lens = [req.mtp_accept_len for req in decode_reqs] + [1] * padded_req_num
-            model_input.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
-                key="b_num_accepted_tokens",
-                data=accept_lens,
-                dtype=torch.int32,
-            )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
@@ -472,6 +462,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     new_next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
+                )
+                scatter_mtp_accept_len(
+                    self.model.req_manager.req_to_accept_len, b_req_mtp_start_loc, b_req_idx, mtp_accept_len
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -507,11 +500,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
-            # 写回每个 req 的本步 accept 数量，供下一步 verify 经 b_num_accepted_tokens 传入
-            # GDN/linear-att verify kernel（据此提交 conv/ssm 递归状态的正确偏移）。chunked 路径
-            # 在 chunked_prefill/impl.py 同样写回；dp 缺失会让状态停留在 accept=1 -> 状态错乱、精度崩塌。
-            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
-                req.mtp_accept_len = int(accept_len)
             verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
@@ -552,11 +540,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num: int,
     ):
         all_next_token_ids = []
-        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
-        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
-        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
-        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
-        draft_model_input = copy.copy(model_input)
+        # share some inference info with the main model
+        draft_model_input = model_input
         draft_model_output = model_output
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
         if req_num > 0:
@@ -566,6 +551,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
+
             draft_model_input.input_ids = draft_next_token_ids_gpu
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -595,11 +581,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num: int,
     ):
         all_next_token_ids = []
-        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
-        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
-        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
-        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
-        draft_model_input = copy.copy(model_input)
+        # share some inference info with the main model
+        draft_model_input = model_input
         draft_model_output = model_output
         all_next_token_ids.append(next_token_ids)
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
@@ -615,6 +598,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for _step in range(self.mtp_step):
+
             draft_model_input.input_ids = draft_next_token_ids_gpu
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -699,6 +683,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_output0, draft_model_output1 = model_output0, model_output1
 
             for draft_model_idx in range(self.num_mtp_models):
+
                 draft_model_input0 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input0,
                     b_next_token_ids=draft_next_token_ids_gpu0,
@@ -750,35 +735,15 @@ class DPChunkedPrefillBackend(ModeBackend):
         (
             model_input0,
             run_reqs0,
-            padded_req_num0,
+            _,
             model_input1,
             run_reqs1,
-            padded_req_num1,
+            _,
         ) = padded_overlap_prepare_decode_inputs(decode_reqs)
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
         all_next_token_ids = []
         b_mtp_index_cpu0 = model_input0.b_mtp_index
         b_mtp_index_cpu1 = model_input1.b_mtp_index
-
-        if self.mtp_step > 0:
-            # 标记两个 micro-batch 的 verify decode 布局，每个 req 一个 accept 数量
-            # （padding 出来的 fake req 记为 1）。run_reqs* 内每个真实 req 占 mtp_step+1 行，
-            # 取每组首行即可得到逐 req 的列表。不设置会让主模型 verify forward 走非 verify 布局，
-            # 命中 hybrid 主模型从未捕获的 cudagraph key (bs, False) -> KeyError。
-            mtp_size = self.mtp_step + 1
-            accept_lens0 = [r.mtp_accept_len for r in run_reqs0[::mtp_size]] + [1] * padded_req_num0
-            accept_lens1 = [r.mtp_accept_len for r in run_reqs1[::mtp_size]] + [1] * padded_req_num1
-            model_input0.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
-                key="b_num_accepted_tokens_0",
-                data=accept_lens0,
-                dtype=torch.int32,
-            )
-            model_input1.b_num_accepted_tokens = g_pin_mem_manager.gen_from_list(
-                key="b_num_accepted_tokens_1",
-                data=accept_lens1,
-                dtype=torch.int32,
-            )
-
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             logits0 = model_output0.logits
@@ -809,6 +774,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     new_next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
+                )
+                scatter_mtp_accept_len(
+                    self.model.req_manager.req_to_accept_len, b_req_mtp_start_loc, b_req_idx, mtp_accept_len
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -848,11 +816,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num0 + req_num1 > 0:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
-            # 写回每个 req 的本步 accept 数量，供下一步 verify 经 b_num_accepted_tokens 传入
-            # GDN/linear-att verify kernel（据此提交 conv/ssm 递归状态的正确偏移）。chunked 路径
-            # 在 chunked_prefill/impl.py 同样写回；dp 缺失会让状态停留在 accept=1 -> 状态错乱、精度崩塌。
-            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
-                req.mtp_accept_len = int(accept_len)
             verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
@@ -913,12 +876,8 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
-        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
-        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
-        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
-        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
-        draft_model_input0 = copy.copy(model_input0)
-        draft_model_input1 = copy.copy(model_input1)
+        # share some inference info with the main model
+        draft_model_input0, draft_model_input1 = model_input0, model_input1
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
@@ -932,6 +891,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
+
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
             draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1
@@ -974,12 +934,8 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
-        # 复用主模型的推理信息。copy.copy 隔离 draft 每步对 input_ids / b_seq_len / mem_indexes 的修改，
-        # 避免污染之后仍要用到的 model_input（need_free_mem_indexes）。保留 b_num_accepted_tokens，
-        # 使 draft 与主模型一样走 (mtp_step+1) 分组的 verify decode 布局（与 upstream 一致；纯全注意力
-        # draft 在分组布局下与展开成扁平 batch 的逐位置 attention 数值等价）。
-        draft_model_input0 = copy.copy(model_input0)
-        draft_model_input1 = copy.copy(model_input1)
+        # share some inference info with the main model
+        draft_model_input0, draft_model_input1 = model_input0, model_input1
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
@@ -1004,6 +960,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for _step in range(self.mtp_step):
+
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
             draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1

@@ -10,5 +10,5 @@ class Qwen3NextInferStateInfo(LlamaInferStateInfo):
         super().init_some_extra_state(model)
         from lightllm.common.basemodel.mtp_verify_extra_state import init_mtp_verify_extra_state
 
-        init_mtp_verify_extra_state(self)
+        init_mtp_verify_extra_state(self, model)
         return

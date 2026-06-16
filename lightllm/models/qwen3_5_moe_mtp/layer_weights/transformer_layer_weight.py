@@ -52,7 +52,7 @@ class Qwen3_5MoeMTPTransformerLayerWeight(Qwen35MOETransformerLayerWeight):
         self.qkv_proj = QKVROWNMMWeight(
             in_dim=in_dim,
             q_head_num=self.q_head_num_,
-            kv_head_num=self.kv_head_num_,
+            kv_head_num=self.k_head_num_,
             head_dim=self.head_dim,
             weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,

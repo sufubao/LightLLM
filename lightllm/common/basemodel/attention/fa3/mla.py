@@ -8,7 +8,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
-from lightllm.common.basemodel.batch_objs import is_mtp_verify_decode as is_mtp_verify_decode_fn
 
 
 class MlaFa3AttBackend(BaseAttBackend):
@@ -109,9 +108,8 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def init_state(self):
         self.backend: MlaFa3AttBackend = self.backend
         args_mtp_step = get_env_start_args().mtp_step
-        is_mtp_verify_decode = is_mtp_verify_decode_fn(args_mtp_step, self.infer_state.b_num_accepted_tokens)
 
-        if is_mtp_verify_decode:
+        if args_mtp_step > 0:
             # 修正 mtp 在 fa3 下的输入。
             mtp_size = args_mtp_step + 1
             b_q_seq_len = torch.full(
@@ -128,9 +126,8 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
             self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
 
-        mtp_size = args_mtp_step + 1 if is_mtp_verify_decode else 1
-        att_batch_size = self.infer_state.batch_size // mtp_size
-        assert self.infer_state.batch_size % mtp_size == 0
+        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
+        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
 
         model = self.backend.model
         # 可以使用 cuda graph的时候从 buffer中申请
@@ -149,7 +146,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
                 device=self.infer_state.input_ids.device,
             )
 
-        if is_mtp_verify_decode:
+        if args_mtp_step > 0:
             page_table_copy(
                 page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
                 req_to_token_indexs=model.req_manager.req_to_token_indexs,

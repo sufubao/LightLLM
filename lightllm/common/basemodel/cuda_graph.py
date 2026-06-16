@@ -9,7 +9,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.batch_objs import is_mtp_verify_decode as is_mtp_verify_decode_fn
 from .infer_struct import InferStateInfo
 
 
@@ -30,9 +29,8 @@ class CudaGraph:
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
 
         # With MTP enabled, both the main-model verify forward and the draft (MTP) forward run over
-        # the (mtp_step+1)-expanded decode layout, so all decode batch sizes are multiples of
-        # (mtp_step+1); a single graph batch-size set serves both. Verify vs normal graphs are told
-        # apart by the is_mtp_verify_decode component of the graph key, not by a separate set.
+        # the (mtp_step+1)-expanded decode layout, so every decode batch size is a multiple of
+        # (mtp_step+1) and there is a single decode layout — the graph is keyed by batch size alone.
         batch_size_multiple = self.mtp_step + 1 if self.mtp_step > 0 else 1
         self.cuda_graph_batch_sizes = self._build_cuda_graph_batch_sizes(batch_size_multiple=batch_size_multiple)
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
@@ -65,13 +63,12 @@ class CudaGraph:
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
 
     def _decode_graph_key(self, infer_state: InferStateInfo):
-        is_mtp_verify_decode = is_mtp_verify_decode_fn(self.mtp_step, infer_state.b_num_accepted_tokens)
-        return (infer_state.input_ids.shape[0], is_mtp_verify_decode)
+        return infer_state.input_ids.shape[0]
 
-    def need_capture(self, batch_size, is_mtp_verify_decode=False):
+    def need_capture(self, batch_size):
         find_batch_size = self.find_closest_graph_batch_size(batch_size)
         if find_batch_size is not None:
-            return (find_batch_size, is_mtp_verify_decode) not in self.graph
+            return find_batch_size not in self.graph
         else:
             assert False, "dead code"
 
@@ -88,11 +85,7 @@ class CudaGraph:
         model,
         batch_size: int,
         device: str = "cuda",
-        is_mtp_verify_decode: Optional[bool] = None,
     ) -> ModelInput:
-        if is_mtp_verify_decode is None:
-            is_mtp_verify_decode = self.mtp_step > 0
-
         mtp_size = self.mtp_step + 1
         input_ids = torch.ones(batch_size, dtype=torch.int32, device=device)
         mem_indexes = model.mem_manager.alloc(batch_size).to(device)
@@ -104,7 +97,7 @@ class CudaGraph:
         )
 
         b_num_accepted_tokens = None
-        if self.mtp_step > 0 and is_mtp_verify_decode:
+        if self.mtp_step > 0:
             assert batch_size % mtp_size == 0, "MTP decode CUDA graph batch size must be a multiple of mtp_step + 1"
             real_batch_size = batch_size // mtp_size
             b_mtp_index = torch.arange(mtp_size, dtype=torch.int32, device=device).repeat(real_batch_size)
@@ -133,16 +126,6 @@ class CudaGraph:
             multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
             **model._gen_special_model_input(batch_size),
         )
-
-    def _iter_warmup_graph_layouts(self, model):
-        # Under MTP both the main verify forward and the (pure full-attention) draft forward run the
-        # (mtp_step+1)-grouped verify decode layout, so both warm up the verify graph key; only
-        # mtp_step == 0 models use the normal layout. (Matches upstream: the draft reuses the main
-        # model_input and keeps b_num_accepted_tokens, so its decode is a verify forward too.)
-        if self.mtp_step > 0:
-            yield True, self.cuda_graph_batch_sizes
-        else:
-            yield False, self.cuda_graph_batch_sizes
 
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
         graph_obj = torch.cuda.CUDAGraph()
@@ -274,23 +257,18 @@ class CudaGraph:
         model: TpPartBaseModel = model
 
         # decode cuda graph init
-        for is_mtp_verify_decode, batch_sizes in self._iter_warmup_graph_layouts(model):
-            for batch_size in batch_sizes[::-1]:
-                model_input = self._build_warmup_decode_model_input(
-                    model,
-                    batch_size,
-                    is_mtp_verify_decode=is_mtp_verify_decode,
-                )
-                model_output: ModelOutput = model.forward(model_input)
-                del model_output
+        for batch_size in self.cuda_graph_batch_sizes[::-1]:
+            model_input = self._build_warmup_decode_model_input(model, batch_size)
+            model_output: ModelOutput = model.forward(model_input)
+            del model_output
 
-                model.mem_manager.free_all()
-                model.req_manager.free_all()
-                # release local tensors
-                for var_name, var_value in list(locals().items()):
-                    if isinstance(var_value, torch.Tensor):
-                        del locals()[var_name]
-                torch.cuda.empty_cache()
+            model.mem_manager.free_all()
+            model.req_manager.free_all()
+            # release local tensors
+            for var_name, var_value in list(locals().items()):
+                if isinstance(var_value, torch.Tensor):
+                    del locals()[var_name]
+            torch.cuda.empty_cache()
 
         logger.info(
             f"Capture cudagraph success, batch_size <={self.max_batch_size} "
@@ -305,36 +283,31 @@ class CudaGraph:
 
         model: TpPartBaseModel = model
 
-        for is_mtp_verify_decode, batch_sizes in self._iter_warmup_graph_layouts(model):
-            for batch_size in batch_sizes[::-1]:
-                decode_batches = []
-                for micro_batch_index in [0, 1]:
-                    # dummy decoding, capture the cudagraph
-                    micro_batch = self._build_warmup_decode_model_input(
-                        model,
-                        batch_size,
-                        is_mtp_verify_decode=is_mtp_verify_decode,
-                    )
-                    decode_batches.append(micro_batch)
-                    del micro_batch
+        for batch_size in self.cuda_graph_batch_sizes[::-1]:
+            decode_batches = []
+            for micro_batch_index in [0, 1]:
+                # dummy decoding, capture the cudagraph
+                micro_batch = self._build_warmup_decode_model_input(model, batch_size)
+                decode_batches.append(micro_batch)
+                del micro_batch
 
-                    for var_name, var_value in list(locals().items()):
-                        if isinstance(var_value, torch.Tensor):
-                            del locals()[var_name]
-                    torch.cuda.empty_cache()
-
-                _, _ = model.microbatch_overlap_decode(decode_batches[0], decode_batches[1])
-
-                model.mem_manager.free_all()
-                model.req_manager.free_all()
-
-                del decode_batches
-
-                # release local tensors
                 for var_name, var_value in list(locals().items()):
                     if isinstance(var_value, torch.Tensor):
                         del locals()[var_name]
                 torch.cuda.empty_cache()
+
+            _, _ = model.microbatch_overlap_decode(decode_batches[0], decode_batches[1])
+
+            model.mem_manager.free_all()
+            model.req_manager.free_all()
+
+            del decode_batches
+
+            # release local tensors
+            for var_name, var_value in list(locals().items()):
+                if isinstance(var_value, torch.Tensor):
+                    del locals()[var_name]
+            torch.cuda.empty_cache()
 
         logger.info(
             f"Capture overlap cudagraph success, batch_size <={self.max_batch_size} "

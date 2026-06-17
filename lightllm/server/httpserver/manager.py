@@ -22,6 +22,7 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
+from .prompt_utils import validate_prompt_text_length
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -252,6 +253,7 @@ class HttpServerManager:
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
+        validate_prompt_text_length(prompt, self.max_req_total_len)
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
         img_count = 0
@@ -318,16 +320,7 @@ class HttpServerManager:
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
         group_request_id = None
-        if isinstance(prompt, str):
-            # Guard against extremely long string prompts that might stall the tokenizer
-            # or cause excessive memory usage before tokenization.
-            # 8 characters per token is a conservative heuristic (avg is ~4).
-            max_prompt_chars = self.max_req_total_len * 8
-            if len(prompt) > max_prompt_chars:
-                raise ValueError(
-                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
-                    f"the request is rejected before tokenization."
-                )
+        validate_prompt_text_length(prompt, self.max_req_total_len)
 
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
@@ -534,15 +527,7 @@ class HttpServerManager:
         self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
-            # pre-verify prompt length
-            # The average character length per token is always less than 8
-            # TODO: automatically calculate the average character length per token
-            max_prompt_chars = self.max_req_total_len * 8
-            if len(prompt) > max_prompt_chars:
-                raise ValueError(
-                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
-                    f"the request is rejected before tokenization."
-                )
+            validate_prompt_text_length(prompt, self.max_req_total_len)
             if self.enable_multimodal:
                 assert (
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity

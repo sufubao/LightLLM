@@ -23,6 +23,12 @@ logger = init_logger(__name__)
 REQ_NEXT_TOKEN_IDS_WIDTH = 8
 
 
+def _format_nbytes(nbytes: int) -> str:
+    mib = nbytes / (1024**2)
+    gib = nbytes / (1024**3)
+    return f"{mib:.2f} MiB ({gib:.2f} GiB)"
+
+
 def assert_mtp_step_within_next_token_ids_width(mtp_step: int) -> None:
     assert mtp_step <= REQ_NEXT_TOKEN_IDS_WIDTH - 1, (
         f"mtp_step={mtp_step} exceeds {REQ_NEXT_TOKEN_IDS_WIDTH - 1}; "
@@ -269,6 +275,19 @@ class ReqManagerForMamba(ReqManager):
             shape=self.linear_config.get_ssm_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
+        )
+        conv_buffer = self.req_to_conv_state.buffer
+        ssm_buffer = self.req_to_ssm_state.buffer
+        conv_nbytes = conv_buffer.numel() * conv_buffer.element_size()
+        ssm_nbytes = ssm_buffer.numel() * ssm_buffer.element_size()
+        logger.info(
+            "linear att gpu state buffers: "
+            f"max_request_num={max_request_num}, hold_request_id={self.HOLD_REQUEST_ID}, mtp_step={self.mtp_step}, "
+            f"conv_state shape={tuple(conv_buffer.shape)}, dtype={conv_buffer.dtype}, "
+            f"nbytes={conv_nbytes}, memory={_format_nbytes(conv_nbytes)}; "
+            f"ssm_state shape={tuple(ssm_buffer.shape)}, dtype={ssm_buffer.dtype}, "
+            f"nbytes={ssm_nbytes}, memory={_format_nbytes(ssm_nbytes)}; "
+            f"total memory={_format_nbytes(conv_nbytes + ssm_nbytes)}"
         )
         return
 

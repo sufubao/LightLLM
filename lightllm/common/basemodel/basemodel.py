@@ -354,6 +354,7 @@ class TpPartBaseModel:
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
+        infer_state.b_seq_len_cpu = model_input.b_seq_len_cpu
         infer_state.b_mtp_index = model_input.b_mtp_index
         infer_state.b_num_accepted_tokens = model_input.b_num_accepted_tokens
         if model_input.is_prefill:
@@ -489,6 +490,16 @@ class TpPartBaseModel:
             new_model_input.b_seq_len = torch.cat(
                 (new_model_input.b_seq_len, pad_seq_len), dim=0
             )
+            if new_model_input.b_seq_len_cpu is not None:
+                pad_seq_len_cpu = torch.arange(
+                    2,
+                    mtp_size + 2,
+                    dtype=new_model_input.b_seq_len_cpu.dtype,
+                    device=new_model_input.b_seq_len_cpu.device,
+                ).repeat(padded_req_num)
+                new_model_input.b_seq_len_cpu = torch.cat(
+                    (new_model_input.b_seq_len_cpu, pad_seq_len_cpu), dim=0
+                )
             new_model_input.mem_indexes = torch.cat(
                 (
                     new_model_input.mem_indexes,
@@ -539,6 +550,13 @@ class TpPartBaseModel:
                 mode="constant",
                 value=2,
             )
+            if new_model_input.b_seq_len_cpu is not None:
+                new_model_input.b_seq_len_cpu = F.pad(
+                    new_model_input.b_seq_len_cpu,
+                    (0, padded_batch_size),
+                    mode="constant",
+                    value=2,
+                )
             new_model_input.mem_indexes = F.pad(
                 new_model_input.mem_indexes,
                 (0, padded_batch_size),
@@ -787,6 +805,10 @@ class TpPartBaseModel:
                 model_input=model_input, new_batch_size=infer_batch_size
             )
             infer_state = self._create_inferstate(model_input)
+            need_capture = self.graph.need_capture(
+                infer_batch_size, is_mtp_verify_decode=is_mtp_verify_decode
+            )
+            infer_state.skip_decode_att_wrapper_init = not need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
                 infer_state.b_req_idx,
@@ -796,9 +818,7 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
-            if self.graph.need_capture(
-                infer_batch_size, is_mtp_verify_decode=is_mtp_verify_decode
-            ):
+            if need_capture:
                 infer_state.is_cuda_graph = True
                 model_output: ModelOutput = self.graph.capture_decode(
                     self._token_forward, infer_state
@@ -1413,6 +1433,9 @@ class TpPartBaseModel:
         # 控制autotune的层数，用于适配不同模型
         return self.config.get("first_k_dense_replace", 0) + 1
 
+    def _autotune_extra_warmup(self):
+        return
+
     @final
     @torch.no_grad()
     @post_empty_cache
@@ -1491,6 +1514,11 @@ class TpPartBaseModel:
                 self.mem_manager.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
+        try:
+            self._autotune_extra_warmup()
+        except Exception as e:
+            logger.warning(f"extra autotune warmup failed: {str(e)}")
+            logger.exception(str(e))
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
         Autotuner.end_autotune_warmup()

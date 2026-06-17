@@ -69,7 +69,7 @@ def test_model_inference_mtp(args):
             "graph_max_len_in_batch": args.max_req_total_len,
             "graph_max_batch_size": args.graph_max_batch_size,
             "mem_faction": args.mem_fraction,
-            "max_req_num": 2000,
+            "max_req_num": args.static_max_req_num,
             "batch_max_tokens": 2048,
             "run_mode": "normal",
             "max_seq_length": args.max_req_total_len,

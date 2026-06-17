@@ -87,11 +87,10 @@ class ReqManager:
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
 
-        self.req_to_accept_len = (
-            torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
-            if get_env_start_args().mtp_step > 0
-            else None
-        )
+        # Always resident: infer_batch.copy_linear_att_state_to_cache_buffer reads this
+        # unconditionally in the linear-att cache-copy path (even for mtp_step=0, where
+        # accept_len=1 is the correct non-widened value). MTP overwrites the live slots.
+        self.req_to_accept_len = torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
 
     def alloc(self):
         return self.req_list.alloc()

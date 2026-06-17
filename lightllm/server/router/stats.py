@@ -18,16 +18,13 @@ class SystemStatusReporter:
         self.dp_size_in_node = dp_size_in_node
         self.status_logger = init_system_status_logger("router")
 
-        # Accumulation counters (reset each interval)
         self.last_print_time = time.time()
         self.prompt_tokens = 0
         self.output_tokens = 0
 
-        # Windowed counters for cache hit (reset each interval)
         self.window_input_total = 0
         self.window_cache_total = 0
 
-        # Global counters (never reset, for lifetime stats)
         self.global_input_total = 0
         self.global_cache_total = 0
         self.global_mtp_output_total = 0
@@ -132,7 +129,6 @@ class SystemStatusReporter:
         running = len(running_batch.reqs) if running_batch else 0
         queued = req_queue.get_wait_req_num()
 
-        # Memory utilization (average across dp)
         # kv_used: physical KV memory usage (includes prefix cache tree occupancy)
         # kv_used_no_cache: effective usage excluding unrefed prefix cache tokens
         kv_used_list = []
@@ -149,11 +145,9 @@ class SystemStatusReporter:
         avg_kv_used = sum(kv_used_list) / len(kv_used_list)
         avg_kv_used_no_cache = sum(kv_used_no_cache_list) / len(kv_used_no_cache_list)
 
-        # Windowed prefix cache hit rate (this interval only)
         window_cache_hit_rate = (
             (self.window_cache_total / self.window_input_total * 100) if self.window_input_total > 0 else 0.0
         )
-        # Global prefix cache hit rate (lifetime)
         global_cache_hit_rate = (
             (self.global_cache_total / self.global_input_total * 100) if self.global_input_total > 0 else 0.0
         )
@@ -169,7 +163,6 @@ class SystemStatusReporter:
             f"gpu_cache_hit(window={window_cache_hit_rate:.1f}%,global={global_cache_hit_rate:.1f}%)",
         ]
 
-        # Avg MTP accepted length (only shown when MTP is active)
         if self.global_mtp_accepted_total > 0:
             decode_steps = self.global_mtp_output_total - self.global_mtp_accepted_total
             avg_mtp_len = self.global_mtp_output_total / max(decode_steps, 1)
@@ -193,7 +186,6 @@ class SystemStatusReporter:
             ]
             logger.debug(" | ".join(debug_parts))
 
-        # Reset windowed counters
         self.prompt_tokens = 0
         self.output_tokens = 0
         self.window_input_total = 0

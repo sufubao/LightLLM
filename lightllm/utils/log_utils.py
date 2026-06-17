@@ -15,7 +15,6 @@ _LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "info")
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL.upper(), 0)
 _LOG_DIR = os.environ.get("LIGHTLLM_LOG_DIR", None)
 
-# ANSI color codes
 _RESET = "\033[0m"
 _LEVEL_COLORS = {
     logging.DEBUG: "\033[36m",  # cyan

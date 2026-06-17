@@ -233,8 +233,6 @@ class RouterManager:
             await self._step()
             counter_count += 1
             if self.running_batch is not None:
-                # Output-token counting is done in bulk at the print-window boundary
-                # inside SystemStatusReporter.maybe_print, so the router tick stays cheap.
                 if counter_count % 100 == 0:
                     self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
@@ -341,12 +339,9 @@ class RouterManager:
 
     def _filter_reqs_from_running_batch(self):
         if self.running_batch is not None:
-            # Capture finished req stats before filtering
             for req in self.running_batch.reqs:
                 if not req.shm_infer_released:
                     continue
-                # Settle any output-token tail produced after the last window boundary,
-                # so windowed TPS does not lose the req's last tokens.
                 self.status_reporter.discard_req(req)
                 self.status_reporter.on_request_completed(
                     input_len=req.input_len,

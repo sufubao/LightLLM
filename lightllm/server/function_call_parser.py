@@ -1758,6 +1758,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self.parameter_regex = re.compile(
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
         )
+        self.parameter_stream_regex = re.compile(
+            r"<parameter=([^>]*)>(.*?)(</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
+        )
+        self.function_start_regex = re.compile(r"<function=([^>]*)>", re.DOTALL)
         self._normal_text_buffer = ""
 
     def has_tool_call(self, text: str) -> bool:
@@ -1890,6 +1894,111 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         return json.dumps(param_dict, ensure_ascii=False)
 
+    def _get_qwen3_param_type(self, param_name: str, param_config: Dict) -> str:
+        prop = param_config.get(param_name, {})
+        return str(prop.get("type", "string")).strip().lower() if isinstance(prop, dict) else "string"
+
+    def _json_string_prefix(self, value: str, closed: bool) -> str:
+        dumped = json.dumps(value, ensure_ascii=False)
+        return dumped if closed else dumped[:-1]
+
+    def _strip_partial_xml_suffix(self, value: str) -> str:
+        for token in ("</parameter>", "</function>", self.eot_token):
+            max_len = min(len(value), len(token) - 1)
+            for suffix_len in range(max_len, 0, -1):
+                if token.startswith(value[-suffix_len:]):
+                    return value[:-suffix_len]
+        return value
+
+    def _build_streaming_arguments_json(
+        self,
+        func_name: str,
+        partial_body: str,
+        tools: List[Tool],
+        close_object: bool = False,
+    ) -> Optional[str]:
+        """Build a monotonic JSON arguments prefix for XML tool-call streaming."""
+        param_config = self._get_param_config(func_name, tools)
+        parts = ["{"]
+        has_param = False
+
+        for match in self.parameter_stream_regex.finditer(partial_body):
+            param_name = match.group(1).strip()
+            if not param_name:
+                continue
+
+            param_value = match.group(2)
+            closed = match.group(3) == "</parameter>"
+            if not closed:
+                param_value = self._strip_partial_xml_suffix(param_value)
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                if closed:
+                    param_value = param_value[:-1]
+                else:
+                    # Keep the template delimiter newline buffered until we know
+                    # whether it is part of the value or just precedes </parameter>.
+                    param_value = param_value[:-1]
+
+            if has_param:
+                parts.append(", ")
+            parts.append(json.dumps(param_name, ensure_ascii=False))
+            parts.append(": ")
+
+            param_type = self._get_qwen3_param_type(param_name, param_config)
+            if param_type in ("string", "str", "enum") or param_name not in param_config:
+                parts.append(self._json_string_prefix(param_value, closed))
+            elif closed:
+                converted = self._convert_param_value(param_value, param_name, param_config, func_name)
+                converted_json = json.dumps(converted, ensure_ascii=False)
+                if converted_json.startswith(param_value):
+                    parts.append(converted_json)
+                else:
+                    parts.append(param_value)
+            else:
+                parts.append(param_value)
+
+            has_param = True
+            if not closed:
+                break
+
+        if not has_param and close_object:
+            return "{}"
+        if not has_param:
+            return None
+
+        if close_object:
+            parts.append("}")
+
+        return "".join(parts)
+
+    def _ensure_qwen3_stream_state(self, tool_index: int) -> None:
+        while len(self.prev_tool_call_arr) <= tool_index:
+            self.prev_tool_call_arr.append({})
+        while len(self.streamed_args_for_tool) <= tool_index:
+            self.streamed_args_for_tool.append("")
+
+    def _append_qwen3_arguments_delta(self, calls: List[ToolCallItem], tool_index: int, current_args_json: str) -> None:
+        sent_args = self.streamed_args_for_tool[tool_index]
+        if not current_args_json.startswith(sent_args):
+            logger.warning(
+                "Qwen3-Coder streaming arguments are not monotonic for tool index %s; skip delta.",
+                tool_index,
+            )
+            return
+
+        argument_diff = current_args_json[len(sent_args) :]
+        if argument_diff:
+            calls.append(
+                ToolCallItem(
+                    tool_index=tool_index,
+                    name=None,
+                    parameters=argument_diff,
+                )
+            )
+            self.streamed_args_for_tool[tool_index] += argument_diff
+
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         idx = text.find(self.bot_token)
         normal_text = text[:idx].strip() if idx != -1 else text
@@ -1941,23 +2050,78 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 self._buffer = current_text[tool_call_start:]
                 current_text = self._buffer
 
+            if self.current_tool_id == -1:
+                self.current_tool_id = 0
+
+            self._ensure_qwen3_stream_state(self.current_tool_id)
+
+            function_match = self.function_start_regex.search(current_text)
+            if not function_match:
+                return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+            func_name = function_match.group(1).strip()
             eot_pos = current_text.find(self.eot_token)
+            if func_name not in self._tool_indices:
+                if eot_pos == -1:
+                    return StreamingParseResult(normal_text=normal_text, calls=calls)
+                logger.warning(f"Model attempted to call undefined function: {func_name}")
+                self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
+                self.current_tool_name_sent = False
+                continue
+
+            if not self.current_tool_name_sent:
+                calls.append(
+                    ToolCallItem(
+                        tool_index=self.current_tool_id,
+                        name=func_name,
+                        parameters="",
+                    )
+                )
+                self.current_tool_name_sent = True
+                self.prev_tool_call_arr[self.current_tool_id] = {
+                    "name": func_name,
+                    "arguments": {},
+                }
+
+            function_close_pos = current_text.find("</function>", function_match.end())
+            close_object = function_close_pos != -1 and (eot_pos == -1 or function_close_pos < eot_pos)
+            partial_end = function_close_pos if close_object else eot_pos
+            if partial_end == -1:
+                partial_end = len(current_text)
+            partial_body = current_text[function_match.end() : partial_end]
+            current_args_json = self._build_streaming_arguments_json(
+                func_name,
+                partial_body,
+                tools,
+                close_object=close_object,
+            )
+            if current_args_json:
+                self._append_qwen3_arguments_delta(calls, self.current_tool_id, current_args_json)
+
             if eot_pos == -1:
                 return StreamingParseResult(normal_text=normal_text, calls=calls)
 
             complete_block = current_text[: eot_pos + len(self.eot_token)]
             func_matches = self.function_regex.findall(complete_block)
 
-            if self.current_tool_id == -1:
-                self.current_tool_id = 0
-
             for match in func_matches:
                 func_str = match[0] if match[0] else match[1]
                 item = self._parse_function_call(func_str, tools)
                 if item:
-                    item.tool_index = self.current_tool_id
-                    calls.append(item)
+                    completed_tool_id = self.current_tool_id
+                    try:
+                        parsed_args = json.loads(item.parameters)
+                    except json.JSONDecodeError:
+                        parsed_args = {}
+                    self.prev_tool_call_arr[completed_tool_id] = {
+                        "name": item.name,
+                        "arguments": parsed_args,
+                    }
+                    sent_args = self.streamed_args_for_tool[completed_tool_id]
+                    if item.parameters.startswith(sent_args):
+                        self._append_qwen3_arguments_delta(calls, completed_tool_id, item.parameters)
                     self.current_tool_id += 1
+                    self.current_tool_name_sent = False
 
             self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 

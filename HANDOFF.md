@@ -68,6 +68,7 @@ Verification matrix already run on H200 / Qwen3-VL-8B + InternVL2_5-26B
 | Fail-fast | `--max_req_total_len 3000000` (forces floor > pool) | **startup aborts** with assert naming the ViT GB + knobs (`--visual_infer_batch_size / --max_image_pixels / --max_image_token_count`, `--mem_fraction`, `--visual_gpu_ids`) |
 | Separate-GPU | `--visual_gpu_ids 1` (ViT off the LLM's GPU) | LLM device reads **0**, no `[mem]` line, full pool |
 | Text-only regression | any non-multimodal model | no reservation, no `[mem]` line, pool unchanged |
+| **OOM regression** | Qwen3-VL-8B, `--visual_infer_batch_size 16 --mem_fraction 0.9`, 20-image concurrent burst | feature **OFF** → ViT `torch.OutOfMemoryError` in patch_embed, 1/20 requests ok; feature **ON** → 24.66 GB pre-held, 20/20 ok, 0 OOM |
 | Unit tests | `pytest unit_tests/server/visualserver/test_mem_reserve.py` | 4 passed |
 
 **Test-env note:** the stock docker images don't contain this branch — **mount the worktree**
@@ -81,11 +82,13 @@ Reference: a co-located Qwen3-VL-8B run measured three internally-consistent poo
 
 ## 5. Known limitations to probe
 
-1. **Not exhaustively tested:** a sustained **max-size-image load test** to confirm zero
-   runtime OOM. The mechanism (held reservation excluded from LLM profiling) is verified;
-   the Qwen worst-case dummy is built from the same caps that bound real requests, so by
-   construction runtime ≤ reserved — but a real image stress test under concurrency is the
-   highest-value thing for the test team to add.
+1. **OOM regression — run and passed.** A co-located Qwen3-VL-8B at
+   `--visual_infer_batch_size 16 --mem_fraction 0.9` was hit with a 20-image concurrent burst:
+   feature OFF reproduced the production `torch.OutOfMemoryError` in the ViT `patch_embed`
+   (the LLM had grabbed 127 GB, leaving ~1 GB; 1/20 requests succeeded), and feature ON
+   pre-held the 24.66 GB worst-case so the same burst returned 20/20 with zero OOM. Remaining
+   value for the test team: broaden to more models / aspect ratios and a longer soak; the
+   single decisive contrast is done.
 2. **InternVL worst case rests on `MAX_PATH_NUM` (=13 default).** If a deployment's actual
    `image_patch_max_num` exceeds it, the reservation can undershoot → OOM returns;
    `--visual_reserved_mem_gb` is the backstop. Worth a targeted test with high-tile

@@ -6,7 +6,7 @@ from lightllm.server.visualserver.model_infer.mem_reserve import (
 )
 
 
-def test_qwen_worst_case_grid_is_bounded_and_square():
+def test_qwen_worst_case_grid_covers_token_cap_and_is_square():
     (total_patches, row_width), grid_thw = compute_qwen_worst_case_grid(
         batch_size=2,
         max_image_pixels=8294400,
@@ -22,11 +22,16 @@ def test_qwen_worst_case_grid_is_bounded_and_square():
         assert t == 1
         assert h % 2 == 0 and w % 2 == 0
     side = grid_thw[0][1]
-    assert side == 180  # isqrt(32768)=181 -> floor to even -> 180
+    # token cap (8192 merged tokens) binds -> 32768 patches; side rounds UP so the probe
+    # never under-reserves vs the largest valid request (isqrt(32768)=181 -> 182).
+    assert side == 182
+    assert side * side >= 8192 * 4  # >= per-image patch cap; no undershoot
     assert total_patches == side * side * 2
 
 
-def test_qwen_worst_case_respects_pixel_cap_when_tighter():
+def test_qwen_worst_case_never_undershoots_binding_cap():
+    # pixel cap (1024 patches) binds, below the token cap (32768); the grid must still
+    # cover the binding cap exactly (1024 is a perfect square) and not fall short.
     (_, _), grid_thw = compute_qwen_worst_case_grid(
         batch_size=1,
         max_image_pixels=200704,  # 448*448 -> 1024 patches at patch_size 14
@@ -37,7 +42,8 @@ def test_qwen_worst_case_respects_pixel_cap_when_tighter():
         spatial_merge_size=2,
     )
     side = grid_thw[0][1]
-    assert side * side <= 200704 // (14 * 14)
+    assert side == 32
+    assert side * side >= 200704 // (14 * 14)  # covers the binding pixel cap (1024)
 
 
 def test_shared_int_publish_and_read_sums_per_device():

@@ -53,7 +53,10 @@ def compute_qwen_worst_case_grid(
     Returns ((total_patches, row_width), grid_thw) where pixel_values has shape
     (total_patches, row_width) and grid_thw is one [t, h, w] triple per dummy image.
     Bounds each image by BOTH the per-image token cap and pixel cap (whichever is tighter),
-    using a near-square grid whose sides are multiples of spatial_merge_size.
+    using the smallest square grid (sides multiples of spatial_merge_size) whose patch count
+    is >= that cap. The side is rounded UP so the probe is an upper bound on the largest valid
+    request and never under-reserves (a square floor could undershoot, e.g. isqrt(32768)=181
+    -> 180x180 = 32400 patches < the 32768-patch cap).
 
     Assumes valid inputs (max_image_token_count > 0 and max_image_pixels >= (patch_size *
     spatial_merge_size)**2); smaller budgets are clamped up to a single spatial_merge_size tile.
@@ -64,7 +67,10 @@ def compute_qwen_worst_case_grid(
     max_patches = max(1, min(patches_by_tokens, patches_by_pixels))
 
     side = int(math.isqrt(max_patches))
-    side -= side % spatial_merge_size
+    if side * side < max_patches:
+        side += 1  # ceil(sqrt) so side*side >= max_patches (never undershoot)
+    if side % spatial_merge_size:
+        side += spatial_merge_size - (side % spatial_merge_size)  # round up to a merge-unit multiple
     side = max(side, spatial_merge_size)  # never smaller than one merge unit
 
     grid_h = grid_w = side

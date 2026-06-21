@@ -52,6 +52,12 @@ Launch co-located (ViT + LLM on one GPU, the default). Expect two log lines:
 [basemodel.py] [mem] device 0: co-located ViT worst-case reserved X.XX GB; KV pool max_total_token_num=N
 ```
 
+`X.XX GB` is the **activation headroom above the ViT weights** (measured as
+`max_memory_reserved − reserved_before_probe`), not the ViT's total footprint. E.g. Qwen3-VL-8B
+reports ~1.83 GB and InternVL2_5-26B ~1.80 GB (the InternViT-6B *weights* are excluded). The
+physical hold still covers the full peak — only the reported/attributed number is the tunable
+activation component.
+
 Verification matrix already run on H200 / Qwen3-VL-8B + InternVL2_5-26B
 (please re-run independently):
 

@@ -24,6 +24,7 @@ def read_vit_reserved_mem_for_device(args, device_id: int) -> int:
         return 0
     gpu_ids = getattr(args, "visual_gpu_ids", None) or []
     total = 0
+    # assumes global_rank == index into visual_gpu_ids (matching how visual ranks call publish_vit_reserved_mem)
     for global_rank, dev in enumerate(gpu_ids):
         if dev == device_id:
             total += int(SharedInt(get_vit_reserved_shm_name(dev, global_rank)).get_value())
@@ -53,6 +54,9 @@ def compute_qwen_worst_case_grid(
     (total_patches, row_width) and grid_thw is one [t, h, w] triple per dummy image.
     Bounds each image by BOTH the per-image token cap and pixel cap (whichever is tighter),
     using a near-square grid whose sides are multiples of spatial_merge_size.
+
+    Assumes valid inputs (max_image_token_count > 0 and max_image_pixels >= (patch_size *
+    spatial_merge_size)**2); smaller budgets are clamped up to a single spatial_merge_size tile.
     """
     spatial_merge_unit = spatial_merge_size * spatial_merge_size
     patches_by_tokens = max_image_token_count * spatial_merge_unit
@@ -61,7 +65,7 @@ def compute_qwen_worst_case_grid(
 
     side = int(math.isqrt(max_patches))
     side -= side % spatial_merge_size
-    side = max(side, spatial_merge_size)
+    side = max(side, spatial_merge_size)  # never smaller than one merge unit
 
     grid_h = grid_w = side
     row_width = in_channels * temporal_patch_size * patch_size * patch_size

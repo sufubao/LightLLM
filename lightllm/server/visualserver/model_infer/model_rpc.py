@@ -1,3 +1,4 @@
+import os
 import rpyc
 import torch
 import socket
@@ -28,7 +29,6 @@ from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
-import os
 from lightllm.server.visualserver.model_infer.mem_reserve import publish_vit_reserved_mem, reserve_guard_tensor
 from lightllm.server.visualserver.model_infer.worst_case_reserve import WorstCaseReserveMixin
 
@@ -174,10 +174,13 @@ class VisualModelRpcServer(rpyc.Service):
                 f"with --visual_gpu_ids."
             )
         publish_vit_reserved_mem(self.device_id, global_rank, reserved_bytes)
-        logger.info(
-            f"ViT rank {global_rank} on device {self.device_id} reserved "
-            f"{reserved_bytes / 1024 ** 3:.2f} GB worst-case activation memory."
-        )
+        # publishing reserved_bytes (including 0 on the skip paths) tells the router exactly how much
+        # this rank holds on its device; 0 means "nothing held here".
+        if reserved_bytes > 0:
+            logger.info(
+                f"ViT rank {global_rank} on device {self.device_id} reserved "
+                f"{reserved_bytes / 1024 ** 3:.2f} GB worst-case activation memory."
+            )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
         try:

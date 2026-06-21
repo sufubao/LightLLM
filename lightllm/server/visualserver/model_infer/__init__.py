@@ -61,3 +61,18 @@ def _generate_unix_socket_path() -> str:
     """Generate a random Unix socket path"""
     unique_id = uuid.uuid4().hex[:8]
     return f"/tmp/lightllm_model_infer_{unique_id}.sock"
+
+
+def __getattr__(name):
+    # Lazy re-export to preserve the package's public API without re-introducing the import cycle
+    # (model modules import this package's worst-case helpers; eagerly importing model_rpc here would
+    #  form qwen2_visual -> worst_case_reserve -> model_infer/__init__ -> model_rpc -> qwen2_visual).
+    if name == "VisualModelRpcClient":
+        from .model_rpc_client import VisualModelRpcClient
+
+        return VisualModelRpcClient
+    if name == "VisualModelRpcServer":
+        from .model_rpc import VisualModelRpcServer
+
+        return VisualModelRpcServer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

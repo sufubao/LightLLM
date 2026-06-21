@@ -36,6 +36,7 @@ from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+from lightllm.server.visualserver.model_infer.worst_case_reserve import QwenVLWorstCaseMixin
 
 # adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
@@ -73,7 +74,7 @@ class PatchEmbed(nn.Module):
 class PatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = LayerNorm(context_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
@@ -175,7 +176,7 @@ class Qwen2VLVisionBlock(nn.Module):
         return hidden_states
 
 
-class Qwen2VisionTransformerPretrainedModel(nn.Module):
+class Qwen2VisionTransformerPretrainedModel(QwenVLWorstCaseMixin, nn.Module):
     def __init__(
         self,
         kvargs,
@@ -239,7 +240,6 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         return
 
     def load_model(self, weight_dir):
-
         processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
         with open(processor_config_path, "r") as f:
             processor_config_dict = json.load(f)
@@ -322,7 +322,7 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
-            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)
+            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size**2)
 
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num

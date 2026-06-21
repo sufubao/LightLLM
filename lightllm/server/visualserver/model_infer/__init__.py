@@ -11,8 +11,6 @@ from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
-from .model_rpc_client import VisualModelRpcClient
-from .model_rpc import VisualModelRpcServer
 from ..objs import rpyc_config
 
 
@@ -22,6 +20,7 @@ def _init_env(socket_path: str, success_event):
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_model_infer")
 
     import lightllm.utils.rpyc_fix_utils as _
+    from .model_rpc import VisualModelRpcServer
 
     t = ThreadedServer(VisualModelRpcServer(), socket_path=socket_path, protocol_config=rpyc_config)
     success_event.set()
@@ -31,6 +30,7 @@ def _init_env(socket_path: str, success_event):
 
 async def start_model_process():
     import lightllm.utils.rpyc_fix_utils as _
+    from .model_rpc_client import VisualModelRpcClient
 
     socket_path = _generate_unix_socket_path()
     if os.path.exists(socket_path):

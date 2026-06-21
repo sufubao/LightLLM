@@ -30,6 +30,7 @@ from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from lightllm.models.qwen2_vl.qwen2_visual import VisionRotaryEmbedding, VisionFlashAttention
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.visualserver.model_infer.worst_case_reserve import QwenVLWorstCaseMixin
 
 logger = init_logger(__name__)
 
@@ -82,7 +83,7 @@ class Qwen3VLPatchEmbed(nn.Module):
 class Qwen3VLVisionPatchMerger(nn.Module):
     def __init__(self, hidden_size, out_hidden_size, spatial_merge_size, use_postshuffle_norm=False) -> None:
         super().__init__()
-        self.hidden_size = hidden_size * (spatial_merge_size ** 2)
+        self.hidden_size = hidden_size * (spatial_merge_size**2)
         self.use_postshuffle_norm = use_postshuffle_norm
         self.norm = nn.LayerNorm(self.hidden_size if use_postshuffle_norm else hidden_size, eps=1e-6)
         self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
@@ -116,7 +117,7 @@ class Qwen3VLVisionBlock(nn.Module):
         return hidden_states
 
 
-class Qwen3VisionTransformerPretrainedModel(nn.Module):
+class Qwen3VisionTransformerPretrainedModel(QwenVLWorstCaseMixin, nn.Module):
     def __init__(
         self,
         kvargs,
@@ -158,7 +159,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         )
 
         self.pos_embed = nn.Embedding(self.num_position_embeddings, self.hidden_size)
-        self.num_grid_per_side = int(self.num_position_embeddings ** 0.5)
+        self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2).cuda()
@@ -215,7 +216,6 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         return all_img_embeds_ds, valid_ids
 
     def load_model(self, weight_dir):
-
         processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
         with open(processor_config_path, "r") as f:
             processor_config_dict = json.load(f)
@@ -389,7 +389,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
-            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)
+            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size**2)
 
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num

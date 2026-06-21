@@ -495,6 +495,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--visual_gpu_ids", nargs="+", type=int, default=None, help="List of GPU IDs to use, e.g., 0 1 2"
     )
+    parser.add_argument(
+        "--visual_reserved_mem_gb",
+        type=float,
+        default=None,
+        help="""Override the automatic ViT worst-case activation reservation. When set, each visual rank
+        reserves exactly this many GB of GPU memory (held, not freed) and skips the dummy-image probe.
+        Use as a backstop for models without an automatic worst-case builder, or to override a bad estimate.""",
+    )
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
     parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")
     parser.add_argument(

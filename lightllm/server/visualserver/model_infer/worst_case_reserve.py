@@ -30,6 +30,12 @@ class WorstCaseReserveMixin:
         self, device_id: int, batch_size: int, max_image_pixels: int, max_image_token_count: int
     ) -> int:
         torch.cuda.set_device(device_id)
+        # Baseline = memory already reserved by the loaded ViT weights. We return the activation
+        # growth ABOVE this baseline so the published/logged value is the tunable activation
+        # headroom (what --visual_infer_batch_size / --max_image_* control), not weights+activation.
+        # The physical hold is unaffected: we still never empty_cache, so the full peak stays
+        # reserved and visible to the LLM's mem_get_info profiling.
+        baseline_reserved = torch.cuda.memory_reserved(device_id)
         torch.cuda.reset_peak_memory_stats(device_id)
         try:
             dummy = self.build_worst_case_input(batch_size, max_image_pixels, max_image_token_count)
@@ -39,7 +45,8 @@ class WorstCaseReserveMixin:
             logger.exception(str(e))
             raise Exception(_RESERVE_OOM_HINT)
         # NB: intentionally NO torch.cuda.empty_cache() here — holding the high-water mark IS the mechanism.
-        return int(torch.cuda.max_memory_reserved(device_id))
+        peak_reserved = torch.cuda.max_memory_reserved(device_id)
+        return int(max(0, peak_reserved - baseline_reserved))
 
 
 class QwenVLWorstCaseMixin(WorstCaseReserveMixin):

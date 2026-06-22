@@ -19,6 +19,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Width of req_to_next_token_ids: holds the seed token + up to (WIDTH - 1) MTP draft tokens.
+REQ_NEXT_TOKEN_IDS_WIDTH = 8
+
+
+def _format_nbytes(nbytes: int) -> str:
+    mib = nbytes / (1024**2)
+    gib = nbytes / (1024**3)
+    return f"{mib:.2f} MiB ({gib:.2f} GiB)"
+
+
+def assert_mtp_step_within_next_token_ids_width(mtp_step: int) -> None:
+    assert mtp_step <= REQ_NEXT_TOKEN_IDS_WIDTH - 1, (
+        f"mtp_step={mtp_step} exceeds {REQ_NEXT_TOKEN_IDS_WIDTH - 1}; "
+        f"req_to_next_token_ids width is {REQ_NEXT_TOKEN_IDS_WIDTH} "
+        "(widening it is an explicit follow-up, spec §9)"
+    )
+
+
 class _ReqNode:
     def __init__(self, index):
         self.index = index
@@ -75,6 +93,11 @@ class ReqManager:
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
 
+        # Always resident: infer_batch.copy_linear_att_state_to_cache_buffer reads this
+        # unconditionally in the linear-att cache-copy path (even for mtp_step=0, where
+        # accept_len=1 is the correct non-widened value). MTP overwrites the live slots.
+        self.req_to_accept_len = torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
+
     def alloc(self):
         return self.req_list.alloc()
 
@@ -117,7 +140,7 @@ class ReqSamplingParamsManager:
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_next_token_ids = torch.zeros(
-            (max_request_num + 1, 8),
+            (max_request_num + 1, REQ_NEXT_TOKEN_IDS_WIDTH),
             dtype=torch.int64,
             device="cuda",
         )
@@ -236,15 +259,13 @@ class ReqManagerForMamba(ReqManager):
         self.big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
-        assert (
-            self.mtp_step == 0
-        ), "currently only support mtp_step 0 for simplicity, more mtp_step support will be added in the future"
+        assert_mtp_step_within_next_token_ids_width(self.mtp_step)
         self.linear_config = linear_config
 
         self.req_to_conv_state = LayerCache(
-            size=(max_request_num + 1) * (self.mtp_step + 1),
+            size=(max_request_num + 1),
             dtype=self.linear_config.conv_state_dtype,
-            shape=self.linear_config.get_conv_state_shape(),
+            shape=self.linear_config.get_gpu_conv_state_shape(mtp_step=self.mtp_step),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
         )
@@ -255,14 +276,30 @@ class ReqManagerForMamba(ReqManager):
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
         )
+        conv_buffer = self.req_to_conv_state.buffer
+        ssm_buffer = self.req_to_ssm_state.buffer
+        conv_nbytes = conv_buffer.numel() * conv_buffer.element_size()
+        ssm_nbytes = ssm_buffer.numel() * ssm_buffer.element_size()
+        logger.info(
+            "linear att gpu state buffers: "
+            f"max_request_num={max_request_num}, hold_request_id={self.HOLD_REQUEST_ID}, mtp_step={self.mtp_step}, "
+            f"conv_state shape={tuple(conv_buffer.shape)}, dtype={conv_buffer.dtype}, "
+            f"nbytes={conv_nbytes}, memory={_format_nbytes(conv_nbytes)}; "
+            f"ssm_state shape={tuple(ssm_buffer.shape)}, dtype={ssm_buffer.dtype}, "
+            f"nbytes={ssm_nbytes}, memory={_format_nbytes(ssm_nbytes)}; "
+            f"total memory={_format_nbytes(conv_nbytes + ssm_nbytes)}"
+        )
         return
 
     def init_linear_att_state(self, req: "InferReq"):
-        index = req.req_idx * (self.mtp_step + 1)
-        conv_state = self.req_to_conv_state.buffer[:, index, ...]
-        ssm_state = self.req_to_ssm_state.buffer[:, index, ...]
-        conv_state.fill_(0)
-        ssm_state.fill_(0)
+        conv_index = req.req_idx
+        ssm_start = req.req_idx * (self.mtp_step + 1)
+        self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
+        # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
+        # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
+        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
+        if self.req_to_accept_len is not None:
+            self.req_to_accept_len[req.req_idx] = 1
         return
 
     def get_mamba_cache(self, layer_idx_in_all: int):
@@ -281,10 +318,13 @@ class ReqManagerForMamba(ReqManager):
         big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
 
         conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
-        dest_req_idx = req.req_idx * (self.mtp_step + 1)
-
-        self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
-        self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
+        conv_dest = req.req_idx
+        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        narrow_w = conv_state.shape[-1]  # persisted (narrow) width
+        self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
+        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
+        if self.req_to_accept_len is not None:
+            self.req_to_accept_len[req.req_idx] = 1
         return
 
     def copy_small_page_buffer_to_linear_att_state(
@@ -293,9 +333,13 @@ class ReqManagerForMamba(ReqManager):
         conv_state, ssm_state = linear_att_small_page_buffers.get_state_cache(
             buffer_idx=req.shared_kv_node.small_page_buffer_idx
         )
-        dest_req_idx = req.req_idx * (self.mtp_step + 1)
+        conv_dest = req.req_idx
+        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        narrow_w = conv_state.shape[-1]
         # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
         # 同时，非连续对象的拷贝，可能存在效率问题。
-        self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
-        self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
+        self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
+        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
+        if self.req_to_accept_len is not None:
+            self.req_to_accept_len[req.req_idx] = 1
         return

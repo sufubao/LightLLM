@@ -1,5 +1,6 @@
 import torch
 import time
+import copy
 from typing import List, Optional, Callable, Dict, Any
 from queue import Queue
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -19,6 +20,7 @@ from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
+    scatter_mtp_accept_len,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
@@ -163,11 +165,22 @@ class ChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
-        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
+        can_pre_post_early = self._can_decode_pre_post_before_prev_post_handle(
+            run_reqs=run_reqs,
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
+        )
+        if can_pre_post_early:
+            event_pack.notify_post_handle_event.set()
+            update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
+            event_pack.notify_forward_event.set()
+            event_pack.wait_pre_post_handle_event.wait()
+        else:
+            event_pack.notify_post_handle_and_wait_pre_post_handle()
+            update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
 
         # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
+        if not can_pre_post_early:
+            event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
         self._post_handle(
             run_reqs=run_reqs,
@@ -241,21 +254,19 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            b_mtp_index_cpu = model_input.b_mtp_index
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
-            b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
-            b_req_mtp_start_loc = g_pin_mem_manager.gen_from_list(
-                key="b_req_mtp_start_loc",
-                data=b_req_mtp_start_loc,
-                dtype=torch.int32,
-            ).cuda(non_blocking=True)
+            n_real = model_input.batch_size // (self.mtp_step + 1)
+            b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * (self.mtp_step + 1)
 
             mtp_accept_len, accepted_index = self._verify_mtp_v2(
                 new_next_token_ids=next_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
+            scatter_mtp_accept_len(
+                self.model.req_manager.req_to_accept_len, b_req_mtp_start_loc, model_input.b_req_idx, mtp_accept_len
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",

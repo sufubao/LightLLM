@@ -42,6 +42,7 @@ class ModelInput:
     multimodal_params: list = None
     # cpu 变量
     mem_indexes_cpu: torch.Tensor = None
+    b_seq_len_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
     b_prefill_has_output_cpu: List[bool] = None  # 标记进行prefill的请求是否具有输出
@@ -52,6 +53,8 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+
+    b_num_accepted_tokens: Optional[torch.Tensor] = None
 
     def to_cuda(self):
         if self.input_ids is not None:
@@ -64,8 +67,12 @@ class ModelInput:
             assert self.is_prefill
 
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
+        if not self.b_seq_len.is_cuda:
+            self.b_seq_len_cpu = self.b_seq_len
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
+        if self.b_num_accepted_tokens is not None:
+            self.b_num_accepted_tokens = self.b_num_accepted_tokens.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_prefill_start_loc is not None:

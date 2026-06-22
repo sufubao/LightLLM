@@ -16,7 +16,7 @@ from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
+from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -41,10 +41,6 @@ from lightllm.distributed.communication_op import (
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
-from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
@@ -328,27 +324,20 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            # Select MTP model class based on model type
+            # Select MTP model class based on model type (single source of truth: #10).
+            from lightllm.server.router.model_infer.mode_backend.mtp_model_factory import create_mtp_draft_model
+
             model_type = mtp_model_cfg.get("model_type", "")
-            if model_type == "deepseek_v3":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-            elif model_type == "qwen3_moe":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-            elif model_type == "mistral":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
-            else:
-                raise ValueError(f"Unsupported MTP model type: {model_type}")
+            self.draft_models.append(create_mtp_draft_model(model_type, self.args.mtp_mode, mtp_model_kvargs))
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
 
-    def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
+    def _async_copy_next_token_infos_to_pin_mem(
+        self,
+        next_token_ids: torch.Tensor,
+        next_token_logprobs: Optional[torch.Tensor],
+    ):
         """
         这个函数会把next token id和logprobs保存到pinned memory中
         这样可以保障post_handle 函数可以读取到正常的输出结果。
@@ -357,9 +346,13 @@ class ModeBackend:
             key="next_token_ids",
             gpu_tensor=next_token_ids,
         )
-        next_token_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-            key="next_token_logprobs",
-            gpu_tensor=next_token_logprobs,
+        next_token_logprobs_cpu = (
+            None
+            if next_token_logprobs is None
+            else g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="next_token_logprobs",
+                gpu_tensor=next_token_logprobs,
+            )
         )
         return next_token_ids_cpu, next_token_logprobs_cpu
 
@@ -712,7 +705,7 @@ class ModeBackend:
         self,
         run_reqs: List[InferReq],
         next_token_ids: List[int],
-        next_token_logprobs: List[float],
+        next_token_logprobs: Optional[List[float]],
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
@@ -721,9 +714,18 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
-        for req_obj, next_token_id, next_token_logprob, pack in zip(
-            run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
-        ):
+        if next_token_logprobs is None:
+            iter_items = zip(run_reqs, next_token_ids, run_reqs_update_packs)
+        else:
+            iter_items = zip(run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs)
+
+        for item in iter_items:
+            if next_token_logprobs is None:
+                req_obj, next_token_id, pack = item
+                next_token_logprob = 0.0
+            else:
+                req_obj, next_token_id, next_token_logprob, pack = item
+
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
             pack.handle(
@@ -773,8 +775,7 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        probs = torch.softmax(logits, dim=-1)
-        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
         return draft_next_token_ids_gpu
 
     def _sample_and_scatter_token(
@@ -812,9 +813,37 @@ class ModeBackend:
             mask=b_has_out,
         )
         next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-            next_token_ids, next_token_logprobs
+            next_token_ids,
+            next_token_logprobs,
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu
+
+    def _can_decode_pre_post_before_prev_post_handle(
+        self,
+        run_reqs: List[InferReq],
+        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
+    ) -> bool:
+        if not self.support_overlap:
+            return False
+        if extra_post_req_handle_func is not None or self.decode_mask_func is not None:
+            return False
+        if self.args.mtp_mode:
+            return False
+
+        for req_obj in run_reqs:
+            if req_obj.mtp_step != 0:
+                return False
+            if req_obj.infer_aborted or req_obj.finish_status.is_finished():
+                return False
+
+            shm_param = req_obj.sampling_param.shm_param
+            if not shm_param.ignore_eos:
+                return False
+            if len(req_obj.stop_sequences) != 0:
+                return False
+            if req_obj.cur_output_len + 1 >= shm_param.max_new_tokens:
+                return False
+        return True
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]

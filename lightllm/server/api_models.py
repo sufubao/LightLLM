@@ -221,6 +221,8 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True

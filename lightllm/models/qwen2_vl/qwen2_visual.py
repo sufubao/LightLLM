@@ -36,6 +36,7 @@ from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+from lightllm.server.visualserver.model_infer.worst_case_reserve import QwenVLWorstCaseMixin
 
 # adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
@@ -175,7 +176,7 @@ class Qwen2VLVisionBlock(nn.Module):
         return hidden_states
 
 
-class Qwen2VisionTransformerPretrainedModel(nn.Module):
+class Qwen2VisionTransformerPretrainedModel(QwenVLWorstCaseMixin, nn.Module):
     def __init__(
         self,
         kvargs,

@@ -14,19 +14,19 @@ from lightllm.models.vit import get_load_image_func
 import torchvision.transforms as T
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from PIL import Image
-from typing import List, Union, final
+from typing import List, Union
 from io import BytesIO
 from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+from lightllm.server.visualserver.model_infer.worst_case_reserve import WorstCaseReserveMixin
 
 
 logger = init_logger(__name__)
 
 
-class VisionTransformer:
-
+class VisionTransformer(WorstCaseReserveMixin):
     # weight class
     pre_and_post_weight_class = ViTPreAndPostLayerWeight
     transformer_weight_class = ViTTransformerLayerWeight
@@ -53,31 +53,13 @@ class VisionTransformer:
         self._init_quant()
         self._init_weights()
         self._init_infer_layer()
-        self._check_max_len_infer()
         return
 
-    @final
-    @torch.no_grad()
-    def _check_max_len_infer(self):
-        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
-        if disable_check_max_len_infer:
-            return
-
-        try:
-            dummy_images = torch.randn(
-                (self.MAX_PATH_NUM * self.max_batch_size, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type
-            ).cuda()
-            all_img_embeds = self.forward(dummy_images)
-            del all_img_embeds
-            logger.info(f"vit check max_len {self.max_batch_size} infer ok")
-        except (RuntimeError, torch.OutOfMemoryError) as e:
-            logger.exception(str(e))
-            exception_str = (
-                "Vit check max len infer fail, you can try:" "1.Set the --visual_infer_batch_size to a smaller value."
-            )
-            logger.error(exception_str)
-            raise Exception(exception_str)
-        return
+    def build_worst_case_input(self, batch_size, max_image_pixels, max_image_token_count) -> dict:
+        # InternVL uses fixed-size tiles: worst case is batch_size * MAX_PATH_NUM tiles of (3, IMAGE_H, IMAGE_W).
+        num_tiles = int(self.MAX_PATH_NUM) * int(batch_size)
+        dummy_images = torch.randn((num_tiles, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type, device="cuda")
+        return {"pixel_values": dummy_images}
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

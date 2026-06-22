@@ -1,3 +1,4 @@
+import os
 import rpyc
 import torch
 import socket
@@ -11,7 +12,6 @@ from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
-from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
 from lightllm.models.vit.model import VisionTransformer
@@ -28,6 +28,8 @@ from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.visualserver.model_infer.mem_reserve import publish_vit_reserved_mem, reserve_guard_tensor
+from lightllm.server.visualserver.model_infer.worst_case_reserve import WorstCaseReserveMixin
 
 
 logger = init_logger(__name__)
@@ -95,7 +97,6 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = LlavaVisionModel()
             elif self.model_type == "internvl_chat":
                 self.model = VisionTransformer(kvargs)
-                # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
                 self.model = Gemma3VisionModel()
             elif self.model_type == "gemma4":
@@ -114,6 +115,7 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
+            self._reserve_vit_worst_case_mem()
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -142,6 +144,41 @@ class VisualModelRpcServer(rpyc.Service):
 
         set_random_seed(2147483647)
         return
+
+    def _reserve_vit_worst_case_mem(self):
+        args = get_env_start_args()
+        global_rank = self.dp_rank_id * self.vit_tp + self.tp_rank_id
+        reserved_bytes = 0
+        if getattr(args, "visual_reserved_mem_gb", None) is not None:
+            # Manual override: hold an explicit guard tensor, skip the dummy probe.
+            self._mem_reserve_guard, reserved_bytes = reserve_guard_tensor(self.device_id, args.visual_reserved_mem_gb)
+        elif os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None:
+            # Preserved escape hatch: probe disabled. Reservation is skipped -> co-location OOM risk.
+            logger.warning(
+                "DISABLE_CHECK_MAX_LEN_INFER is set: skipping ViT worst-case reservation. "
+                "A co-located LLM may OOM at runtime. Unset it, or set --visual_reserved_mem_gb instead."
+            )
+        elif isinstance(self.model, WorstCaseReserveMixin):
+            reserved_bytes = self.model.reserve_worst_case_activation(
+                self.device_id,
+                self.infer_max_batch_size,
+                args.max_image_pixels,
+                args.max_image_token_count,
+            )
+        else:
+            logger.warning(
+                f"co-location OOM risk: model_type={self.model_type} has no ViT worst-case reservation. "
+                f"Set --visual_reserved_mem_gb to reserve headroom, or place the ViT on a separate GPU "
+                f"with --visual_gpu_ids."
+            )
+        publish_vit_reserved_mem(self.device_id, global_rank, reserved_bytes)
+        # publishing reserved_bytes (including 0 on the skip paths) tells the router exactly how much
+        # this rank holds on its device; 0 means "nothing held here".
+        if reserved_bytes > 0:
+            logger.info(
+                f"ViT rank {global_rank} on device {self.device_id} reserved "
+                f"{reserved_bytes / 1024 ** 3:.2f} GB worst-case activation memory."
+            )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
         try:

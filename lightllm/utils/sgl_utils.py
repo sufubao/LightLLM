@@ -17,18 +17,26 @@ except:
     )
 
 try:
-    from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache, get_scheduler_metadata
+    from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
     flash_attn_varlen_func = flash_attn_varlen_func
     flash_attn_with_kvcache = flash_attn_with_kvcache
-    get_scheduler_metadata = get_scheduler_metadata
     merge_state_v2 = sgl_ops.merge_state_v2
 except:
     flash_attn_varlen_func = None
     flash_attn_with_kvcache = None
-    get_scheduler_metadata = None
     merge_state_v2 = None
     logger.warning(
         "sgl_kernel is not installed, or the installed version did not support fa3. \
         Try to upgrade it."
     )
+
+# Imported separately: older sgl_kernel builds ship fa3 (flash_attn_varlen_func) without
+# get_scheduler_metadata. Keeping it on the import line above would null out the whole fa3
+# backend on those builds; fa3/fp.py already guards against get_scheduler_metadata being None.
+try:
+    from sgl_kernel.flash_attn import get_scheduler_metadata
+
+    get_scheduler_metadata = get_scheduler_metadata
+except:
+    get_scheduler_metadata = None

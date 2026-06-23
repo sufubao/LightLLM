@@ -16,6 +16,7 @@ from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+from lightllm.server.visualserver.model_infer.worst_case_reserve import QwenVLWorstCaseMixin
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -122,7 +123,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
 class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
@@ -135,7 +136,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
         return x
 
 
-class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
+class Qwen2_5_VisionTransformerPretrainedModel(QwenVLWorstCaseMixin, nn.Module):
     def __init__(
         self,
         kvargs,
@@ -350,7 +351,6 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         return pixel_values.to(dtype=self.data_type), image_grid_thw
 
     def load_model(self, weight_dir):
-
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:
             weight_dict = {}
@@ -390,7 +390,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
-            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)
+            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size**2)
 
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num

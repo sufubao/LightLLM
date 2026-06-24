@@ -14,8 +14,8 @@ from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
 from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gdn_decode_inputs
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import add_shared_expert_gate_, sigmoid_mul_
-from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
+from lightllm.models.qwen3next.triton_kernel.gdn_prefill_backend import get_gdn_prefill_chunk_fn
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
@@ -78,6 +78,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         # GDN kernel output dtype is self.data_type
         # Conversion needed only if SSM state uses different dtype
         self.needs_ssm_dtype_conversion = get_llm_data_type() != self.ssm_state_dtype
+
+        # GDN chunked-prefill kernel backend (FLA triton by default, FlashQLA on Hopper if selected)
+        self._gdn_prefill_chunk = get_gdn_prefill_chunk_fn()
         return
 
     def _bind_func(self):
@@ -421,7 +424,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv)
         initial_state = ssm_states[infer_state.b_buffer_idx]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
-        core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
+        core_attn_out, last_recurrent_state = self._gdn_prefill_chunk(
             q=query,
             k=key,
             v=value,

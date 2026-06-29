@@ -58,6 +58,7 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
 
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
+        mtp_index = len(self.mtp_previous_draft_models)
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
         )
@@ -68,7 +69,7 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
                 network_config=self.config,
                 quant_cfg=self.quant_cfg,
             )
-            for i in range(0, self.config["n_layer"])
+            for i in range(mtp_index, mtp_index + self.config["n_layer"])
         ]
         # Shared with the main Qwen3.5 model (mtp_use_dedicated_embeddings: false).
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_

@@ -3,14 +3,23 @@ from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import Qwen3
 
 
 class Qwen35MOETransformerLayerWeight(Qwen35TransformerLayerWeight):
+    def _fused_expert_layer_prefix(self):
+        return f"model.layers.{self.layer_num_}."
+
     def load_hf_weights(self, weights):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
-        split_fused_expert_weights(weights, self.layer_num_, moe_intermediate_size)
+        split_fused_expert_weights(
+            weights,
+            self.layer_num_,
+            moe_intermediate_size,
+            layer_prefix=self._fused_expert_layer_prefix(),
+        )
         return super().load_hf_weights(weights)
 
 
-def split_fused_expert_weights(weights: dict, layer_num: int, moe_intermediate_size: int):
-    layer_prefix = f"model.layers.{layer_num}."
+def split_fused_expert_weights(weights: dict, layer_num: int, moe_intermediate_size: int, layer_prefix=None):
+    if layer_prefix is None:
+        layer_prefix = f"model.layers.{layer_num}."
     keys = list(weights.keys())
     num_experts = 0
 

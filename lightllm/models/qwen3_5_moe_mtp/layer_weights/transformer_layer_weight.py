@@ -42,6 +42,9 @@ class Qwen3_5MoeMTPTransformerLayerWeight(Qwen35MOETransformerLayerWeight):
             return None
         return name.replace(self._MAIN_PREFIX, self._MTP_PREFIX, 1)
 
+    def _fused_expert_layer_prefix(self):
+        return f"{self._MTP_PREFIX}{self.layer_num_}."
+
     def _retarget_attn_norm_names(self):
         for attr in self._ATTN_NORM_NAME_ATTRS:
             setattr(self, attr, self._retarget(getattr(self, attr)))

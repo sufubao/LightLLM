@@ -4,7 +4,6 @@ import os
 import gc
 import copy
 import json
-import math
 import torch
 import torch.nn.functional as F
 import triton
@@ -354,10 +353,10 @@ class TpPartBaseModel:
         return infer_state
 
     def _get_decode_padding_unit(self, model_input: ModelInput) -> int:
-        padding_unit = self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1
         if (not model_input.is_prefill) and self.args.mtp_step > 0:
-            padding_unit = math.lcm(padding_unit, self.args.mtp_step + 1)
-        return padding_unit
+            assert not self.args.enable_tpsp_mix_mode, "MTP does not support --enable_tpsp_mix_mode"
+            return self.args.mtp_step + 1
+        return self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1
 
     def _get_decode_infer_batch_size(self, model_input: ModelInput) -> int:
         padding_unit = self._get_decode_padding_unit(model_input)
@@ -372,26 +371,8 @@ class TpPartBaseModel:
         padded_batch_size = new_batch_size - model_input.batch_size
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = new_batch_size
-
-        is_mtp_grouped_decode = (not model_input.is_prefill) and self.args.mtp_step > 0
-        if is_mtp_grouped_decode:
-            mtp_size = self.args.mtp_step + 1
-            assert padded_batch_size % mtp_size == 0
-            padded_req_num = padded_batch_size // mtp_size
-            new_model_input.total_token_num += padded_req_num * (mtp_size * (mtp_size + 3) // 2)
-            new_model_input.max_kv_seq_len = max(mtp_size + 1, model_input.max_kv_seq_len)
-            pad_seq_len = torch.arange(
-                2, mtp_size + 2, dtype=new_model_input.b_seq_len.dtype, device=new_model_input.b_seq_len.device
-            ).repeat(padded_req_num)
-            new_model_input.b_seq_len = torch.cat((new_model_input.b_seq_len, pad_seq_len), dim=0)
-            # GDN verify gathers accept lengths from req_to_accept_len; padding uses HOLD, whose slot stays 1.
-        else:
-            new_model_input.total_token_num += padded_batch_size * 2
-            new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-            new_model_input.b_seq_len = F.pad(
-                new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2
-            )
-
+        new_model_input.total_token_num += padded_batch_size * 2
+        new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
         new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
@@ -399,6 +380,7 @@ class TpPartBaseModel:
         new_model_input.b_mtp_index = F.pad(
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
+        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
         new_model_input.mem_indexes = F.pad(
             new_model_input.mem_indexes,
             (0, padded_batch_size),

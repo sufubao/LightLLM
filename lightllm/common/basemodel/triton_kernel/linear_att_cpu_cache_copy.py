@@ -384,7 +384,6 @@ def copy_cpu_cache_to_kv_buffer(
     linear_config: LinearAttCacheConfig,
     grid_num: int = 12,
 ):
-
     assert len(mem_indexes) % len(page_indexes) == 0
 
     BLOCK = 4096

@@ -12,7 +12,6 @@ logger = init_logger(__name__)
 
 
 class Qwen3_5MTPModel(Qwen3_5TpPartModel):
-
     pre_and_post_weight_class = Qwen3_5MTPPreAndPostLayerWeight
     pre_layer_infer_class = Qwen3_5MTPPreLayerInfer
     transformer_weight_class = Qwen3_5MTPTransformerLayerWeight

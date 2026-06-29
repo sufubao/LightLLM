@@ -47,7 +47,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _init_linear_layer_metadata(self, layer_num, network_config):
-
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
         self.num_k_heads = network_config["linear_num_key_heads"]

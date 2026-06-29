@@ -494,9 +494,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
         assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
-        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream (init sets accept_len=1; the
-        # offload/snapshot guards bound it to [1, mtp_step+1]). The old per-layer per-step .all()
-        # D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
+        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
+        # and MTP verify only writes values in [1, mtp_step+1]. The old per-layer per-step
+        # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,

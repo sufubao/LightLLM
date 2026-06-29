@@ -389,12 +389,6 @@ class InferenceContext:
 
             from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
-            # accept 数量改由 GPU 常驻的 req_to_accept_len 按 req_idx gather（不再读 req.mtp_accept_len）。
-            req_idxs = torch.tensor(
-                [req.req_idx for req in reqs], dtype=torch.int32, requires_grad=False, device="cpu"
-            ).cuda(non_blocking=True)
-            b_num_accepted_tokens = self.req_manager.req_to_accept_len[req_idxs]
-
             copy_linear_att_state_to_kv_buffer(
                 b_req_idx=b_req_idx,
                 big_page_buffer_ids=big_page_buffer_ids,
@@ -403,7 +397,6 @@ class InferenceContext:
                 cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
                 cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
                 mtp_step=self.args.mtp_step,
-                b_num_accepted_tokens=b_num_accepted_tokens,
             )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
@@ -419,18 +412,11 @@ class InferenceContext:
                         self.radix_cache.linear_att_small_page_buffers.alloc_one_state_cache()
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
-                        # 冷路径(prefill 跨小页边界)：单标量从 GPU buffer 读回做 Python 切片下标。
-                        accept_len = int(self.req_manager.req_to_accept_len[req.req_idx].item())
-                        assert 1 <= accept_len <= self.args.mtp_step + 1, (
-                            f"mtp_accept_len={accept_len} out of range "
-                            f"[1, {self.args.mtp_step + 1}]; would slice past the widened conv slot"
-                        )
-                        canonical_off = accept_len - 1
                         conv_src_idx = req.req_idx
-                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1) + canonical_off
+                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1)
                         narrow_w = self.req_manager.linear_config.get_persisted_conv_state_shape()[-1]
                         gpu_conv_state = self.req_manager.req_to_conv_state.buffer[
-                            :, conv_src_idx, ..., canonical_off : canonical_off + narrow_w
+                            :, conv_src_idx, ..., :narrow_w
                         ]
                         gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, ssm_src_idx, ...]
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id

@@ -96,14 +96,12 @@ class CudaGraph:
             device=device,
         )
 
-        b_num_accepted_tokens = None
         if self.mtp_step > 0:
             assert batch_size % mtp_size == 0, "MTP decode CUDA graph batch size must be a multiple of mtp_step + 1"
             real_batch_size = batch_size // mtp_size
             b_mtp_index = torch.arange(mtp_size, dtype=torch.int32, device=device).repeat(real_batch_size)
             b_seq_len = torch.arange(2, mtp_size + 2, dtype=torch.int32, device=device).repeat(real_batch_size)
-            # b_num_accepted_tokens 不再随 model_input 传入：GDN 的 init_mtp_verify_extra_state 会按
-            # req_first(全 HOLD，槽恒为 1) gather，warmup/capture 自然得到全 1，等价旧的 torch.ones。
+            # GDN verify gathers accept lengths from req_to_accept_len. Warmup uses HOLD, whose slot stays 1.
             total_token_num = real_batch_size * (mtp_size * (mtp_size + 3) // 2)
         else:
             seq_len = 2
@@ -122,7 +120,6 @@ class CudaGraph:
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
             b_mtp_index=b_mtp_index,
-            b_num_accepted_tokens=b_num_accepted_tokens,
             is_prefill=False,
             multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
             **model._gen_special_model_input(batch_size),

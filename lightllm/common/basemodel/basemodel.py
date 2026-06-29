@@ -316,7 +316,6 @@ class TpPartBaseModel:
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
         infer_state.b_mtp_index = model_input.b_mtp_index
-        infer_state.b_num_accepted_tokens = model_input.b_num_accepted_tokens
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
@@ -385,8 +384,7 @@ class TpPartBaseModel:
                 2, mtp_size + 2, dtype=new_model_input.b_seq_len.dtype, device=new_model_input.b_seq_len.device
             ).repeat(padded_req_num)
             new_model_input.b_seq_len = torch.cat((new_model_input.b_seq_len, pad_seq_len), dim=0)
-            # b_num_accepted_tokens 不再随 model_input 流转/补齐：它在 GDN 的 init_mtp_verify_extra_state
-            # 里按 req_first 从 req_to_accept_len gather，padding 组 req_first=HOLD（槽恒为 1）自然得 1。
+            # GDN verify gathers accept lengths from req_to_accept_len; padding uses HOLD, whose slot stays 1.
         else:
             new_model_input.total_token_num += padded_batch_size * 2
             new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)

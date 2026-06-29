@@ -2,11 +2,11 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     COLMMWeight,
     FusedMoeWeight,
     ROWMMWeight,
-    QKVROWNMMWeight,
 )
 from lightllm.models.qwen3_5_moe.layer_weights.transformer_layer_weight import (
     Qwen35MOETransformerLayerWeight,
 )
+from lightllm.models.qwen3next.layer_weights.qkv_gated_rowmm_weight import QKVGatedROWNMMWeight
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -48,25 +48,17 @@ class Qwen3_5MoeMTPTransformerLayerWeight(Qwen35MOETransformerLayerWeight):
 
     def _init_qkv(self):
         in_dim = self.n_embed
-        q_out_dim = self.q_head_num_ * self.head_dim
-        self.qkv_proj = QKVROWNMMWeight(
+        self._o_gate_weight_name = f"{self._MTP_PREFIX}{self.layer_num_}.self_attn.o_gate_proj.weight"
+        qkv_quant = self.get_quant_method("qkv_proj")
+        self.qkvo_gate_proj = QKVGatedROWNMMWeight(
             in_dim=in_dim,
             q_head_num=self.q_head_num_,
             kv_head_num=self.k_head_num_,
             head_dim=self.head_dim,
-            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
+            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name, self._o_gate_weight_name],
             data_type=self.data_type_,
-            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
-            quant_method=self.get_quant_method("qkv_proj"),
-        )
-        self._o_gate_weight_name = f"{self._MTP_PREFIX}{self.layer_num_}.self_attn.o_gate_proj.weight"
-        self._o_gate_proj = ROWMMWeight(
-            in_dim=in_dim,
-            out_dims=[q_out_dim],
-            weight_names=[self._o_gate_weight_name],
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=self.get_quant_method("o_gate_proj"),
+            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name, None],
+            quant_method=qkv_quant,
         )
 
     def _init_weight_names(self):
@@ -75,11 +67,24 @@ class Qwen3_5MoeMTPTransformerLayerWeight(Qwen35MOETransformerLayerWeight):
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
+        hidden_size = self.network_config_["hidden_size"]
         self.moe_gate = ROWMMWeight(
-            in_dim=self.network_config_["hidden_size"],
+            in_dim=hidden_size,
             out_dims=[self.n_routed_experts],
             weight_names=f"{self._MTP_PREFIX}{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
+            quant_method=None,
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        enable_ep_moe = get_env_start_args().enable_ep_moe
+        self.num_fused_shared_experts = 0 if enable_ep_moe else 1
+        self.shared_expert_gate = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[1],
+            weight_names=f"{self._MTP_PREFIX}{self.layer_num_}.mlp.shared_expert_gate.weight",
+            data_type=self.data_type_,
+            bias_names=None,
             quant_method=None,
             tp_rank=0,
             tp_world_size=1,
@@ -91,16 +96,18 @@ class Qwen3_5MoeMTPTransformerLayerWeight(Qwen35MOETransformerLayerWeight):
             e_score_correction_bias_name="",
             weight_prefix=f"{self._MTP_PREFIX}{self.layer_num_}.mlp.experts",
             n_routed_experts=self.n_routed_experts,
-            hidden_size=self.network_config_["hidden_size"],
+            hidden_size=hidden_size,
             moe_intermediate_size=moe_intermediate_size,
             data_type=self.data_type_,
             quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
+            num_fused_shared_experts=self.num_fused_shared_experts,
             layer_num=self.layer_num_,
             network_config=self.network_config_,
         )
-        self._init_gated_ffn()
+        if enable_ep_moe:
+            self._init_moe_shared_expert_ffn()
 
-    def _init_gated_ffn(self):
+    def _init_moe_shared_expert_ffn(self):
         hidden_size = self.network_config_["hidden_size"]
         if "shared_expert_intermediate_size" not in self.network_config_:
             return
@@ -142,13 +149,22 @@ class Qwen3_5MoeMTPTransformerLayerWeight(Qwen35MOETransformerLayerWeight):
                 quant_method=self.get_quant_method("down_proj"),
             )
 
-        self.ffn_gate = ROWMMWeight(
-            in_dim=hidden_size,
-            out_dims=[1],
-            weight_names=f"{self._MTP_PREFIX}{self.layer_num_}.mlp.shared_expert_gate.weight",
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=None,
-            tp_rank=0,
-            tp_world_size=1,
-        )
+    def _rename_shared_expert_to_moe_expert(self, weights):
+        if self.num_fused_shared_experts != 1:
+            return
+        assert not get_env_start_args().enable_ep_moe, "fused shared expert is only supported in TP mode"
+
+        old_prefix = f"{self._MTP_PREFIX}{self.layer_num_}.mlp.shared_expert"
+        new_prefix = f"{self._MTP_PREFIX}{self.layer_num_}.mlp.experts.{self.n_routed_experts}"
+        suffixes = [
+            self.experts.quant_method.weight_suffix,
+            self.experts.quant_method.weight_scale_suffix,
+            self.experts.quant_method.weight_zero_point_suffix,
+        ]
+        for proj_name in ("gate_proj", "up_proj", "down_proj"):
+            for suffix in suffixes:
+                if suffix is None:
+                    continue
+                old_name = f"{old_prefix}.{proj_name}.{suffix}"
+                if old_name in weights:
+                    weights[f"{new_prefix}.{proj_name}.{suffix}"] = weights[old_name]

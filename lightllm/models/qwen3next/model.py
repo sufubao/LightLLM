@@ -12,14 +12,11 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 )
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.linear_att_cache_manager.config_objs import (
-    LinearAttCacheConfig,
-    get_mtp_draft_full_att_layer_num,
-)
+from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 logger = init_logger(__name__)
 
@@ -60,7 +57,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def _init_linear_config(self):
         start_args: StartArgs = get_env_start_args()
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        draft_full_att_layers = get_mtp_draft_full_att_layer_num(start_args)
+        draft_full_att_layers = get_added_mtp_kv_layer_num()
         self.linear_config = LinearAttCacheConfig(
             tp_world_size=self.tp_world_size_,
             full_att_all_num_kv_heads=self.config["num_key_value_heads"],

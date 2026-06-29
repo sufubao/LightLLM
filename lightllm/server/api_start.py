@@ -30,17 +30,6 @@ from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_
 logger = init_logger(__name__)
 
 
-def _verify_mtp_start_args(args):
-    # MTP decode uses an expanded per-request layout and is not compatible with TPSP mix mode.
-    if args.mtp_mode is not None:
-        assert args.mtp_draft_model_dir is not None
-        assert args.mtp_step > 0
-        assert not args.enable_tpsp_mix_mode, "MTP does not support --enable_tpsp_mix_mode"
-    else:
-        assert args.mtp_draft_model_dir is None
-        assert args.mtp_step == 0
-
-
 def setup_signal_handlers(http_server_process, process_manager):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
@@ -221,7 +210,14 @@ def normal_or_p_d_start(args):
                 f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
 
-    _verify_mtp_start_args(args)
+    # MTP decode uses an expanded per-request layout and is not compatible with TPSP mix mode.
+    if args.mtp_mode is not None:
+        assert args.mtp_draft_model_dir is not None
+        assert args.mtp_step > 0
+        assert not args.enable_tpsp_mix_mode, "MTP does not support --enable_tpsp_mix_mode"
+    else:
+        assert args.mtp_draft_model_dir is None
+        assert args.mtp_step == 0
 
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)

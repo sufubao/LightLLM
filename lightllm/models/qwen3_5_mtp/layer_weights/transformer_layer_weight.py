@@ -2,12 +2,9 @@ from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35TransformerLayerWeight,
 )
 from lightllm.models.qwen3next.layer_weights.qkv_gated_rowmm_weight import QKVGatedROWNMMWeight
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
-class Qwen3_5MTPTransformerLayerWeight(Qwen35TransformerLayerWeight):
+class Qwen3_5MTPTransformerLayerWeightMixin:
     # MTP draft-model weights live under the `mtp.layers.*` checkpoint namespace, so every
     # main-model layer name (`model.layers.*`) is retargeted to it at load time.
 
@@ -57,6 +54,8 @@ class Qwen3_5MTPTransformerLayerWeight(Qwen35TransformerLayerWeight):
             quant_method=qkv_quant,
         )
 
+
+class Qwen3_5MTPTransformerLayerWeight(Qwen3_5MTPTransformerLayerWeightMixin, Qwen35TransformerLayerWeight):
     def _init_weight_names(self):
         super()._init_weight_names()
         # Retarget all main-model layer key names to the mtp.* namespace.

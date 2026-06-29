@@ -2,7 +2,6 @@ import os
 import torch
 import copy
 import bisect
-import math
 import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
@@ -28,42 +27,32 @@ class CudaGraph:
         self.graph_max_len_in_batch = max_len_in_batch
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
 
-        # With MTP enabled, both the main-model verify forward and the draft (MTP) forward run over
-        # the (mtp_step+1)-expanded decode layout, so every decode batch size is a multiple of
-        # (mtp_step+1) and there is a single decode layout — the graph is keyed by batch size alone.
-        batch_size_multiple = self.mtp_step + 1 if self.mtp_step > 0 else 1
-        self.cuda_graph_batch_sizes = self._build_cuda_graph_batch_sizes(batch_size_multiple=batch_size_multiple)
-        logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
+        # gen cuda graph batch_sizes
+        # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
+        # and [graph_split_batch_size + graph_grow_step_size,
+        # if the mtp_step is not 0, then the batch_sizes will be multiply of (mtp_step + 1)
 
-    def _build_cuda_graph_batch_sizes(self, batch_size_multiple: int):
-        graph_split_batch_size = self.args.graph_split_batch_size * batch_size_multiple
-        graph_grow_step_size = self.args.graph_grow_step_size * batch_size_multiple
+        graph_split_batch_size = self.args.graph_split_batch_size * (self.mtp_step + 1)
+        graph_grow_step_size = self.args.graph_grow_step_size * (self.mtp_step + 1)
 
-        batch_sizes = [i * batch_size_multiple for i in range(1, self.args.graph_split_batch_size + 1)]
-        for _batch_size in range(
-            graph_split_batch_size + graph_grow_step_size,
-            self.max_batch_size,
-            graph_grow_step_size,
-        ):
+        batch_sizes = [i * (self.mtp_step + 1) for i in range(1, self.args.graph_split_batch_size + 1)]
+        for _batch_size in range(graph_split_batch_size + graph_grow_step_size, max_batch_size, graph_grow_step_size):
             batch_sizes.append(_batch_size)
 
-        batch_sizes = list(set([e for e in batch_sizes if e < self.max_batch_size]))
-        batch_sizes.append(self.max_batch_size)
+        batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
+        batch_sizes.append(max_batch_size)
         batch_sizes.sort()
         if self.args.enable_tpsp_mix_mode:
-            padding_unit = math.lcm(self.tp_world_size, batch_size_multiple)
-            batch_sizes = [triton.cdiv(e, padding_unit) * padding_unit for e in batch_sizes]
+            batch_sizes = [triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in batch_sizes]
             batch_sizes = list(set(batch_sizes))
             batch_sizes.sort()
 
+        self.cuda_graph_batch_sizes = batch_sizes
         assert batch_sizes[-1] == self.max_batch_size
-        return batch_sizes
+        logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 
     def can_run(self, batch_size, max_len_in_batch):
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
-
-    def _decode_graph_key(self, infer_state: InferStateInfo):
-        return infer_state.input_ids.shape[0]
 
     def need_capture(self, batch_size):
         find_batch_size = self.find_closest_graph_batch_size(batch_size)
@@ -152,11 +141,7 @@ class CudaGraph:
 
         with torch.cuda.graph(graph_obj, pool=self.mempool):
             model_output = decode_func(infer_state)
-        self.graph[self._decode_graph_key(infer_state)] = (
-            graph_obj,
-            infer_state,
-            model_output,
-        )
+        self.graph[batch_size] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
         return model_output
 
@@ -190,7 +175,7 @@ class CudaGraph:
 
         with torch.cuda.graph(graph_obj, pool=self.mempool):
             model_output, model_output1 = decode_func(infer_state, infer_state1)
-        self.graph[self._decode_graph_key(infer_state)] = (
+        self.graph[batch_size] = (
             graph_obj,
             infer_state,
             infer_state1,
@@ -217,7 +202,8 @@ class CudaGraph:
             return self._capture_decode(decode_func, infer_state)
 
     def _replay(self, infer_state: InferStateInfo):
-        graph_obj, graph_infer_state, graph_output = self.graph[self._decode_graph_key(infer_state)]
+        batch_size = infer_state.input_ids.shape[0]
+        graph_obj, graph_infer_state, graph_output = self.graph[batch_size]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_obj.replay()
         return graph_output
@@ -227,13 +213,14 @@ class CudaGraph:
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
     ):
+        batch_size = infer_state.input_ids.shape[0]
         (
             graph_obj,
             graph_infer_state,
             graph_infer_state1,
             graph_model_output,
             graph_model_output1,
-        ) = self.graph[self._decode_graph_key(infer_state)]
+        ) = self.graph[batch_size]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_infer_state1.copy_for_cuda_graph(infer_state1)
         graph_obj.replay()

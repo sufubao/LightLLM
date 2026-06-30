@@ -51,6 +51,7 @@ PREFILL_TABLE_HEADERS = [
     "cached",
     "tokens",
     "ms",
+    "qps",
     "tok/s",
     "logical_tok/s",
 ]
@@ -60,6 +61,7 @@ DECODE_TABLE_HEADERS = [
     "accept",
     "max_total_token_num",
     "ms",
+    "qps",
     "tok/s",
     "itl_ms",
 ]
@@ -91,6 +93,7 @@ class BenchmarkResult:
     chunked_prefill_size: Optional[int]
     elapsed_ms: float
     measured_tokens: int
+    qps: float
     tps: float
     profiled_max_total_token_num: Optional[int] = None
     profiled_batch_divisor: Optional[int] = None
@@ -695,6 +698,7 @@ class StaticBenchmarkExecutor:
         """Convert raw timings into reported TPS and latency metrics."""
         iters = self._case_iters(warmup)
         scaled_tokens = measured_tokens * self.dp * iters
+        qps = case.batch_size * self.dp * iters / elapsed_s if elapsed_s > 0 else 0.0
         tps = scaled_tokens / elapsed_s if elapsed_s > 0 else 0.0
         ttft_ms = ttft_elapsed_s * 1000.0 / max(1, iters) if ttft_elapsed_s is not None else None
         logical_tps = None
@@ -715,6 +719,7 @@ class StaticBenchmarkExecutor:
             chunked_prefill_size=case.chunked_prefill_size,
             elapsed_ms=elapsed_s * 1000.0,
             measured_tokens=scaled_tokens,
+            qps=qps,
             tps=tps,
             profiled_max_total_token_num=case.profiled_max_total_token_num,
             profiled_batch_divisor=case.profiled_batch_divisor,
@@ -1250,6 +1255,7 @@ def prefill_table_row(result: BenchmarkResult) -> List[str]:
         fmt_optional(result.prefill_cached_len, 0),
         str(result.measured_tokens),
         f"{result.elapsed_ms:.3f}",
+        f"{result.qps:.2f}",
         f"{result.tps:.2f}",
         fmt_optional(result.logical_tps, 2),
     ]
@@ -1263,6 +1269,7 @@ def decode_table_row(result: BenchmarkResult) -> List[str]:
         fmt_optional(result.mtp_accept_rate, 2),
         fmt_optional(result.profiled_max_total_token_num, 0),
         f"{result.elapsed_ms:.3f}",
+        f"{result.qps:.2f}",
         f"{result.tps:.2f}",
         fmt_optional(result.inter_token_latency_ms, 3),
     ]

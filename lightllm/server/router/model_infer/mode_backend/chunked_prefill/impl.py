@@ -1,6 +1,5 @@
 import torch
 import time
-import copy
 from typing import List, Optional, Callable, Dict, Any
 from queue import Queue
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend

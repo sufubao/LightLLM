@@ -114,9 +114,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         main_full_att = self.linear_config.get_main_full_att_layer_num()
         persisted_full_att = self.linear_config.get_persisted_full_att_layer_num()
 
-        main_full_att = self.linear_config.get_main_full_att_layer_num()
-        persisted_full_att = self.linear_config.get_persisted_full_att_layer_num()
-
         self.mem_manager = Qwen3NextMemManager(
             size=self.max_total_token_num,
             dtype=self.data_type,

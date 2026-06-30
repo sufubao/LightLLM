@@ -13,7 +13,8 @@ from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
 from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import add_shared_expert_gate_, sigmoid_mul_
+from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
+from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.gdn_prefill_backend import get_gdn_prefill_chunk_fn
 from lightllm.distributed import all_reduce
@@ -47,7 +48,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _init_linear_layer_metadata(self, layer_num, network_config):
-
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
         self.num_k_heads = network_config["linear_num_key_heads"]
@@ -119,18 +119,17 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         input = input.view(-1, self.embed_dim_)
         shared_expert_out = LlamaTransformerLayerInfer._ffn_tp(self, input, infer_state, layer_weight)
-        gate = layer_weight.ffn_gate.mm(input)
-        return shared_expert_out, gate
+        gate = layer_weight.shared_expert_gate.mm(input)
+        sigmoid_mul_(shared_expert_out, gate)
+        return shared_expert_out
 
     def _moe_ffn_tp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-
-        shared_expert_out, gate = self._compute_shared_expert(input, infer_state, layer_weight)
-
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
+        shared_expert_gate = layer_weight.shared_expert_gate.mm(hidden_states)
         layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -139,8 +138,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
-            shared_expert_out=shared_expert_out,
-            shared_expert_gate=gate,
+            shared_expert_gate=shared_expert_gate,
         )
         hidden_states = hidden_states.view(num_tokens, hidden_dim)
         return hidden_states
@@ -174,25 +172,19 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        qkvo_gate_proj = getattr(layer_weight, "qkvo_gate_proj", None)
-        if qkvo_gate_proj is None:
-            qkv_out = layer_weight.qkv_proj.mm(input)
-            o_gate = layer_weight._o_gate_proj.mm(input)
-        else:
-            qkv_gate_out = qkvo_gate_proj.mm(input)
-            qkv_out, o_gate = qkv_gate_out.split(
-                [
-                    self.tp_q_head_num_ * self.head_dim_ * 2
-                    + (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_,
-                    self.tp_q_head_num_ * self.head_dim_,
-                ],
-                dim=-1,
-            )
+        qkv_gate_out = layer_weight.qkvo_gate_proj.mm(input)
+        qkv_out, o_gate = qkv_gate_out.split(
+            [
+                self.tp_q_head_num_ * self.head_dim_ * 2 + (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_,
+                self.tp_q_head_num_ * self.head_dim_,
+            ],
+            dim=-1,
+        )
         q, cache_kv = qkv_out.split(
             [self.tp_q_head_num_ * self.head_dim_ * 2, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_],
             dim=-1,
         )
-        infer_state.gate_value = o_gate
+        infer_state.gate_logics_value = o_gate
         layer_weight.qk_norm_weight_(
             q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
@@ -231,8 +223,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        sigmoid_mul_(input, infer_state.gate_value)
-        infer_state.gate_value = None
+        sigmoid_mul_(input, infer_state.gate_logics_value)
+        infer_state.gate_logics_value = None
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
@@ -466,6 +458,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.bias,
             infer_state.b_conv_buffer_idx,
             self.activation,
+            self.conv_kernel_dim,
             self.tp_num_k_heads,
             self.head_k_dim,
             self.tp_num_v_heads,
@@ -513,9 +506,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
         assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
-        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream (init sets accept_len=1; the
-        # offload/snapshot guards bound it to [1, mtp_step+1]). The old per-layer per-step .all()
-        # D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
+        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
+        # and MTP verify only writes values in [1, mtp_step+1]. The old per-layer per-step
+        # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,

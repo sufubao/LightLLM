@@ -23,12 +23,6 @@ logger = init_logger(__name__)
 REQ_NEXT_TOKEN_IDS_WIDTH = 8
 
 
-def _format_nbytes(nbytes: int) -> str:
-    mib = nbytes / (1024**2)
-    gib = nbytes / (1024**3)
-    return f"{mib:.2f} MiB ({gib:.2f} GiB)"
-
-
 def assert_mtp_step_within_next_token_ids_width(mtp_step: int) -> None:
     assert mtp_step <= REQ_NEXT_TOKEN_IDS_WIDTH - 1, (
         f"mtp_step={mtp_step} exceeds {REQ_NEXT_TOKEN_IDS_WIDTH - 1}; "
@@ -93,10 +87,11 @@ class ReqManager:
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
 
-        # Always resident: infer_batch.copy_linear_att_state_to_cache_buffer reads this
-        # unconditionally in the linear-att cache-copy path (even for mtp_step=0, where
-        # accept_len=1 is the correct non-widened value). MTP overwrites the live slots.
-        self.req_to_accept_len = torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
+        self.req_to_accept_len = (
+            torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
+            if get_env_start_args().mtp_step > 0
+            else None
+        )
 
     def alloc(self):
         return self.req_list.alloc()
@@ -158,7 +153,6 @@ class ReqSamplingParamsManager:
             )
 
     def init_req_sampling_params(self, req: "InferReq"):
-
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
@@ -312,7 +306,6 @@ class ReqManagerForMamba(ReqManager):
         return conv_states, ssm_states
 
     def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
-
         from .linear_att_cache_manager import LinearAttCacheManager
 
         big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers

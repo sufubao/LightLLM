@@ -324,11 +324,31 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            # Select MTP model class based on model type (single source of truth: #10).
-            from lightllm.server.router.model_infer.mode_backend.mtp_model_factory import create_mtp_draft_model
-
             model_type = mtp_model_cfg.get("model_type", "")
-            self.draft_models.append(create_mtp_draft_model(model_type, self.args.mtp_mode, mtp_model_kvargs))
+            if model_type == "deepseek_v3":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+            elif model_type == "qwen3_moe":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
+            elif model_type == "mistral":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
+            elif model_type == "glm4_moe_lite":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
+            elif model_type in ("qwen3_5", "qwen3_5_text"):
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+
+                self.draft_models.append(Qwen3_5MTPModel(mtp_model_kvargs))
+            elif model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
+
+                self.draft_models.append(Qwen3_5MoeMTPModel(mtp_model_kvargs))
+            else:
+                raise ValueError(f"Unsupported MTP model type: {model_type}")
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
@@ -577,7 +597,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -788,7 +807,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

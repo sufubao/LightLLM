@@ -99,7 +99,6 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     mtp_step,
     BLOCK_SIZE: tl.constexpr,
 ):
-
     cur_index = tl.program_id(0)
     req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
     accept_len = tl.load(mtp_accept_len + cur_index)

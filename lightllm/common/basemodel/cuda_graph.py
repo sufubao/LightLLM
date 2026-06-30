@@ -97,25 +97,20 @@ class CudaGraph:
             device=device,
         )
 
-        b_num_accepted_tokens = None
         if self.mtp_step > 0:
             assert batch_size % mtp_size == 0, "MTP decode CUDA graph batch size must be a multiple of mtp_step + 1"
             real_batch_size = batch_size // mtp_size
             b_mtp_index = torch.arange(mtp_size, dtype=torch.int32, device=device).repeat(real_batch_size)
             b_seq_len = torch.arange(2, mtp_size + 2, dtype=torch.int32, device=device).repeat(real_batch_size)
-            # b_num_accepted_tokens 不再随 model_input 传入：GDN 的 init_mtp_verify_extra_state 会按
-            # req_first(全 HOLD，槽恒为 1) gather，warmup/capture 自然得到全 1，等价旧的 torch.ones。
-            total_token_num = real_batch_size * (mtp_size * (mtp_size + 3) // 2)
         else:
             seq_len = 2
-            total_token_num = batch_size * seq_len
             b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
             b_seq_len = torch.empty(batch_size, dtype=torch.int32, device=device)
             b_seq_len.fill_(seq_len)
 
         return ModelInput(
             batch_size=batch_size,
-            total_token_num=total_token_num,
+            total_token_num=self.graph_max_len_in_batch * batch_size, 
             max_q_seq_len=1,
             max_kv_seq_len=self.graph_max_len_in_batch,
             input_ids=input_ids,
@@ -123,7 +118,6 @@ class CudaGraph:
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
             b_mtp_index=b_mtp_index,
-            b_num_accepted_tokens=b_num_accepted_tokens,
             is_prefill=False,
             multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
             **model._gen_special_model_input(batch_size),
@@ -259,11 +253,7 @@ class CudaGraph:
         model: TpPartBaseModel = model
 
         # decode cuda graph init
-        progress_bar = tqdm(self.cuda_graph_batch_sizes[::-1], desc="Capturing CUDA graphs")
-        for batch_size in progress_bar:
-            avail_mem, _ = torch.cuda.mem_get_info()
-            avail_mem_gb = avail_mem / (1024 ** 3)
-            progress_bar.set_description(f"Capturing CUDA graphs - Batch: {batch_size}, AvailMem: {avail_mem_gb:.2f}GB")
+        for batch_size in self.cuda_graph_batch_sizes[::-1]:
             model_input = self._build_warmup_decode_model_input(model, batch_size)
             model_output: ModelOutput = model.forward(model_input)
             del model_output

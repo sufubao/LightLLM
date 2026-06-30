@@ -1,7 +1,7 @@
 import torch
 import dataclasses
 import triton
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
@@ -140,5 +140,5 @@ class LinearAttCacheConfig:
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=llm_config["full_attention_interval"],
             all_layer_num=n_layer,
-            draft_full_att_layer_num=get_mtp_draft_full_att_layer_num(args),
+            draft_full_att_layer_num=get_added_mtp_kv_layer_num(),
         )

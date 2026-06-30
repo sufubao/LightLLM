@@ -23,6 +23,7 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
+    auto_set_fused_shared_experts,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -76,6 +77,7 @@ def normal_or_p_d_start(args):
     args: StartArgs = args
 
     auto_set_max_req_total_len(args)
+    auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -208,10 +210,11 @@ def normal_or_p_d_start(args):
                 f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
 
-    # mtp params check
+    # MTP decode uses an expanded per-request layout and is not compatible with TPSP mix mode.
     if args.mtp_mode is not None:
         assert args.mtp_draft_model_dir is not None
         assert args.mtp_step > 0
+        assert not args.enable_tpsp_mix_mode, "MTP does not support --enable_tpsp_mix_mode"
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0

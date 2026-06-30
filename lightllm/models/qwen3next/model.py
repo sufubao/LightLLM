@@ -12,7 +12,7 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 )
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
@@ -28,7 +28,6 @@ logger = init_logger(__name__)
 
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
-
     # weight class
     pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
@@ -83,11 +82,10 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-    def _init_mem_manager(self):
-        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
+    def _init_linear_config(self):
         start_args: StartArgs = get_env_start_args()
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        draft_full_att_layers = get_mtp_draft_full_att_layer_num(start_args)
+        draft_full_att_layers = get_added_mtp_kv_layer_num()
         self.linear_config = LinearAttCacheConfig(
             tp_world_size=self.tp_world_size_,
             full_att_all_num_kv_heads=self.config["num_key_value_heads"],
@@ -109,6 +107,12 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             all_layer_num=self.config["n_layer"],
             draft_full_att_layer_num=draft_full_att_layers,
         )
+        return
+
+    def _init_mem_manager(self):
+        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
+        main_full_att = self.linear_config.get_main_full_att_layer_num()
+        persisted_full_att = self.linear_config.get_persisted_full_att_layer_num()
 
         main_full_att = self.linear_config.get_main_full_att_layer_num()
         persisted_full_att = self.linear_config.get_persisted_full_att_layer_num()
@@ -123,8 +127,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             mem_fraction=self.mem_fraction,
         )
         self.mem_manager.main_full_att_layer_num = main_full_att
-        self.mem_manager.draft_full_att_layers = draft_full_att_layers
-        self.mem_manager.persisted_full_att_layer_num = persisted_full_att
+        self.mem_manager.draft_full_att_layers = self.linear_config.draft_full_att_layer_num
 
     def _init_req_manager(self):
         create_max_seq_len = 0
@@ -134,8 +137,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
+        self._init_linear_config()
         self.req_manager = ReqManagerForMamba(
-            self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
+            self.max_req_num, create_max_seq_len, None, linear_config=self.linear_config
         )
         return
 

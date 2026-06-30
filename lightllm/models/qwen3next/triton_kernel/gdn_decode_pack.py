@@ -4,125 +4,6 @@ import triton.language as tl
 
 
 @triton.jit
-def _pack_gdn_decode_kernel(
-    mixed_qkv,
-    z_raw,
-    a_raw,
-    b_raw,
-    q_out,
-    k_out,
-    v_out,
-    z_out,
-    a_out,
-    b_out,
-    stride_m_b: tl.constexpr,
-    stride_m_d: tl.constexpr,
-    stride_z_b: tl.constexpr,
-    stride_z_h: tl.constexpr,
-    stride_z_d: tl.constexpr,
-    stride_a_b: tl.constexpr,
-    stride_a_d: tl.constexpr,
-    stride_b_b: tl.constexpr,
-    stride_b_d: tl.constexpr,
-    q_dim: tl.constexpr,
-    k_dim: tl.constexpr,
-    v_dim: tl.constexpr,
-    gate_dim: tl.constexpr,
-    BLOCK_QKV: tl.constexpr,
-    BLOCK_GATE: tl.constexpr,
-):
-    row = tl.program_id(0)
-    qkv_offsets = tl.arange(0, BLOCK_QKV)
-
-    q_mask = qkv_offsets < q_dim
-    q_vals = tl.load(mixed_qkv + row * stride_m_b + qkv_offsets * stride_m_d, mask=q_mask, other=0.0)
-    tl.store(q_out + row * q_dim + qkv_offsets, q_vals, mask=q_mask)
-
-    k_mask = qkv_offsets < k_dim
-    k_vals = tl.load(
-        mixed_qkv + row * stride_m_b + (q_dim + qkv_offsets) * stride_m_d,
-        mask=k_mask,
-        other=0.0,
-    )
-    tl.store(k_out + row * k_dim + qkv_offsets, k_vals, mask=k_mask)
-
-    v_mask = qkv_offsets < v_dim
-    v_vals = tl.load(
-        mixed_qkv + row * stride_m_b + (q_dim + k_dim + qkv_offsets) * stride_m_d,
-        mask=v_mask,
-        other=0.0,
-    )
-    tl.store(v_out + row * v_dim + qkv_offsets, v_vals, mask=v_mask)
-
-    z_vals = tl.load(z_raw + row * stride_z_b + qkv_offsets, mask=v_mask, other=0.0)
-    tl.store(z_out + row * v_dim + qkv_offsets, z_vals, mask=v_mask)
-
-    gate_offsets = tl.arange(0, BLOCK_GATE)
-    gate_mask = gate_offsets < gate_dim
-    a_vals = tl.load(a_raw + row * stride_a_b + gate_offsets * stride_a_d, mask=gate_mask, other=0.0)
-    b_vals = tl.load(b_raw + row * stride_b_b + gate_offsets * stride_b_d, mask=gate_mask, other=0.0)
-    tl.store(a_out + row * gate_dim + gate_offsets, a_vals, mask=gate_mask)
-    tl.store(b_out + row * gate_dim + gate_offsets, b_vals, mask=gate_mask)
-
-
-@torch.no_grad()
-def pack_gdn_decode_inputs(
-    mixed_qkv: torch.Tensor,
-    z_raw: torch.Tensor,
-    a_raw: torch.Tensor,
-    b_raw: torch.Tensor,
-    num_k_heads: int,
-    head_k_dim: int,
-    num_v_heads: int,
-    head_v_dim: int,
-):
-    batch = mixed_qkv.shape[0]
-    q_dim = num_k_heads * head_k_dim
-    k_dim = q_dim
-    v_dim = num_v_heads * head_v_dim
-    gate_dim = num_v_heads
-
-    q = torch.empty((batch, 1, num_k_heads, head_k_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-    k = torch.empty_like(q)
-    v = torch.empty((batch, 1, num_v_heads, head_v_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-    z = torch.empty((batch, num_v_heads, head_v_dim), dtype=z_raw.dtype, device=z_raw.device)
-    a = torch.empty((batch, gate_dim), dtype=a_raw.dtype, device=a_raw.device)
-    b = torch.empty((batch, gate_dim), dtype=b_raw.dtype, device=b_raw.device)
-
-    block_qkv = triton.next_power_of_2(max(q_dim, k_dim, v_dim))
-    block_gate = triton.next_power_of_2(gate_dim)
-    _pack_gdn_decode_kernel[(batch,)](
-        mixed_qkv,
-        z_raw,
-        a_raw,
-        b_raw,
-        q,
-        k,
-        v,
-        z,
-        a,
-        b,
-        mixed_qkv.stride(0),
-        mixed_qkv.stride(1),
-        z_raw.stride(0),
-        z_raw.stride(1),
-        z_raw.stride(2),
-        a_raw.stride(0),
-        a_raw.stride(1),
-        b_raw.stride(0),
-        b_raw.stride(1),
-        q_dim,
-        k_dim,
-        v_dim,
-        gate_dim,
-        BLOCK_QKV=block_qkv,
-        BLOCK_GATE=block_gate,
-        num_warps=4,
-    )
-    return q, k, v, z, a, b
-
-
-@triton.jit
 def _conv_pack_gdn_decode_kernel(
     mixed_qkv,
     z_raw,
@@ -157,6 +38,7 @@ def _conv_pack_gdn_decode_kernel(
     v_dim: tl.constexpr,
     gate_dim: tl.constexpr,
     conv_dim: tl.constexpr,
+    KERNEL_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     APPLY_SILU: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -168,29 +50,29 @@ def _conv_pack_gdn_decode_kernel(
     state_idx = tl.load(conv_state_indices + row)
 
     x = tl.load(mixed_qkv + row * stride_m_b + offs * stride_m_d, mask=mask, other=0.0).to(tl.float32)
-    s0 = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + 0 * stride_s_w, mask=mask, other=0.0).to(
-        tl.float32
-    )
-    s1 = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + 1 * stride_s_w, mask=mask, other=0.0).to(
-        tl.float32
-    )
-    s2 = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + 2 * stride_s_w, mask=mask, other=0.0).to(
-        tl.float32
-    )
-    w0 = tl.load(conv_weight + offs * stride_w_d + 0 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    w1 = tl.load(conv_weight + offs * stride_w_d + 1 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    w2 = tl.load(conv_weight + offs * stride_w_d + 2 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    w3 = tl.load(conv_weight + offs * stride_w_d + 3 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    y = s0 * w0 + s1 * w1 + s2 * w2 + x * w3
+    # KERNEL_SIZE is a constexpr, so Triton fully unrolls these loops for each conv size.
+    y = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+    for i in tl.static_range(0, KERNEL_SIZE - 1):
+        s = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + i * stride_s_w, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        w = tl.load(conv_weight + offs * stride_w_d + i * stride_w_w, mask=mask, other=0.0).to(tl.float32)
+        y += s * w
+
+    w = tl.load(conv_weight + offs * stride_w_d + (KERNEL_SIZE - 1) * stride_w_w, mask=mask, other=0.0).to(tl.float32)
+    y += x * w
     if HAS_BIAS:
         bias = tl.load(conv_bias + offs, mask=mask, other=0.0).to(tl.float32)
         y += bias
     if APPLY_SILU:
         y = y * tl.sigmoid(y)
 
-    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + 0 * stride_s_w, s1, mask=mask)
-    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + 1 * stride_s_w, s2, mask=mask)
-    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + 2 * stride_s_w, x, mask=mask)
+    for i in tl.static_range(0, KERNEL_SIZE - 2):
+        next_s = tl.load(
+            conv_state + state_idx * stride_s_b + offs * stride_s_d + (i + 1) * stride_s_w, mask=mask, other=0.0
+        )
+        tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + i * stride_s_w, next_s, mask=mask)
+    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + (KERNEL_SIZE - 2) * stride_s_w, x, mask=mask)
 
     q_mask = offs < q_dim
     k_mask = (offs >= q_dim) & (offs < q_dim + k_dim)
@@ -221,6 +103,7 @@ def conv_pack_gdn_decode_inputs(
     conv_bias: torch.Tensor,
     conv_state_indices: torch.Tensor,
     activation: str,
+    conv_size: int,
     num_k_heads: int,
     head_k_dim: int,
     num_v_heads: int,
@@ -232,6 +115,15 @@ def conv_pack_gdn_decode_inputs(
     v_dim = num_v_heads * head_v_dim
     gate_dim = num_v_heads
     conv_dim = q_dim + k_dim + v_dim
+
+    assert conv_size >= 2, f"conv kernel size must be at least 2, got {conv_size}"
+    assert mixed_qkv.shape[1] == conv_dim, f"mixed_qkv shape mismatch: {mixed_qkv.shape[1]} != {conv_dim}"
+    assert conv_weight.shape[0] == conv_dim, f"conv_weight shape mismatch: {conv_weight.shape[0]} != {conv_dim}"
+    assert conv_weight.shape[1] == conv_size, f"conv_weight kernel mismatch: {conv_weight.shape[1]} != {conv_size}"
+    assert conv_state.shape[1] == conv_dim, f"conv_state shape mismatch: {conv_state.shape[1]} != {conv_dim}"
+    assert (
+        conv_state.shape[2] >= conv_size - 1
+    ), f"conv_state width must be at least conv_size - 1, got {conv_state.shape[2]} and {conv_size}"
 
     q = torch.empty((batch, 1, num_k_heads, head_k_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
     k = torch.empty_like(q)
@@ -276,6 +168,7 @@ def conv_pack_gdn_decode_inputs(
         v_dim,
         gate_dim,
         conv_dim,
+        conv_size,
         HAS_BIAS=conv_bias is not None,
         APPLY_SILU=activation in ["silu", "swish"],
         BLOCK_SIZE=block_size,

@@ -375,10 +375,10 @@ class TpPartBaseModel:
         return infer_state
 
     def _get_decode_padding_unit(self, model_input: ModelInput) -> int:
-        padding_unit = self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1
         if (not model_input.is_prefill) and self.args.mtp_step > 0:
-            padding_unit = math.lcm(padding_unit, self.args.mtp_step + 1)
-        return padding_unit
+            assert not self.args.enable_tpsp_mix_mode, "MTP does not support --enable_tpsp_mix_mode"
+            return self.args.mtp_step + 1
+        return self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1
 
     def _get_decode_infer_batch_size(self, model_input: ModelInput) -> int:
         padding_unit = self._get_decode_padding_unit(model_input)

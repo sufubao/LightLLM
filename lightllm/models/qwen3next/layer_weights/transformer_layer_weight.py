@@ -10,84 +10,9 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     TpParameterWeight,
     QKVROWNMMWeight,
     QKGEMMANormWeight,
+    FusedMoeWeight,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightTpl
-from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import get_row_slice_mixin
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
-
-
-class QKVGatedROWNMMWeight(MMWeightTpl):
-    def __init__(
-        self,
-        in_dim,
-        q_head_num,
-        kv_head_num,
-        head_dim,
-        weight_names,
-        data_type,
-        bias_names=None,
-        quant_method=None,
-        tp_rank=None,
-        tp_world_size=None,
-    ):
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
-        self.q_repeat_times = 1
-        self.kv_repeat_times = 1
-        assert (
-            q_head_num % self.tp_world_size_ == 0
-        ), f"q_head_num must be divisible by tp_world_size_, found {q_head_num} % {self.tp_world_size_}"
-        assert kv_head_num % self.tp_world_size_ == 0 or self.tp_world_size_ % kv_head_num == 0, (
-            f"kv_head_num must be divisible by tp_world_size_ or vice versa, "
-            f"found {kv_head_num} % {self.tp_world_size_}"
-        )
-        q_hidden_size = (q_head_num // self.tp_world_size_) * head_dim
-        kv_hidden_size = self._get_tp_padded_head_num(kv_head_num) * head_dim
-        super().__init__(
-            in_dim=in_dim,
-            out_dims=[q_hidden_size, kv_hidden_size, kv_hidden_size, q_hidden_size],
-            weight_names=weight_names,
-            bias_names=bias_names,
-            data_type=data_type,
-            quant_method=quant_method,
-            tp_rank=self.tp_rank_,
-            tp_world_size=self.tp_world_size_,
-        )
-        self.q_param_slicer = get_row_slice_mixin(
-            self.quant_method.method_name,
-            tp_rank=self.tp_rank_,
-            tp_world_size=self.tp_world_size_,
-            repeat_times=self.q_repeat_times,
-        )
-        self.kv_param_slicer = get_row_slice_mixin(
-            self.quant_method.method_name,
-            tp_rank=self.tp_rank_,
-            tp_world_size=self.tp_world_size_,
-            repeat_times=self.kv_repeat_times,
-        )
-
-    def _get_param_slicer(self, sub_child_index):
-        if sub_child_index == 0 or sub_child_index == 3:
-            return self.q_param_slicer
-        return self.kv_param_slicer
-
-    def load_hf_weights(self, weights):
-        super().load_hf_weights(weights)
-        if self.bias_names is not None:
-            for sub_child_index, bias_name in enumerate(self.bias_names):
-                if bias_name is None:
-                    self.bias_list[sub_child_index].zero_()
-                    self.bias_list[sub_child_index].load_ok = True
-
-    def _get_tp_padded_head_num(self, head_num):
-        if head_num % self.tp_world_size_ == 0:
-            return head_num // self.tp_world_size_
-        if self.tp_world_size_ % head_num == 0:
-            self.kv_repeat_times = self.tp_world_size_ // head_num
-            return self.kv_repeat_times * head_num // self.tp_world_size_
-        raise ValueError(
-            f"head_num must be divisible by tp_world_size_ or vice versa, found {head_num} % {self.tp_world_size_}"
-        )
+from lightllm.models.qwen3next.layer_weights.qkv_gated_rowmm_weight import QKVGatedROWNMMWeight
 
 
 class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
@@ -97,42 +22,23 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
+    def _moe_layer_prefix(self):
+        return f"model.layers.{self.layer_num_}.mlp"
+
     def _init_qkv(self):
         in_dim = self.n_embed
-        q_out_dim = self.q_head_num_ * self.head_dim
         self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
         qkv_quant = self.get_quant_method("qkv_proj")
-        gate_quant = self.get_quant_method("o_gate_proj")
-        if qkv_quant.method_name == "none" and gate_quant.method_name == "none":
-            self.qkvo_gate_proj = QKVGatedROWNMMWeight(
-                in_dim=in_dim,
-                q_head_num=self.q_head_num_,
-                kv_head_num=self.k_head_num_,
-                head_dim=self.head_dim,
-                weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name, self._o_gate_weight_name],
-                data_type=self.data_type_,
-                bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name, None],
-                quant_method=qkv_quant,
-            )
-        else:
-            self.qkv_proj = QKVROWNMMWeight(
-                in_dim=in_dim,
-                q_head_num=self.q_head_num_,
-                kv_head_num=self.k_head_num_,
-                head_dim=self.head_dim,
-                weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
-                data_type=self.data_type_,
-                bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
-                quant_method=qkv_quant,
-            )
-            self._o_gate_proj = ROWMMWeight(
-                in_dim=in_dim,
-                out_dims=[q_out_dim],
-                weight_names=[self._o_gate_weight_name],
-                data_type=self.data_type_,
-                bias_names=None,
-                quant_method=gate_quant,
-            )
+        self.qkvo_gate_proj = QKVGatedROWNMMWeight(
+            in_dim=in_dim,
+            q_head_num=self.q_head_num_,
+            kv_head_num=self.k_head_num_,
+            head_dim=self.head_dim,
+            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name, self._o_gate_weight_name],
+            data_type=self.data_type_,
+            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name, None],
+            quant_method=qkv_quant,
+        )
 
     def _init_weight(self):
         if self.is_linear_attention_layer:
@@ -148,8 +54,49 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         self._init_norm()
 
     def _init_moe(self):
-        super()._init_moe()
-        self._init_gated_ffn()
+        moe_intermediate_size = self.network_config_["moe_intermediate_size"]
+        hidden_size = self.network_config_["hidden_size"]
+        prefix = self._moe_layer_prefix()
+        self.moe_gate = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[self.n_routed_experts],
+            weight_names=f"{prefix}.gate.weight",
+            data_type=self.data_type_,
+            quant_method=None,
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        enable_ep_moe = get_env_start_args().enable_ep_moe
+        # Fused shared expert is only supported in TP mode. EP keeps the shared
+        # expert as a separate FFN and adds its output after routed MoE.
+        self.num_fused_shared_experts = 0 if enable_ep_moe else 1
+        self.shared_expert_gate = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[1],
+            weight_names=f"{prefix}.shared_expert_gate.weight",
+            data_type=self.data_type_,
+            bias_names=None,
+            quant_method=None,
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.experts = FusedMoeWeight(
+            gate_proj_name="gate_proj",
+            down_proj_name="down_proj",
+            up_proj_name="up_proj",
+            e_score_correction_bias_name="",
+            weight_prefix=f"{prefix}.experts",
+            n_routed_experts=self.n_routed_experts,
+            hidden_size=hidden_size,
+            moe_intermediate_size=moe_intermediate_size,
+            data_type=self.data_type_,
+            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            layer_num=self.layer_num_,
+            network_config=self.network_config_,
+        )
+        if enable_ep_moe:
+            self._init_moe_shared_expert_ffn()
         return
 
     def _init_norm(self):
@@ -172,54 +119,28 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
                 data_type=self.data_type_,
             )
 
-    def _init_gated_ffn(self):
+    def _init_moe_shared_expert_ffn(self):
         hidden_size = self.network_config_["hidden_size"]
         if "shared_expert_intermediate_size" not in self.network_config_:
             return
-        prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
-        inter_size = self.network_config_["shared_expert_intermediate_size"]
-        if get_env_start_args().enable_ep_moe:
-            self.gate_up_proj = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[inter_size, inter_size],
-                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("gate_up_proj"),
-                tp_rank=0,
-                tp_world_size=1,
-            )
-            self.down_proj = COLMMWeight(
-                in_dim=inter_size,
-                out_dims=[hidden_size],
-                weight_names=f"{prefix}.down_proj.weight",
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("down_proj"),
-                tp_rank=0,
-                tp_world_size=1,
-            )
-        else:
-            self.gate_up_proj = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[inter_size, inter_size],
-                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("gate_up_proj"),
-            )
-            self.down_proj = COLMMWeight(
-                in_dim=inter_size,
-                out_dims=[hidden_size],
-                weight_names=f"{prefix}.down_proj.weight",
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("down_proj"),
-            )
 
-        self.ffn_gate = ROWMMWeight(
+        prefix = f"{self._moe_layer_prefix()}.shared_expert"
+        inter_size = self.network_config_["shared_expert_intermediate_size"]
+        self.gate_up_proj = ROWMMWeight(
             in_dim=hidden_size,
-            out_dims=[1],
-            weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
+            out_dims=[inter_size, inter_size],
+            weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
             data_type=self.data_type_,
-            bias_names=None,
-            quant_method=None,
+            quant_method=self.get_quant_method("gate_up_proj"),
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.down_proj = COLMMWeight(
+            in_dim=inter_size,
+            out_dims=[hidden_size],
+            weight_names=f"{prefix}.down_proj.weight",
+            data_type=self.data_type_,
+            quant_method=self.get_quant_method("down_proj"),
             tp_rank=0,
             tp_world_size=1,
         )
@@ -233,6 +154,30 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             _gate_proj = weight[1::2].reshape(-1, weight.shape[-1])
             weights[self._q_weight_name] = _q_proj
             weights[self._o_gate_weight_name] = _gate_proj
+
+    def _rename_shared_expert_to_moe_expert(self, weights):
+        if self.num_fused_shared_experts != 1:
+            return
+        assert not get_env_start_args().enable_ep_moe, "fused shared expert is only supported in TP mode"
+        assert self.num_fused_shared_experts == 1, "only one fused shared expert is supported"
+
+        # When the shared expert is fused into MoE, load it as the last routed expert.
+        # The fused MoE kernel then treats expert id n_routed_experts as this shared expert.
+        prefix = self._moe_layer_prefix()
+        old_prefix = f"{prefix}.shared_expert"
+        new_prefix = f"{prefix}.experts.{self.n_routed_experts}"
+        suffixes = [
+            self.experts.quant_method.weight_suffix,
+            self.experts.quant_method.weight_scale_suffix,
+            self.experts.quant_method.weight_zero_point_suffix,
+        ]
+        for proj_name in ("gate_proj", "up_proj", "down_proj"):
+            for suffix in suffixes:
+                if suffix is None:
+                    continue
+                old_name = f"{old_prefix}.{proj_name}.{suffix}"
+                if old_name in weights:
+                    weights[f"{new_prefix}.{proj_name}.{suffix}"] = weights[old_name]
 
     def _parse_config(self):
         super()._parse_config()
@@ -379,6 +324,8 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def load_hf_weights(self, weights):
         self._split_q_with_gate(weights)
+        if self.is_moe:
+            self._rename_shared_expert_to_moe_expert(weights)
         if self.is_linear_attention_layer:
             self._preprocess_weight(weights)
         super().load_hf_weights(weights)

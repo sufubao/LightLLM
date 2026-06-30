@@ -14,16 +14,13 @@ def _copy_linear_att_state_to_kv_buffer(
     num_accepted_tokens_ptr,  # [batch_size,]
     gpu_conv_stride_l,
     gpu_conv_stride_s,
-    gpu_conv_stride_d,
     gpu_ssm_stride_l,
     gpu_ssm_stride_s,
-    gpu_ssm_stride_d,
     cpu_kv_conv_stride_s,
     cpu_kv_conv_stride_l,
     cpu_kv_conv_stride_d,
     cpu_kv_ssm_stride_s,
     cpu_kv_ssm_stride_l,
-    cpu_kv_ssm_stride_d,
     mtp_step,
     conv_dim,  # number of conv rows (the d dimension)
     gpu_conv_row_bytes,  # widened per-row byte length: gpu_widened_width * itemsize
@@ -43,12 +40,9 @@ def _copy_linear_att_state_to_kv_buffer(
         return
 
     cur_req_idx = tl.load(b_req_idx + cur_batch).to(tl.int64)
-    accept_len = tl.load(num_accepted_tokens_ptr + cur_batch).to(tl.int64)
-    canonical_off = accept_len - 1
 
     conv_src_slot = cur_req_idx
-    conv_off_bytes = canonical_off * gpu_conv_stride_d
-    gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + conv_src_slot * gpu_conv_stride_s + conv_off_bytes
+    gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + conv_src_slot * gpu_conv_stride_s
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
     for d in range(conv_dim):
         for i in range(tl.cdiv(conv_narrow_row_bytes, BLOCK)):
@@ -57,7 +51,7 @@ def _copy_linear_att_state_to_kv_buffer(
             conv_data = tl.load(gpu_conv_base + d * gpu_conv_row_bytes + off, mask=mask)
             tl.store(cpu_conv_base + d * cpu_kv_conv_stride_d + off, conv_data, mask=mask)
 
-    ssm_src_slot = (cur_req_idx * (mtp_step + 1) + canonical_off).to(tl.int64)
+    ssm_src_slot = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
     for i in range(tl.cdiv(gpu_ssm_tail_dim, BLOCK)):
         gpu_start_off = i * BLOCK + tl.arange(0, BLOCK)
         mask = gpu_start_off < gpu_ssm_tail_dim
@@ -89,19 +83,11 @@ def copy_linear_att_state_to_kv_buffer(
 
     assert gpu_conv_state.dim() >= 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
     assert cpu_kv_conv_state.dim() >= 4, "cpu_kv_conv_state must be [size, layer, conv_dim, width_narrow]"
-    # #6: the byte snapshot hardcodes gpu_conv_stride_d=conv_itemsize, which is only valid when the
-    # widened-width axis is element-contiguous (stride 1). Fail fast instead of snapshotting wrong bytes.
+    # The byte snapshot flattens the conv row tail, so the widened-width axis must be contiguous.
     assert gpu_conv_state.stride(3) == 1, (
         "gpu_conv_state widened-width axis must be element-contiguous (stride 1); "
-        "gpu_conv_stride_d=conv_itemsize assumes it"
+        "linear attention state snapshot assumes it"
     )
-    # #18: canonical_off = accept_len - 1 indexes into the widened slot; bound it to [0, mtp_step]
-    # (accept_len in [1, mtp_step+1]) so a stale/oversized accept-count can't slice past the slot.
-    assert int(b_num_accepted_tokens.min()) >= 1 and int(b_num_accepted_tokens.max()) <= mtp_step + 1, (
-        f"b_num_accepted_tokens out of range [1, {mtp_step + 1}]: "
-        f"min={int(b_num_accepted_tokens.min())} max={int(b_num_accepted_tokens.max())}"
-    )
-    conv_itemsize = gpu_conv_state.element_size()
     gpu_conv_state = gpu_conv_state.view(
         gpu_conv_state.shape[0], gpu_conv_state.shape[1], gpu_conv_state.shape[2], -1
     ).view(dtype=torch.uint8)
@@ -137,16 +123,13 @@ def copy_linear_att_state_to_kv_buffer(
         num_accepted_tokens_ptr=b_num_accepted_tokens,
         gpu_conv_stride_l=gpu_conv_state.stride(0),
         gpu_conv_stride_s=gpu_conv_state.stride(1),
-        gpu_conv_stride_d=conv_itemsize,
         gpu_ssm_stride_l=gpu_ssm_state.stride(0),
         gpu_ssm_stride_s=gpu_ssm_state.stride(1),
-        gpu_ssm_stride_d=gpu_ssm_state.stride(2),
         cpu_kv_conv_stride_s=cpu_kv_conv_state.stride(0),
         cpu_kv_conv_stride_l=cpu_kv_conv_state.stride(1),
         cpu_kv_conv_stride_d=cpu_kv_conv_state.stride(2),
         cpu_kv_ssm_stride_s=cpu_kv_ssm_state.stride(0),
         cpu_kv_ssm_stride_l=cpu_kv_ssm_state.stride(1),
-        cpu_kv_ssm_stride_d=cpu_kv_ssm_state.stride(2),
         mtp_step=mtp_step,
         conv_dim=conv_dim,
         gpu_conv_row_bytes=gpu_conv_row_bytes,

@@ -306,7 +306,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -327,7 +326,6 @@ class InferenceContext:
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
-
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:
@@ -419,19 +417,10 @@ class InferenceContext:
                         self.radix_cache.linear_att_small_page_buffers.alloc_one_state_cache()
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
-                        # 冷路径(prefill 跨小页边界)：单标量从 GPU buffer 读回做 Python 切片下标。
-                        accept_len = int(self.req_manager.req_to_accept_len[req.req_idx].item())
-                        assert 1 <= accept_len <= self.args.mtp_step + 1, (
-                            f"mtp_accept_len={accept_len} out of range "
-                            f"[1, {self.args.mtp_step + 1}]; would slice past the widened conv slot"
-                        )
-                        canonical_off = accept_len - 1
                         conv_src_idx = req.req_idx
-                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1) + canonical_off
+                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1)
                         narrow_w = self.req_manager.linear_config.get_persisted_conv_state_shape()[-1]
-                        gpu_conv_state = self.req_manager.req_to_conv_state.buffer[
-                            :, conv_src_idx, ..., canonical_off : canonical_off + narrow_w
-                        ]
+                        gpu_conv_state = self.req_manager.req_to_conv_state.buffer[:, conv_src_idx, ..., :narrow_w]
                         gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, ssm_src_idx, ...]
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id
 

@@ -90,18 +90,15 @@ class CudaGraph:
             real_batch_size = batch_size // mtp_size
             b_mtp_index = torch.arange(mtp_size, dtype=torch.int32, device=device).repeat(real_batch_size)
             b_seq_len = torch.arange(2, mtp_size + 2, dtype=torch.int32, device=device).repeat(real_batch_size)
-            # GDN verify gathers accept lengths from req_to_accept_len. Warmup uses HOLD, whose slot stays 1.
-            total_token_num = real_batch_size * (mtp_size * (mtp_size + 3) // 2)
         else:
             seq_len = 2
-            total_token_num = batch_size * seq_len
             b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
             b_seq_len = torch.empty(batch_size, dtype=torch.int32, device=device)
             b_seq_len.fill_(seq_len)
 
         return ModelInput(
             batch_size=batch_size,
-            total_token_num=total_token_num,
+            total_token_num=self.graph_max_len_in_batch * batch_size, 
             max_q_seq_len=1,
             max_kv_seq_len=self.graph_max_len_in_batch,
             input_ids=input_ids,

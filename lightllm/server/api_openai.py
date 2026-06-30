@@ -314,7 +314,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
-        "return_logprobs": request.logprobs is not None,
+        "return_logprobs": request.logprobs is True,
         "seed": request.seed,
     }
 

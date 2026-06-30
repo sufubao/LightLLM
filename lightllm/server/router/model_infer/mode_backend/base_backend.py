@@ -9,6 +9,10 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
+from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
+from lightllm.models.mistral_mtp.model import MistralMTPModel
+from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel

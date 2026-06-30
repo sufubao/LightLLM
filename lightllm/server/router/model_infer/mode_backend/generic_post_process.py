@@ -171,16 +171,15 @@ def _try_flashinfer_sample_without_penalty(logits: torch.Tensor, reqs: List[Infe
         if shm_param.top_k != top_k:
             return None
 
-    if temperature != 1.0:
-        logits.div_(temperature)
+    sample_logits = logits / temperature if temperature != 1.0 else logits
 
     if top_k == vocab_size and top_p != 1.0:
-        top_p_tensor = _get_uniform_tensor(top_p, logits.shape[0], torch.float32, logits.device)
-        return _flashinfer_top_p_sample_from_logits(logits, top_p_tensor)
+        top_p_tensor = _get_uniform_tensor(top_p, sample_logits.shape[0], torch.float32, sample_logits.device)
+        return _flashinfer_top_p_sample_from_logits(sample_logits, top_p_tensor)
 
-    top_p_tensor = _get_uniform_tensor(top_p, logits.shape[0], torch.float32, logits.device)
-    top_k_tensor = _get_uniform_tensor(top_k, logits.shape[0], torch.int32, logits.device)
-    return _flashinfer_top_p_top_k_sample_from_logits(logits, top_p_tensor, top_k_tensor)
+    top_p_tensor = _get_uniform_tensor(top_p, sample_logits.shape[0], torch.float32, sample_logits.device)
+    top_k_tensor = _get_uniform_tensor(top_k, sample_logits.shape[0], torch.int32, sample_logits.device)
+    return _flashinfer_top_p_top_k_sample_from_logits(sample_logits, top_p_tensor, top_k_tensor)
 
 
 def _is_flashinfer_sampling() -> bool:

@@ -213,10 +213,11 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         device = self.infer_state.input_ids.device
         model = self.backend.model
         self.kv_last_page_len_buffer = torch.full((self.infer_state.batch_size,), 1, dtype=torch.int32, device=device)
-        if (
+        use_decode_graph_buffer = (
             self.infer_state.batch_size <= model.graph_max_batch_size
             and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
-        ):
+        )
+        if use_decode_graph_buffer:
             self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][
                 : self.infer_state.batch_size * self.backend.max_seq_length
             ]
@@ -239,9 +240,12 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len.int()
         if self.infer_state.b_seq_len_cpu is not None:
             self.kv_seq_lens_host = self.infer_state.b_seq_len_cpu
-            self.kv_starts_host = self.backend.kv_starts_host_buffer[self.infer_state.microbatch_index][
-                : self.infer_state.batch_size + 1
-            ]
+            if use_decode_graph_buffer:
+                self.kv_starts_host = self.backend.kv_starts_host_buffer[self.infer_state.microbatch_index][
+                    : self.infer_state.batch_size + 1
+                ]
+            else:
+                self.kv_starts_host = torch.empty((self.infer_state.batch_size + 1,), dtype=torch.int32, device="cpu")
             self.kv_starts_host[0] = 0
             torch.cumsum(self.infer_state.b_seq_len_cpu, dim=0, out=self.kv_starts_host[1:])
         if self.infer_state.skip_decode_att_wrapper_init:

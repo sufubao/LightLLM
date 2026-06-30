@@ -146,7 +146,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_edp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-        shared_expert_out, gate = self._compute_shared_expert(input, infer_state, layer_weight)
+        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -161,7 +161,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             is_prefill=infer_state.is_prefill,
         )
         ep_output = ep_output.view(token_num, hidden_dim)
-        add_shared_expert_gate_(ep_output, shared_expert_out, gate)
+        ep_output.add_(shared_expert_out)
         return ep_output
 
     def _get_qkv(

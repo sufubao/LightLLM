@@ -148,7 +148,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_ids=topk_ids,
             router_logits=router_logits,
             is_prefill=is_prefill,
-            shared_expert_out=shared_expert_out,
             shared_expert_gate=shared_expert_gate,
         )
         return output

@@ -19,6 +19,15 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _format_nbytes(nbytes: int) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    value = float(nbytes)
+    for unit in units:
+        if abs(value) < 1024.0 or unit == units[-1]:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+
+
 # Width of req_to_next_token_ids: holds the seed token + up to (WIDTH - 1) MTP draft tokens.
 REQ_NEXT_TOKEN_IDS_WIDTH = 8
 

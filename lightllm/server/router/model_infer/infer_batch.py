@@ -387,11 +387,14 @@ class InferenceContext:
 
             from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
-            # accept 数量改由 GPU 常驻的 req_to_accept_len 按 req_idx gather（不再读 req.mtp_accept_len）。
+            # MTP 模式从 GPU 常驻 req_to_accept_len gather；非 MTP 没有该表，accept 固定为 1。
             req_idxs = torch.tensor(
                 [req.req_idx for req in reqs], dtype=torch.int32, requires_grad=False, device="cpu"
             ).cuda(non_blocking=True)
-            b_num_accepted_tokens = self.req_manager.req_to_accept_len[req_idxs]
+            if self.req_manager.req_to_accept_len is None:
+                b_num_accepted_tokens = torch.ones_like(req_idxs)
+            else:
+                b_num_accepted_tokens = self.req_manager.req_to_accept_len[req_idxs]
 
             copy_linear_att_state_to_kv_buffer(
                 b_req_idx=b_req_idx,

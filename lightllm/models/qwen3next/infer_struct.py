@@ -1,6 +1,7 @@
 import torch
 
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 def init_mtp_verify_extra_state(self, model):

@@ -69,48 +69,6 @@ class CudaGraph:
         else:
             return None
 
-    def _build_warmup_decode_model_input(
-        self,
-        model,
-        batch_size: int,
-        device: str = "cuda",
-    ) -> ModelInput:
-        mtp_size = self.mtp_step + 1
-        input_ids = torch.ones(batch_size, dtype=torch.int32, device=device)
-        mem_indexes = model.mem_manager.alloc(batch_size).to(device)
-        b_req_idx = torch.full(
-            (batch_size,),
-            fill_value=model.req_manager.HOLD_REQUEST_ID,
-            dtype=torch.int32,
-            device=device,
-        )
-
-        if self.mtp_step > 0:
-            assert batch_size % mtp_size == 0, "MTP decode CUDA graph batch size must be a multiple of mtp_step + 1"
-            real_batch_size = batch_size // mtp_size
-            b_mtp_index = torch.arange(mtp_size, dtype=torch.int32, device=device).repeat(real_batch_size)
-            b_seq_len = torch.arange(2, mtp_size + 2, dtype=torch.int32, device=device).repeat(real_batch_size)
-        else:
-            seq_len = 2
-            b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
-            b_seq_len = torch.empty(batch_size, dtype=torch.int32, device=device)
-            b_seq_len.fill_(seq_len)
-
-        return ModelInput(
-            batch_size=batch_size,
-            total_token_num=self.graph_max_len_in_batch * batch_size, 
-            max_q_seq_len=1,
-            max_kv_seq_len=self.graph_max_len_in_batch,
-            input_ids=input_ids,
-            mem_indexes=mem_indexes,
-            b_req_idx=b_req_idx,
-            b_seq_len=b_seq_len,
-            b_mtp_index=b_mtp_index,
-            is_prefill=False,
-            multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-            **model._gen_special_model_input(batch_size),
-        )
-
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
         graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
@@ -240,9 +198,38 @@ class CudaGraph:
 
         # decode cuda graph init
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
-            model_input = self._build_warmup_decode_model_input(model, batch_size)
+            seq_len = 2
+            total_token_num = batch_size * seq_len
+            max_len_in_batch = self.graph_max_len_in_batch
+            input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
+            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
+            b_req_idx = torch.tensor(
+                [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+            )
+            b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
+            b_seq_len.fill_(seq_len)
+            b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+
+            model_input = ModelInput(
+                batch_size=batch_size,
+                total_token_num=total_token_num,
+                max_q_seq_len=1,
+                max_kv_seq_len=max_len_in_batch,
+                input_ids=input_ids,
+                mem_indexes=mem_indexes,
+                b_req_idx=b_req_idx,
+                b_seq_len=b_seq_len,
+                b_mtp_index=b_mtp_index,
+                is_prefill=False,
+                multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                **model._gen_special_model_input(batch_size),
+            )
             model_output: ModelOutput = model.forward(model_input)
             del model_output
+            del input_ids
+            del mem_indexes
+            del b_req_idx
+            del b_seq_len
 
             model.mem_manager.free_all()
             model.req_manager.free_all()
@@ -269,7 +256,32 @@ class CudaGraph:
             decode_batches = []
             for micro_batch_index in [0, 1]:
                 # dummy decoding, capture the cudagraph
-                micro_batch = self._build_warmup_decode_model_input(model, batch_size)
+                seq_len = 2
+                total_token_num = batch_size * seq_len
+                max_len_in_batch = self.graph_max_len_in_batch
+                input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
+                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
+                b_req_idx = torch.tensor(
+                    [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+                )
+                b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
+                b_seq_len.fill_(seq_len)
+                b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+
+                micro_batch = ModelInput(
+                    is_prefill=False,
+                    batch_size=batch_size,
+                    total_token_num=total_token_num,
+                    max_q_seq_len=1,
+                    max_kv_seq_len=max_len_in_batch,
+                    input_ids=input_ids,
+                    b_mtp_index=b_mtp_index,
+                    mem_indexes=mem_indexes,
+                    b_req_idx=b_req_idx,
+                    b_seq_len=b_seq_len,
+                    multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                    **model._gen_special_model_input(batch_size),
+                )
                 decode_batches.append(micro_batch)
                 del micro_batch
 

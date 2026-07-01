@@ -242,11 +242,16 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            b_mtp_index_cpu = model_input.b_mtp_index
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
-            n_real = model_input.batch_size // (self.mtp_step + 1)
-            b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * (self.mtp_step + 1)
+            b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
+            b_req_mtp_start_loc = g_pin_mem_manager.gen_from_list(
+                key="b_req_mtp_start_loc",
+                data=b_req_mtp_start_loc,
+                dtype=torch.int32,
+            ).cuda(non_blocking=True)
 
             mtp_accept_len, accepted_index = self._verify_mtp_v2(
                 new_next_token_ids=next_token_ids,

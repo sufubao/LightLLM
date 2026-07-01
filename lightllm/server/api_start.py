@@ -210,11 +210,10 @@ def normal_or_p_d_start(args):
                 f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
 
-    # MTP decode uses an expanded per-request layout and is not compatible with TPSP mix mode.
+    # mtp params check
     if args.mtp_mode is not None:
         assert args.mtp_draft_model_dir is not None
         assert args.mtp_step > 0
-        assert not args.enable_tpsp_mix_mode, "MTP does not support --enable_tpsp_mix_mode"
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0

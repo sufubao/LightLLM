@@ -352,16 +352,6 @@ class TpPartBaseModel:
 
         return infer_state
 
-    def _get_decode_padding_unit(self, model_input: ModelInput) -> int:
-        if (not model_input.is_prefill) and self.args.mtp_step > 0:
-            assert not self.args.enable_tpsp_mix_mode, "MTP does not support --enable_tpsp_mix_mode"
-            return self.args.mtp_step + 1
-        return self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1
-
-    def _get_decode_infer_batch_size(self, model_input: ModelInput) -> int:
-        padding_unit = self._get_decode_padding_unit(model_input)
-        return triton.cdiv(model_input.batch_size, padding_unit) * padding_unit
-
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
         if model_input.batch_size == new_batch_size:
             return model_input
@@ -559,7 +549,10 @@ class TpPartBaseModel:
             )
 
         origin_batch_size = model_input.batch_size
-        infer_batch_size = self._get_decode_infer_batch_size(model_input)
+        if self.args.enable_tpsp_mix_mode:
+            infer_batch_size = triton.cdiv(model_input.batch_size, self.tp_world_size_) * self.tp_world_size_
+        else:
+            infer_batch_size = model_input.batch_size
 
         if self.graph is not None and self.graph.can_run(
             batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
@@ -605,6 +598,7 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
+
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -810,7 +804,7 @@ class TpPartBaseModel:
 
         origin_batch_size = model_input0.batch_size
         max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
-        infer_batch_size = self._get_decode_infer_batch_size(model_input0)
+        infer_batch_size = triton.cdiv(origin_batch_size, self.tp_world_size_) * self.tp_world_size_
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)

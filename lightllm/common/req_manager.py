@@ -7,7 +7,7 @@ from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional, TYPE_CHECKING
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_mtp_next_token_ids_width
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
@@ -19,15 +19,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# Width of req_to_next_token_ids: holds the seed token + up to (WIDTH - 1) MTP draft tokens.
-REQ_NEXT_TOKEN_IDS_WIDTH = 8
-
-
 def assert_mtp_step_within_next_token_ids_width(mtp_step: int) -> None:
-    assert mtp_step <= REQ_NEXT_TOKEN_IDS_WIDTH - 1, (
-        f"mtp_step={mtp_step} exceeds {REQ_NEXT_TOKEN_IDS_WIDTH - 1}; "
-        f"req_to_next_token_ids width is {REQ_NEXT_TOKEN_IDS_WIDTH} "
-        "(widening it is an explicit follow-up, spec §9)"
+    next_token_ids_width = get_mtp_next_token_ids_width()
+    assert mtp_step <= next_token_ids_width - 1, (
+        f"mtp_step={mtp_step} exceeds {next_token_ids_width - 1}; "
+        f"req_to_next_token_ids width is {next_token_ids_width}"
     )
 
 
@@ -135,7 +131,7 @@ class ReqSamplingParamsManager:
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_next_token_ids = torch.zeros(
-            (max_request_num + 1, REQ_NEXT_TOKEN_IDS_WIDTH),
+            (max_request_num + 1, get_mtp_next_token_ids_width()),
             dtype=torch.int64,
             device="cuda",
         )
@@ -259,7 +255,7 @@ class ReqManagerForMamba(ReqManager):
         self.req_to_conv_state = LayerCache(
             size=(max_request_num + 1),
             dtype=self.linear_config.conv_state_dtype,
-            shape=self.linear_config.get_gpu_conv_state_shape(mtp_step=self.mtp_step),
+            shape=self.linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
         )
@@ -300,8 +296,8 @@ class ReqManagerForMamba(ReqManager):
         conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
         conv_dest = req.req_idx
         ssm_dest = req.req_idx * (self.mtp_step + 1)
-        narrow_w = conv_state.shape[-1]  # persisted (narrow) width
-        self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
+        conv_cache_width = conv_state.shape[-1]
+        self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
         if self.req_to_accept_len is not None:
             self.req_to_accept_len[req.req_idx] = 1
@@ -315,10 +311,10 @@ class ReqManagerForMamba(ReqManager):
         )
         conv_dest = req.req_idx
         ssm_dest = req.req_idx * (self.mtp_step + 1)
-        narrow_w = conv_state.shape[-1]
+        conv_cache_width = conv_state.shape[-1]
         # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
         # 同时，非连续对象的拷贝，可能存在效率问题。
-        self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
+        self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
         if self.req_to_accept_len is not None:
             self.req_to_accept_len[req.req_idx] = 1

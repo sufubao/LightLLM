@@ -165,6 +165,13 @@ def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 
 
+@lru_cache(maxsize=None)
+def get_mtp_next_token_ids_width():
+    width = int(os.getenv("LIGHTLLM_MTP_NEXT_TOKEN_IDS_WIDTH", 8))
+    assert 1 <= width <= 16, f"LIGHTLLM_MTP_NEXT_TOKEN_IDS_WIDTH must be in [1, 16], got {width}"
+    return width
+
+
 g_model_init_done = False
 
 

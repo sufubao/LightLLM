@@ -258,9 +258,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
-            scatter_mtp_accept_len(
-                self.model.req_manager.req_to_accept_len, b_req_mtp_start_loc, model_input.b_req_idx, mtp_accept_len
-            )
+            if self.is_linear_att_mixed_model:
+                scatter_mtp_accept_len(
+                    self.model.req_manager.req_to_accept_len, b_req_mtp_start_loc, model_input.b_req_idx, mtp_accept_len
+                )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
                 gpu_tensor=accepted_index,

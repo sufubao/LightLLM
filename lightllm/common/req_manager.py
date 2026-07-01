@@ -7,7 +7,7 @@ from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional, TYPE_CHECKING
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
-from lightllm.utils.envs_utils import get_env_start_args, get_mtp_next_token_ids_width
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
@@ -17,14 +17,6 @@ if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
 logger = init_logger(__name__)
-
-
-def assert_mtp_step_within_next_token_ids_width(mtp_step: int) -> None:
-    next_token_ids_width = get_mtp_next_token_ids_width()
-    assert mtp_step <= next_token_ids_width - 1, (
-        f"mtp_step={mtp_step} exceeds {next_token_ids_width - 1}; "
-        f"req_to_next_token_ids width is {next_token_ids_width}"
-    )
 
 
 class _ReqNode:
@@ -83,12 +75,6 @@ class ReqManager:
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
 
-        self.req_to_accept_len = (
-            torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
-            if get_env_start_args().mtp_step > 0
-            else None
-        )
-
     def alloc(self):
         return self.req_list.alloc()
 
@@ -131,7 +117,7 @@ class ReqSamplingParamsManager:
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_next_token_ids = torch.zeros(
-            (max_request_num + 1, get_mtp_next_token_ids_width()),
+            (max_request_num + 1, get_env_start_args().max_mtp_size),
             dtype=torch.int64,
             device="cuda",
         )
@@ -246,10 +232,12 @@ class ReqManagerForMamba(ReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
+        self.req_to_accept_len = (
+            torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda") if self.mtp_step > 0 else None
+        )
         self.big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
-        assert_mtp_step_within_next_token_ids_width(self.mtp_step)
         self.linear_config = linear_config
 
         self.req_to_conv_state = LayerCache(

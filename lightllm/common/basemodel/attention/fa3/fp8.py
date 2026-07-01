@@ -119,7 +119,12 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         super().init_state()
         self.backend: Fp8Fa3AttBackend = self.backend
 
-        batch_size = self.b_att_seq_len.shape[0]
+        args_mtp_step = get_env_start_args().mtp_step
+        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
+        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
+
+        device = self.infer_state.input_ids.device
+        batch_size = att_batch_size
         mem_manager = self.backend.model.mem_manager
 
         offline_scales: torch.Tensor = mem_manager.scales

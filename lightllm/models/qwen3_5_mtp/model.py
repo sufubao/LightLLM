@@ -6,9 +6,6 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35Tr
 from lightllm.models.qwen3_5_mtp.layer_weights.pre_and_post_layer_weight import Qwen3_5MTPPreAndPostLayerWeight
 from lightllm.models.qwen3_5_mtp.layer_weights.transformer_layer_weight import Qwen3_5MTPTransformerLayerWeight
 from lightllm.models.qwen3_5_mtp.layer_infer.pre_layer_infer import Qwen3_5MTPPreLayerInfer
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class Qwen3_5MTPModel(Qwen3_5TpPartModel):
@@ -78,33 +75,8 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
-        # Build the single draft layer with layer_num == 0 so that, with
-        # full_attention_interval == 1, it takes the full-attention (mrope) path.
         super()._init_infer_layer(start_layer_index=0)
-        self._assign_draft_kv_slot()
-        return
-
-    def _assign_draft_kv_slot(self):
-        mem_manager = self.main_model.mem_manager
-        model_full_att_layer_num = getattr(mem_manager, "model_full_att_layer_num", None)
-        interval = self.main_model.config["full_attention_interval"]
-        if model_full_att_layer_num is None:
-            # Non-hybrid / unexpected mem_manager: nothing to remap.
-            return
-
         draft_idx = len(self.mtp_previous_draft_models)
-        draft_full_att_kv_layer_num = getattr(mem_manager, "draft_full_att_kv_layer_num", None)
-        if draft_full_att_kv_layer_num is not None:
-            assert draft_idx < draft_full_att_kv_layer_num, (
-                f"draft_idx {draft_idx} out of range for draft_full_att_kv_layer_num "
-                f"{draft_full_att_kv_layer_num}; mem_manager not sized for this many MTP draft blocks"
-            )
-        draft_kv_slot = model_full_att_layer_num + draft_idx
-        layer_infer = self.layers_infer[0]
-        layer_infer.layer_num_ = draft_kv_slot * interval
-        logger.info(
-            f"Qwen3.5 MTP draft layer assigned dedicated full-attn KV slot {draft_kv_slot} "
-            f"(layer_num_={layer_infer.layer_num_}, interval={interval}, "
-            f"model_full_att_layer_num={model_full_att_layer_num})"
-        )
+        draft_kv_slot = self.main_model.mem_manager.model_full_att_layer_num + draft_idx
+        self.layers_infer[0].layer_num_ = draft_kv_slot * self.main_model.config["full_attention_interval"]
         return

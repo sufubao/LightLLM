@@ -23,6 +23,7 @@ logger = init_logger(__name__)
 
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
+
     # weight class
     pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
@@ -54,7 +55,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-    def _init_linear_config(self):
+    def _init_mem_manager(self):
+        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         start_args: StartArgs = get_env_start_args()
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
         draft_full_att_kv_layer_num = get_added_mtp_kv_layer_num()
@@ -79,24 +81,18 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             all_layer_num=self.config["n_layer"],
             draft_full_att_kv_layer_num=draft_full_att_kv_layer_num,
         )
-        return
-
-    def _init_mem_manager(self):
-        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         model_full_att_layer_num = self.linear_config.get_model_full_att_layer_num()
-        full_att_kv_layer_num = self.linear_config.get_full_att_kv_layer_num()
 
         self.mem_manager = Qwen3NextMemManager(
             size=self.max_total_token_num,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.config["head_dim"],
-            full_att_layer_num=full_att_kv_layer_num,
+            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num(),
             linear_config=self.linear_config,
             mem_fraction=self.mem_fraction,
         )
         self.mem_manager.model_full_att_layer_num = model_full_att_layer_num
-        self.mem_manager.draft_full_att_kv_layer_num = self.linear_config.draft_full_att_kv_layer_num
 
     def _init_req_manager(self):
         create_max_seq_len = 0
@@ -106,8 +102,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self._init_linear_config()
         self.req_manager = ReqManagerForMamba(
-            self.max_req_num, create_max_seq_len, None, linear_config=self.linear_config
+            self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
         )
         return

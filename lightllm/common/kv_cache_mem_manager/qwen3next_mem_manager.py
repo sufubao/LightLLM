@@ -208,9 +208,8 @@ class Qwen3NextLinearAttPageHelper:
         dp_mems: List["Qwen3NextMemManager"],
     ):
         conv_page, ssm_page = self.view_page_to_linear_att_state(page_index)
-        conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         for tp_index, mem in enumerate(dp_mems):
-            self._write_one_rank(mem, tp_index, conv_req_idx, ssm_req_idx, conv_page, ssm_page)
+            self._write_one_rank(mem, tp_index, req_idx, conv_page, ssm_page)
         return
 
     def read_page_to_req(
@@ -220,9 +219,8 @@ class Qwen3NextLinearAttPageHelper:
         dp_mems: List["Qwen3NextMemManager"],
     ):
         conv_page, ssm_page = self.view_page_to_linear_att_state(page_index)
-        conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         for tp_index, mem in enumerate(dp_mems):
-            self._read_one_rank(mem, tp_index, conv_req_idx, ssm_req_idx, conv_page, ssm_page)
+            self._read_one_rank(mem, tp_index, req_idx, conv_page, ssm_page)
         return
 
     def _get_req_state_indexes(self, req_idx: int):
@@ -234,11 +232,11 @@ class Qwen3NextLinearAttPageHelper:
         self,
         mem: "Qwen3NextMemManager",
         tp_index: int,
-        conv_req_idx: int,
-        ssm_req_idx: int,
+        req_idx: int,
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
+        conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
         ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
         self._copy_conv_state_to_page(conv_state, conv_page, mem, tp_index)
@@ -414,11 +412,11 @@ class Qwen3NextLinearAttPageHelper:
         self,
         mem: "Qwen3NextMemManager",
         tp_index: int,
-        conv_req_idx: int,
-        ssm_req_idx: int,
+        req_idx: int,
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
+        conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
         ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
         self._copy_page_to_conv_state(conv_page, conv_state, mem, tp_index)

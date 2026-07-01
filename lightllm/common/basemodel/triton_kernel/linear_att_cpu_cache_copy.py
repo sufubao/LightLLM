@@ -423,7 +423,6 @@ def copy_cpu_cache_to_kv_buffer(
     cpu_kv_ssm_tail_dim = cpu_kv_ssm_state.shape[-1]
     full_att_layer_num = gpu_full_att_kv_state.shape[-2]
 
-    assert full_att_layer_num == linear_config.get_full_att_kv_layer_num()
     assert gpu_full_att_tail_dim == cpu_cache_full_att.shape[-1]
     assert cpu_cache_conv.shape[-1] == cpu_kv_conv_state.shape[-1]
     assert cpu_cache_ssm.shape[-1] == cpu_kv_ssm_state.shape[-1]

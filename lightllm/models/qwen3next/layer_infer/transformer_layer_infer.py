@@ -259,10 +259,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if is_prefill:
             core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
-        elif getattr(infer_state, "is_mtp_verify", False):
+        elif getattr(infer_state, "is_decode_with_mtp", False):
             mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
             conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
-            core_attn_out = self._gdn_verify_kernel(
+            core_attn_out = self._gdn_mtp_kernel(
                 mixed_qkv,
                 conv_states,
                 ssm_states,
@@ -466,7 +466,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return core_attn_out, z
 
-    def _gdn_verify_kernel(
+    def _gdn_mtp_kernel(
         self,
         mixed_qkv: torch.Tensor,
         conv_states: torch.Tensor,
@@ -480,6 +480,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             causal_conv1d_update as causal_conv1d_update_spec,
         )
 
+        cu_seqlens_q = infer_state.b1_mtp_cu_q_seq_len
         mixed_qkv = causal_conv1d_update_spec(
             mixed_qkv,
             conv_states,
@@ -488,13 +489,13 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             activation=self.activation,
             conv_state_indices=infer_state.b_conv_buffer_idx,
             num_accepted_tokens=infer_state.b_num_accepted_tokens,
-            query_start_loc=infer_state.b_gdn_verify_cu_seqlens,
+            query_start_loc=cu_seqlens_q,
         )
 
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
         assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
-        # and MTP verify only writes values in [1, mtp_step+1]. The old per-layer per-step
+        # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
         # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
@@ -502,7 +503,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             v=value,
             initial_state=ssm_states,
             inplace_final_state=True,
-            cu_seqlens=infer_state.b_gdn_verify_cu_seqlens.to(torch.long),
+            cu_seqlens=cu_seqlens_q.to(torch.long),
             ssm_state_indices=infer_state.b_ssm_index_rows,
             ssm_state_write_indices=infer_state.b_ssm_index_rows,
             num_accepted_tokens=infer_state.b_num_accepted_tokens,

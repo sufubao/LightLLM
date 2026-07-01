@@ -123,7 +123,6 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
         assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
 
-        device = self.infer_state.input_ids.device
         batch_size = att_batch_size
         mem_manager = self.backend.model.mem_manager
 

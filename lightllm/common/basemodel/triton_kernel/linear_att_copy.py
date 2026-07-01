@@ -44,6 +44,7 @@ def _copy_linear_att_state_to_kv_buffer(
         return
 
     cur_req_idx = tl.load(b_req_idx + cur_batch).to(tl.int64)
+    cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
 
     gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + cur_req_idx * gpu_conv_stride_s
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
@@ -56,12 +57,11 @@ def _copy_linear_att_state_to_kv_buffer(
         conv_data = tl.load(gpu_conv_base + conv_row * gpu_conv_stride_d + conv_col, mask=mask)
         tl.store(cpu_conv_base + conv_row * cpu_kv_conv_stride_d + conv_col, conv_data, mask=mask)
 
-    ssm_src_slot = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
     for i in range(tl.cdiv(gpu_ssm_tail_dim, BLOCK)):
         gpu_start_off = i * BLOCK + tl.arange(0, BLOCK)
         mask = gpu_start_off < gpu_ssm_tail_dim
         ssm_data = tl.load(
-            gpu_ssm_ptr + cur_layer * gpu_ssm_stride_l + ssm_src_slot * gpu_ssm_stride_s + gpu_start_off,
+            gpu_ssm_ptr + cur_layer * gpu_ssm_stride_l + cur_state_req_idx * gpu_ssm_stride_s + gpu_start_off,
             mask=mask,
         )
         dest_ssm_ptr = (
@@ -86,8 +86,6 @@ def copy_linear_att_state_to_kv_buffer(
 
     assert gpu_conv_state.dim() >= 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
     assert cpu_kv_conv_state.dim() >= 4, "cpu_kv_conv_state must be [size, layer, conv_dim, width_narrow]"
-    assert gpu_conv_state.stride(-1) == 1, "gpu_conv_state last dimension must be element-contiguous"
-    assert cpu_kv_conv_state.stride(-1) == 1, "cpu_kv_conv_state last dimension must be element-contiguous"
     gpu_conv_state = gpu_conv_state.view(
         gpu_conv_state.shape[0], gpu_conv_state.shape[1], gpu_conv_state.shape[2], -1
     ).view(dtype=torch.uint8)

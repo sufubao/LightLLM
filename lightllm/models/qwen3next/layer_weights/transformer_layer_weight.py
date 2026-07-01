@@ -22,9 +22,6 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
-    def _moe_layer_prefix(self):
-        return f"model.layers.{self.layer_num_}.mlp"
-
     def _init_qkv(self):
         in_dim = self.n_embed
         self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
@@ -55,12 +52,10 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
-        hidden_size = self.network_config_["hidden_size"]
-        prefix = self._moe_layer_prefix()
         self.moe_gate = ROWMMWeight(
-            in_dim=hidden_size,
+            in_dim=self.network_config_["hidden_size"],
             out_dims=[self.n_routed_experts],
-            weight_names=f"{prefix}.gate.weight",
+            weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
             quant_method=None,
             tp_rank=0,
@@ -71,9 +66,9 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         # expert as a separate FFN and adds its output after routed MoE.
         self.num_fused_shared_experts = 0 if enable_ep_moe else 1
         self.shared_expert_gate = ROWMMWeight(
-            in_dim=hidden_size,
+            in_dim=self.network_config_["hidden_size"],
             out_dims=[1],
-            weight_names=f"{prefix}.shared_expert_gate.weight",
+            weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
             data_type=self.data_type_,
             bias_names=None,
             quant_method=None,
@@ -85,9 +80,9 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             down_proj_name="down_proj",
             up_proj_name="up_proj",
             e_score_correction_bias_name="",
-            weight_prefix=f"{prefix}.experts",
+            weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
             n_routed_experts=self.n_routed_experts,
-            hidden_size=hidden_size,
+            hidden_size=self.network_config_["hidden_size"],
             moe_intermediate_size=moe_intermediate_size,
             data_type=self.data_type_,
             quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
@@ -121,10 +116,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def _init_moe_shared_expert_ffn(self):
         hidden_size = self.network_config_["hidden_size"]
-        if "shared_expert_intermediate_size" not in self.network_config_:
-            return
-
-        prefix = f"{self._moe_layer_prefix()}.shared_expert"
+        prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
         inter_size = self.network_config_["shared_expert_intermediate_size"]
         self.gate_up_proj = ROWMMWeight(
             in_dim=hidden_size,
@@ -163,9 +155,8 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
         # When the shared expert is fused into MoE, load it as the last routed expert.
         # The fused MoE kernel then treats expert id n_routed_experts as this shared expert.
-        prefix = self._moe_layer_prefix()
-        old_prefix = f"{prefix}.shared_expert"
-        new_prefix = f"{prefix}.experts.{self.n_routed_experts}"
+        old_prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
+        new_prefix = f"model.layers.{self.layer_num_}.mlp.experts.{self.n_routed_experts}"
         suffixes = [
             self.experts.quant_method.weight_suffix,
             self.experts.quant_method.weight_scale_suffix,

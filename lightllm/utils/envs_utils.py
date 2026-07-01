@@ -165,11 +165,6 @@ def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 
 
-@lru_cache(maxsize=None)
-def get_max_mtp_size():
-    return int(os.getenv("LIGHTLLM_MAX_MTP_SIZE", 8))
-
-
 g_model_init_done = False
 
 

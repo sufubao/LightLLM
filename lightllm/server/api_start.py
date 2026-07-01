@@ -11,7 +11,6 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_max_mtp_size
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
@@ -212,7 +211,6 @@ def normal_or_p_d_start(args):
             )
 
     # mtp params check
-    args.max_mtp_size = get_max_mtp_size()
     if args.mtp_mode is not None:
         assert args.mtp_draft_model_dir is not None
         assert args.mtp_step > 0
@@ -429,6 +427,7 @@ def normal_or_p_d_start(args):
         )
 
     if not args.disable_vision:
+
         if not args.visual_use_proxy_mode:
             from .visualserver.manager import start_visual_process
 

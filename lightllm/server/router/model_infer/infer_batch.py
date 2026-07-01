@@ -359,11 +359,6 @@ class InferenceContext:
         if not self.is_linear_att_mixed_model:
             return
 
-        # 当 dynamic prompt cache 被禁用时 radix_cache 为 None，没有大页/小页缓冲可写，
-        # 线性层状态仅存于 req_manager 的 GPU buffer 即可，直接跳过跨请求缓存拷贝。
-        if self.radix_cache is None:
-            return
-
         # 大页对应的 linear att 的拷贝
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_buffer_ids = []

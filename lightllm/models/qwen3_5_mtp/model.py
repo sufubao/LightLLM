@@ -86,24 +86,25 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
 
     def _assign_draft_kv_slot(self):
         mem_manager = self.main_model.mem_manager
-        main_full_att = getattr(mem_manager, "main_full_att_layer_num", None)
+        model_full_att_layer_num = getattr(mem_manager, "model_full_att_layer_num", None)
         interval = self.main_model.config["full_attention_interval"]
-        if main_full_att is None:
+        if model_full_att_layer_num is None:
             # Non-hybrid / unexpected mem_manager: nothing to remap.
             return
 
         draft_idx = len(self.mtp_previous_draft_models)
-        draft_full_att_layers = getattr(mem_manager, "draft_full_att_layers", None)
-        if draft_full_att_layers is not None:
-            assert draft_idx < draft_full_att_layers, (
-                f"draft_idx {draft_idx} out of range for draft_full_att_layers "
-                f"{draft_full_att_layers}; mem_manager not sized for this many MTP draft blocks"
+        draft_full_att_kv_layer_num = getattr(mem_manager, "draft_full_att_kv_layer_num", None)
+        if draft_full_att_kv_layer_num is not None:
+            assert draft_idx < draft_full_att_kv_layer_num, (
+                f"draft_idx {draft_idx} out of range for draft_full_att_kv_layer_num "
+                f"{draft_full_att_kv_layer_num}; mem_manager not sized for this many MTP draft blocks"
             )
-        draft_kv_slot = main_full_att + draft_idx
+        draft_kv_slot = model_full_att_layer_num + draft_idx
         layer_infer = self.layers_infer[0]
         layer_infer.layer_num_ = draft_kv_slot * interval
         logger.info(
             f"Qwen3.5 MTP draft layer assigned dedicated full-attn KV slot {draft_kv_slot} "
-            f"(layer_num_={layer_infer.layer_num_}, interval={interval}, main_full_att={main_full_att})"
+            f"(layer_num_={layer_infer.layer_num_}, interval={interval}, "
+            f"model_full_att_layer_num={model_full_att_layer_num})"
         )
         return

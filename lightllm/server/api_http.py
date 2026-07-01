@@ -95,6 +95,7 @@ class G_Objs:
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::api_server")
 
         if args.run_mode == "pd_master":
+            init_tokenizer(args)  # for openai api
             self.metric_client = MetricClient(args.metric_port)
             self.httpserver_manager = HttpServerManagerForPDMaster(
                 args=args,

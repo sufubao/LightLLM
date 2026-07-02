@@ -87,7 +87,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.config["head_dim"],
-            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num(),
+            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
             linear_config=self.linear_config,
             mem_fraction=self.mem_fraction,
         )

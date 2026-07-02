@@ -42,13 +42,13 @@ class LinearAttCacheConfig:
             + self.head_linear_v_dim * self.num_linear_v_heads
         )
 
-    def get_model_full_att_layer_num(self):
+    def get_main_model_full_att_layer_num(self):
         full_att_layer_num = self.all_layer_num - self.linear_layer_num
         assert full_att_layer_num == self.all_layer_num // self.full_attention_interval
         return full_att_layer_num
 
-    def get_full_att_kv_layer_num(self):
-        return self.get_model_full_att_layer_num() + self.draft_full_att_kv_layer_num
+    def get_full_att_kv_layer_num_with_draft_model(self):
+        return self.get_main_model_full_att_layer_num() + self.draft_full_att_kv_layer_num
 
     def get_conv_state_shape(self):
         # Base committed sliding-window state, without speculative MTP tail.
@@ -80,7 +80,7 @@ class LinearAttCacheConfig:
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
         full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
-        a = full_att_bytes * self.get_full_att_kv_layer_num() * big_page_token_num
+        a = full_att_bytes * self.get_full_att_kv_layer_num_with_draft_model() * big_page_token_num
         return a
 
     def get_cpu_cache_conv_bytes(self):

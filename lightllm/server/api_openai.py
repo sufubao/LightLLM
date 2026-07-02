@@ -234,6 +234,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             "The logit_bias parameter is not currently supported",
         )
 
+    if request.logprobs is True:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logprobs parameter is not currently supported for chat completions",
+            param="logprobs",
+        )
+
+    if request.top_logprobs is not None:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The top_logprobs parameter is not currently supported for chat completions",
+            param="top_logprobs",
+        )
+
     if request.function_call != "none":
         return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
 
@@ -314,7 +328,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
-        "return_logprobs": request.logprobs is True,
+        "return_logprobs": False,
         "seed": request.seed,
     }
 

@@ -26,6 +26,7 @@ from lightllm.utils.config_utils import (
     auto_set_fused_shared_experts,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from .startup_status import log_machine_status
 
 logger = init_logger(__name__)
 
@@ -424,6 +425,7 @@ def normal_or_p_d_start(args):
     auto_configure_allreduce_flags_from_args(args)
 
     set_env_start_args(args)
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     ports_locker.release_port()
@@ -549,6 +551,7 @@ def pd_master_start(args):
         args.pd_node_id = 0
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     can_use_ports = alloc_can_use_network_port(
@@ -627,6 +630,7 @@ def visual_only_start(args):
     can_use_ports = can_use_ports[args.visual_dp :]
     args.visual_node_id = uuid.uuid4().int
 
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)
@@ -657,6 +661,7 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     if args.config_server_visual_redis_port is not None:

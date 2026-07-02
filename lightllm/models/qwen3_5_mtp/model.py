@@ -43,6 +43,8 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
 
     def _init_config(self):
         super()._init_config()
+        # MTP draft model: reuses the main model's config, but overrides the following:
+        # 因为 qwen3.5 的 mtp 和 main 是存储在一起的，所以需要进行修复。
         self.config["full_attention_interval"] = 1
         self.config["num_hidden_layers"] = 1
         self.config["n_layer"] = 1
@@ -75,8 +77,9 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
-        super()._init_infer_layer(start_layer_index=0)
-        draft_idx = len(self.mtp_previous_draft_models)
-        draft_kv_slot = self.main_model.mem_manager.model_full_att_layer_num + draft_idx
-        self.layers_infer[0].layer_num_ = draft_kv_slot * self.main_model.config["full_attention_interval"]
+        total_pre_layers_num = len(self.main_model.trans_layers_weight)
+        total_pre_layers_num += sum(
+            [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
+        )
+        super()._init_infer_layer(start_layer_index=total_pre_layers_num)
         return

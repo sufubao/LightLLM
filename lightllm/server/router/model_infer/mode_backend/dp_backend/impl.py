@@ -263,6 +263,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
 
             if (req_num0 + req_num1) > 0:
+
                 _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                     logits=logits,
                     b_req_idx=b_req_idx,
@@ -404,6 +405,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
+
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
@@ -549,6 +551,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
+
             draft_model_input.input_ids = draft_next_token_ids_gpu
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -595,6 +598,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for _step in range(self.mtp_step):
+
             draft_model_input.input_ids = draft_next_token_ids_gpu
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -679,6 +683,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_output0, draft_model_output1 = model_output0, model_output1
 
             for draft_model_idx in range(self.num_mtp_models):
+
                 draft_model_input0 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input0,
                     b_next_token_ids=draft_next_token_ids_gpu0,
@@ -740,6 +745,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         b_mtp_index_cpu0 = model_input0.b_mtp_index
         b_mtp_index_cpu1 = model_input1.b_mtp_index
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
@@ -887,6 +893,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
+
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
             draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1
@@ -955,6 +962,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for _step in range(self.mtp_step):
+
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
             draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1

@@ -135,6 +135,7 @@ class ReqSamplingParamsManager:
             )
 
     def init_req_sampling_params(self, req: "InferReq"):
+
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)

@@ -19,13 +19,9 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
     is_mtp_draft_model = True
 
     def __init__(self, kvargs: dict):
-        self._pre_init(kvargs)
-        super().__init__(kvargs)
-        return
-
-    def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
+        super().__init__(kvargs)
         return
 
     def _init_custom(self):

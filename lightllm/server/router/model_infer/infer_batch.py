@@ -306,6 +306,7 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
+
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -326,6 +327,7 @@ class InferenceContext:
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
+
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:

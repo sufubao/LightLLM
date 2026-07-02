@@ -30,6 +30,12 @@ from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_
 logger = init_logger(__name__)
 
 
+def _check_anthropic_pdf_parsing_startup():
+    from . import api_anthropic
+
+    api_anthropic.check_pdf_parsing_supported_at_startup()
+
+
 def setup_signal_handlers(http_server_process, process_manager):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
@@ -75,6 +81,9 @@ def normal_or_p_d_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+
+    if args.run_mode in ["normal", "prefill", "decode", "visual_only"]:
+        _check_anthropic_pdf_parsing_startup()
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -526,6 +535,8 @@ def pd_master_start(args):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    _check_anthropic_pdf_parsing_startup()
 
     auto_set_max_req_total_len(args)
 

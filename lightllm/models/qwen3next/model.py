@@ -81,7 +81,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             all_layer_num=self.config["n_layer"],
             draft_full_att_kv_layer_num=draft_full_att_kv_layer_num,
         )
-        model_full_att_layer_num = self.linear_config.get_model_full_att_layer_num()
 
         self.mem_manager = Qwen3NextMemManager(
             size=self.max_total_token_num,
@@ -92,7 +91,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             linear_config=self.linear_config,
             mem_fraction=self.mem_fraction,
         )
-        self.mem_manager.model_full_att_layer_num = model_full_att_layer_num
 
     def _init_req_manager(self):
         create_max_seq_len = 0

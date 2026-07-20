@@ -240,6 +240,14 @@ class ChunkedPrefillBackend(ModeBackend):
             return
         if self.enable_decode_microbatch_overlap or self.args.dp > 1:
             return
+        from lightllm.common.basemodel.attention import FlashInferAttBackend, MlaFlashInferAttBackend
+
+        flashinfer_backend_types = (FlashInferAttBackend, MlaFlashInferAttBackend)
+        for model in (self.model, self.draft_models[0]):
+            decode_backends = (model.decode_att_backend, getattr(model, "decode_att_backend1", None))
+            if any(isinstance(att_backend, flashinfer_backend_types) for att_backend in decode_backends):
+                logger.info("mtp fused decode graph disabled for FlashInfer attention backend")
+                return
         from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 
         if enable_diverse_mode_gqa_decode_fast_kernel():
@@ -387,9 +395,9 @@ class ChunkedPrefillBackend(ModeBackend):
                 key="mtp_accept_len",
                 gpu_tensor=fused_out.mtp_accept_len,
             )
-            next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="next_token_ids",
-                gpu_tensor=fused_out.next_token_ids,
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
+                next_token_ids=fused_out.next_token_ids,
+                next_token_logprobs=fused_out.next_token_logprobs,
             )
             verify_event = torch.cuda.Event()
             verify_event.record()
@@ -416,7 +424,7 @@ class ChunkedPrefillBackend(ModeBackend):
         self._post_handle(
             run_reqs=verify_ok_reqs,
             next_token_ids=next_token_ids_cpu[select_mask],
-            next_token_logprobs=None,
+            next_token_logprobs=next_token_logprobs_cpu[select_mask],
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
@@ -459,7 +467,6 @@ class ChunkedPrefillBackend(ModeBackend):
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
-
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -501,7 +508,6 @@ class ChunkedPrefillBackend(ModeBackend):
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
         for _step in range(self.mtp_step):
-
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP

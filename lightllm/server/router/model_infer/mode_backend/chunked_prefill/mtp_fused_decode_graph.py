@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 @dataclass
 class FusedStepOutput:
     next_token_ids: torch.Tensor
+    next_token_logprobs: torch.Tensor
     mtp_accept_len: torch.Tensor
     accepted_index: torch.Tensor
     eagle_mem_indexes_cpu: torch.Tensor
@@ -44,7 +45,7 @@ class MTPFusedDecodeGraph:
     将一个 mtp eagle decode step 捕获为两个 cuda graph:
 
     - verify graph: input gather + 主模型 forward + (惩罚无关的) 采样 + mtp verify
-      + accept_len / out-token-counter 更新。它的输出 (next_token_ids / accept 信息)
+      + accept_len / out-token-counter 更新。它的输出 (next_token_ids / logprobs / accept 信息)
       是 cpu 后处理需要读取的全部内容。
     - draft graph: mtp_step 次 draft forward + argmax 链 + 候选 token scatter。
       不产生 cpu 需要的输出, 因此可以在 verify 结果回传后异步在 gpu 上运行,
@@ -54,11 +55,11 @@ class MTPFusedDecodeGraph:
     的 eager glue (inferstate 构建、gen_decode_params、page_table 拷贝、copy_for_cuda_graph
     输入拷贝、argmax、mem_indexes 旋转) 与多次 cudaGraphLaunch 的 cpu 开销。
 
-    采样使用 flashinfer 的 top_k_top_p_sampling_from_logits, philox seed/offset 保存在
+    采样使用 flashinfer 的 top_k_top_p_sampling_from_probs, philox seed/offset 保存在
     显存 tensor 中并在图内自增, 保证 replay 之间随机性正确推进。温度/top_k/top_p 为逐行
     静态输入 buffer, 每个 step 刷新, 支持 batch 内异构采样参数。
 
-    含惩罚项、logprobs、自定义随机种子、logit_bias 等请求走原有慢速路径 (can_run 判定)。
+    含惩罚项、自定义随机种子、logit_bias 等请求走原有慢速路径 (can_run 判定)。
     """
 
     def __init__(self, backend: "ChunkedPrefillBackend"):
@@ -112,15 +113,16 @@ class MTPFusedDecodeGraph:
 
         # 静态输出 buffer (采样 token 拷贝到此供 D2H / verify / draft chain 使用)。
         self.out_next_token_ids = torch.zeros(B, dtype=torch.int64, device="cuda")
+        self.out_next_token_logprobs = torch.zeros(B, dtype=torch.float32, device="cuda")
 
         self.graphs = {}
 
         self.hold_req_idx = self.req_manager.HOLD_REQUEST_ID
         self.hold_mem_index = self.model.mem_manager.HOLD_TOKEN_MEMINDEX
 
-        from flashinfer.sampling import top_k_top_p_sampling_from_logits
+        from flashinfer.sampling import top_k_top_p_sampling_from_probs
 
-        self._fi_sampling = top_k_top_p_sampling_from_logits
+        self._fi_sampling = top_k_top_p_sampling_from_probs
         return
 
     def _find_graph_batch_size(self, batch_size: int) -> Optional[int]:
@@ -142,8 +144,6 @@ class MTPFusedDecodeGraph:
             if req.mtp_step != self.mtp_step:
                 return False
             shm_param = req.sampling_param.shm_param
-            if shm_param.return_logprobs:
-                return False
             if req.generator is not None:
                 return False
             if len(req.sampling_param.invalid_token_ids) != 0:
@@ -255,8 +255,9 @@ class MTPFusedDecodeGraph:
 
         logits = model_output.logits
         logits.div_(self.temperature[:batch_size].view(-1, 1))
+        probs = torch.softmax(logits, dim=-1)
         sampled_ids = self._fi_sampling(
-            logits,
+            probs,
             self.top_k[:batch_size],
             self.top_p[:batch_size],
             filter_apply_order="joint",
@@ -268,6 +269,9 @@ class MTPFusedDecodeGraph:
         self.philox_offset += 4 * ((batch_size * self.vocab_size + 3) // 4)
         next_token_ids = self.out_next_token_ids[:batch_size]
         next_token_ids.copy_(sampled_ids)
+        next_token_logprobs = self.out_next_token_logprobs[:batch_size]
+        next_token_probs = torch.gather(probs, dim=1, index=next_token_ids.view(-1, 1))
+        next_token_logprobs.copy_(torch.log(next_token_probs).view(-1))
 
         b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * self.mtp_size
         mtp_accept_len, accepted_index = mtp_verify(
@@ -411,6 +415,7 @@ class MTPFusedDecodeGraph:
 
         return FusedStepOutput(
             next_token_ids=self.out_next_token_ids[:real_batch_size],
+            next_token_logprobs=self.out_next_token_logprobs[:real_batch_size],
             mtp_accept_len=bundle.mtp_accept_len[:real_n],
             accepted_index=bundle.accepted_index[:real_batch_size],
             eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,

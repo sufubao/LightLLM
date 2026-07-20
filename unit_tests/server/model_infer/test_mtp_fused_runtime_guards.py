@@ -33,6 +33,27 @@ def test_can_run_does_not_require_return_logprobs():
 
 
 @pytest.mark.parametrize(
+    ("classed_req_no_decode", "decode_mask_func"),
+    [
+        (True, None),
+        (False, object()),
+    ],
+)
+def test_fused_graph_is_disabled_when_backend_cannot_decode(monkeypatch, classed_req_no_decode, decode_mask_func):
+    backend = object.__new__(impl.ChunkedPrefillBackend)
+    backend.is_mtp_eagle = True
+    backend.num_mtp_models = 1
+    backend.classed_req_no_decode = classed_req_no_decode
+    backend.decode_mask_func = decode_mask_func
+
+    monkeypatch.setattr(impl, "get_env_start_args", lambda: SimpleNamespace(disable_cudagraph=False))
+
+    backend._init_mtp_fused_graph()
+
+    assert backend.mtp_fused_graph is None
+
+
+@pytest.mark.parametrize(
     ("model_index", "backend_type"),
     [
         (0, FlashInferAttBackend),
@@ -43,6 +64,8 @@ def test_fused_graph_is_disabled_for_main_or_draft_flashinfer(monkeypatch, model
     backend = object.__new__(impl.ChunkedPrefillBackend)
     backend.is_mtp_eagle = True
     backend.num_mtp_models = 1
+    backend.classed_req_no_decode = False
+    backend.decode_mask_func = None
     backend.enable_decode_microbatch_overlap = False
     backend.args = SimpleNamespace(dp=1)
 

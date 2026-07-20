@@ -238,6 +238,8 @@ class ChunkedPrefillBackend(ModeBackend):
             return
         if not (self.is_mtp_eagle and self.num_mtp_models == 1):
             return
+        if self.classed_req_no_decode or self.decode_mask_func is not None:
+            return
         if self.enable_decode_microbatch_overlap or self.args.dp > 1:
             return
         from lightllm.common.basemodel.attention import FlashInferAttBackend, MlaFlashInferAttBackend

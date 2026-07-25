@@ -69,7 +69,7 @@ MTP（多令牌预测）模式
         --graph_max_batch_size 512 \
         --tool_call_parser glm47 \
         --reasoning_parser glm45 \
-        --mtp_step 4 \
+        --max_mtp_step 4 \
         --mtp_mode eagle_with_att \
         --mtp_draft_model_dir /path/to/GLM-4.7-Flash/ \
         --host 0.0.0.0 \
@@ -77,7 +77,7 @@ MTP（多令牌预测）模式
 
 **MTP 参数说明：**
 
-- ``--mtp_step 4``: 每个 MTP 步骤预测的令牌数
+- ``--max_mtp_step 4``: 每个 MTP 步骤预测额外令牌数的上限
 - ``--mtp_mode eagle_with_att``: MTP 模式（支持 ``vanilla_with_att`` 和 ``eagle_with_att``）
 - ``--mtp_draft_model_dir``: MTP 草稿模型路径
 

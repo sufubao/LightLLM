@@ -59,6 +59,12 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
 
     infer_state_class = Qwen35InferStateInfo
 
+    def _gen_mtp_main_output_hiddens(self, input_embs, infer_state):
+        if os.getenv("LIGHTLLM_QWEN35_MTP_PRENORM_HIDDENS", "0") == "1":
+            return input_embs.contiguous()
+        hiddens = self.post_infer._norm(input_embs, infer_state, self.pre_post_weight)
+        return hiddens.contiguous()
+
     def _init_config(self):
         config_path = os.path.join(self.weight_dir_, "config.json")
 

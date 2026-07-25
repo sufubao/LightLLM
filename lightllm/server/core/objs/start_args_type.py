@@ -173,7 +173,11 @@ class StartArgs:
         },
     )
     mtp_draft_model_dir: Optional[str] = field(default=None)
+    max_mtp_step: int = field(default=0)
     mtp_step: int = field(default=0)
+    mtp_workspace_rows: int = field(default=0)
+    mtp_scheduler_profile: Optional[str] = field(default=None)
+    dynamic_mtp: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)

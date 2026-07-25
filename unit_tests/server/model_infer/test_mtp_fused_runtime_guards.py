@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from lightllm.common.basemodel.attention import FlashInferAttBackend, MlaFlashInferAttBackend
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill import impl
@@ -32,6 +33,56 @@ def test_can_run_does_not_require_return_logprobs():
     assert graph.can_run(decode_reqs=[req], max_kv_seq_len=16, batch_size=4)
 
 
+def test_fused_graph_resets_shared_padding_linear_state():
+    graph = object.__new__(MTPFusedDecodeGraph)
+    graph.backend = SimpleNamespace(is_linear_att_mixed_model=True)
+    graph.hold_req_idx = 3
+    graph.req_manager = SimpleNamespace(req_to_mtp_state_index=torch.tensor([0, 0, 0, 4]))
+
+    graph._reset_padding_linear_state()
+
+    assert graph.req_manager.req_to_mtp_state_index.tolist() == [0, 0, 0, 0]
+
+
+@pytest.mark.parametrize(
+    ("proposal_step", "runtime_step", "expected"),
+    [
+        (4, 4, "mtp"),
+        (4, 2, "mtp"),
+        (2, 4, "transition"),
+        (0, 1, "transition"),
+    ],
+)
+def test_select_mtp_profile(proposal_step, runtime_step, expected):
+    reqs = [SimpleNamespace(mtp_proposal_step=proposal_step) for _ in range(2)]
+
+    assert impl.select_mtp_profile(reqs, runtime_mtp_step=runtime_step) == expected
+
+
+def test_dynamic_mtp_can_dispatch_dense_plan():
+    backend = object.__new__(impl.ChunkedPrefillBackend)
+    backend.mtp_step = 4
+    backend._last_mtp_profile = None
+    backend._mtp_profile_counts = {"dense": 0, "transition": 0, "mtp": 0}
+    backend._get_selected_runtime_mtp_step = lambda: 0
+    calls = []
+    backend._decode_transition_mtp_profile = lambda event_pack, decode_reqs, runtime_mtp_step: calls.append(
+        ("decode", runtime_mtp_step, len(decode_reqs))
+    )
+    backend._mark_mtp_plan_step = lambda: calls.append(("mark",))
+
+    backend.decode_mtp(
+        event_pack=object(),
+        decode_reqs=[
+            SimpleNamespace(mtp_proposal_step=3),
+            SimpleNamespace(mtp_proposal_step=0),
+        ],
+    )
+
+    assert calls == [("decode", 0, 2), ("mark",)]
+    assert backend._mtp_profile_counts["dense"] == 1
+
+
 @pytest.mark.parametrize(
     ("classed_req_no_decode", "decode_mask_func"),
     [
@@ -47,6 +98,7 @@ def test_fused_graph_is_disabled_when_backend_cannot_decode(monkeypatch, classed
     backend.decode_mask_func = decode_mask_func
 
     monkeypatch.setattr(impl, "get_env_start_args", lambda: SimpleNamespace(disable_cudagraph=False))
+    monkeypatch.setattr(backend, "_init_mtp_chain_scratch", lambda: None)
 
     backend._init_mtp_fused_graph()
 
@@ -78,6 +130,7 @@ def test_fused_graph_is_disabled_for_main_or_draft_flashinfer(monkeypatch, model
     backend.draft_models = [models[1]]
 
     monkeypatch.setattr(impl, "get_env_start_args", lambda: SimpleNamespace(disable_cudagraph=False))
+    monkeypatch.setattr(backend, "_init_mtp_chain_scratch", lambda: None)
 
     backend._init_mtp_fused_graph()
 

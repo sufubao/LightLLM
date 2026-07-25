@@ -75,14 +75,30 @@ class TpPartBaseModel:
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.data_type = get_llm_data_type()
         mtp_step = get_env_start_args().mtp_step
-        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
-        self.graph_max_batch_size = (
-            self.graph_max_batch_size // 2
+        self.logical_graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
+        self.logical_graph_max_batch_size = (
+            self.logical_graph_max_batch_size // 2
             if get_env_start_args().enable_decode_microbatch_overlap
-            else self.graph_max_batch_size
+            else self.logical_graph_max_batch_size
         )
-        # mtp 模式下需要修缮对应的最大batch size，为 （mtp_step + 1) 的倍数
-        self.graph_max_batch_size = self.graph_max_batch_size * (mtp_step + 1)
+        self.mtp_graph_max_batch_sizes = {}
+        if mtp_step > 0 and getattr(self.args, "dynamic_mtp", False):
+            self.mtp_graph_max_batch_sizes = {
+                step: min(
+                    self.logical_graph_max_batch_size,
+                    self.args.mtp_workspace_rows // step,
+                )
+                * (step + 1)
+                for step in range(1, mtp_step + 1)
+            }
+            self.mtp_graph_max_batch_size = self.mtp_graph_max_batch_sizes[mtp_step]
+        else:
+            self.mtp_graph_max_batch_size = self.logical_graph_max_batch_size * (mtp_step + 1)
+        self.graph_max_batch_size = max(
+            [self.logical_graph_max_batch_size]
+            + list(self.mtp_graph_max_batch_sizes.values())
+            + [self.mtp_graph_max_batch_size]
+        )
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -263,20 +279,60 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
+        if self.args.mtp_step > 0 and getattr(self.args, "dynamic_mtp", False) and not self.disable_cudagraph:
+            self.mtp_graphs = {}
+            mempool = None
+            for runtime_mtp_step in range(self.args.max_mtp_step, 0, -1):
+                graph = CudaGraph(
+                    max_batch_size=self.mtp_graph_max_batch_sizes[runtime_mtp_step],
+                    max_len_in_batch=self.graph_max_len_in_batch,
+                    tp_world_size=self.tp_world_size_,
+                    mtp_step=runtime_mtp_step,
+                    mempool=mempool,
+                )
+                self.mtp_graphs[runtime_mtp_step] = graph
+                graph.warmup(self)
+                mempool = graph.mempool
+            self.graph = self.mtp_graphs[self.args.max_mtp_step]
+            self.dense_graph = CudaGraph(
+                max_batch_size=self.logical_graph_max_batch_size,
+                max_len_in_batch=self.graph_max_len_in_batch,
+                tp_world_size=self.tp_world_size_,
+                mtp_step=0,
+                mempool=mempool,
+            )
+            self.dense_graph.warmup(self)
+            return
+
+        self.mtp_graphs = {}
+        graph_batch_size = (
+            self.mtp_graph_max_batch_size if self.args.mtp_step > 0 else self.logical_graph_max_batch_size
+        )
         self.graph = (
             None
             if self.disable_cudagraph
             else CudaGraph(
-                max_batch_size=self.graph_max_batch_size,
+                max_batch_size=graph_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
+                mtp_step=self.args.mtp_step,
             )
         )
+        self.dense_graph = None
         if self.graph is not None:
             if get_env_start_args().enable_decode_microbatch_overlap:
                 self.graph.warmup_overlap(self)
             else:
                 self.graph.warmup(self)
+            if self.args.mtp_step > 0 and getattr(self.args, "dynamic_mtp", False):
+                self.dense_graph = CudaGraph(
+                    max_batch_size=self.logical_graph_max_batch_size,
+                    max_len_in_batch=self.graph_max_len_in_batch,
+                    tp_world_size=self.tp_world_size_,
+                    mtp_step=0,
+                    mempool=self.graph.mempool,
+                )
+                self.dense_graph.warmup(self)
 
     def _init_prefill_cuda_graph(self):
         self.prefill_graph = (
@@ -365,6 +421,11 @@ class TpPartBaseModel:
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
         infer_state.b_mtp_index = model_input.b_mtp_index
+        infer_state.runtime_mtp_step = (
+            get_env_start_args().mtp_step if model_input.runtime_mtp_step is None else model_input.runtime_mtp_step
+        )
+        infer_state.b_mtp_workspace_idx = model_input.b_mtp_workspace_idx
+        infer_state.use_contiguous_mtp_ssm_workspace = model_input.use_contiguous_mtp_ssm_workspace
         infer_state.b_position_delta = model_input.b_position_delta
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
@@ -421,6 +482,23 @@ class TpPartBaseModel:
         new_model_input.b_mtp_index = F.pad(
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
+        if new_model_input.b_mtp_workspace_idx is not None:
+            mtp_size = new_model_input.runtime_mtp_step + 1
+            assert padded_batch_size % mtp_size == 0
+            logical_batch_size = new_batch_size // mtp_size
+            new_model_input.use_contiguous_mtp_ssm_workspace = self.req_manager.can_use_contiguous_mtp_ssm_workspace(
+                logical_batch_size=logical_batch_size,
+                runtime_mtp_step=new_model_input.runtime_mtp_step,
+            )
+            new_model_input.b_mtp_workspace_idx = F.pad(
+                new_model_input.b_mtp_workspace_idx,
+                (0, padded_batch_size // mtp_size),
+                mode="constant",
+                value=self.req_manager.get_mtp_padding_workspace_idx(
+                    runtime_mtp_step=new_model_input.runtime_mtp_step,
+                    use_contiguous_ssm_workspace=(new_model_input.use_contiguous_mtp_ssm_workspace),
+                ),
+            )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
         if new_model_input.b_position_delta is not None:
             new_model_input.b_position_delta = F.pad(
@@ -609,15 +687,21 @@ class TpPartBaseModel:
         else:
             infer_batch_size = model_input.batch_size
 
-        if self.graph is not None and self.graph.can_run(
+        if model_input.runtime_mtp_step == 0:
+            decode_graph = self.dense_graph
+        elif getattr(self.args, "dynamic_mtp", False):
+            decode_graph = self.mtp_graphs.get(model_input.runtime_mtp_step)
+        else:
+            decode_graph = self.graph
+        if decode_graph is not None and decode_graph.can_run(
             batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
         ):
-            infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
+            infer_batch_size = decode_graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
             infer_state = self._create_inferstate(model_input)
-            need_capture = self.graph.need_capture(infer_batch_size)
+            need_capture = decode_graph.need_capture(infer_batch_size)
             infer_state.is_cuda_graph = need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -629,9 +713,9 @@ class TpPartBaseModel:
             infer_state.init_att_state()
 
             if need_capture:
-                model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
+                model_output: ModelOutput = decode_graph.capture_decode(self._token_forward, infer_state)
             else:
-                model_output: ModelOutput = self.graph.replay(infer_state)
+                model_output: ModelOutput = decode_graph.replay(infer_state)
 
             model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
         else:
@@ -654,7 +738,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -708,7 +791,7 @@ class TpPartBaseModel:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
             if infer_state.need_dp_prefill_balance:
                 input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -736,13 +819,16 @@ class TpPartBaseModel:
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()
 
         return model_output
+
+    def _gen_mtp_main_output_hiddens(self, input_embs: torch.Tensor, infer_state: InferStateInfo) -> torch.Tensor:
+        return input_embs.contiguous()
 
     @torch.no_grad()
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
@@ -983,8 +1069,8 @@ class TpPartBaseModel:
             if infer_state.need_dp_prefill_balance:
                 input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
                 input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
+            model_output1.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs1, infer_state1)
 
         return model_output, model_output1
 
@@ -1018,8 +1104,8 @@ class TpPartBaseModel:
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
             input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
+            model_output1.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs1, infer_state1)
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()

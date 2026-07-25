@@ -527,13 +527,27 @@ MTP 多预测参数
     
     用于加载 MTP 多输出 token 模型。
 
-.. option:: --mtp_step
+.. option:: --max_mtp_step
 
-    指定使用草稿模型预测的额外 token 数量，默认为 ``0``
+    指定草稿模型预测额外 token 数量的上限，默认为 ``0``。
     
-    目前此功能仅支持 DeepSeekV3/R1 模型。
-    增加此值允许更多预测，但确保模型与指定的步数兼容。
-    目前 deepseekv3/r1 模型仅支持 1 步
+    增加此值允许更多预测，但需要确保模型和草稿 checkpoint 与指定步数兼容。
+    混合线性注意力模型会根据 ``mtp_workspace_rows`` 和当前 batch 大小选择
+    不超过该值的实际运行深度。
+
+.. option:: --mtp_workspace_rows
+
+    混合线性注意力 MTP 的运行时推测状态行数。``0`` 表示使用
+    ``running_max_req_size``。实际 MTP 深度同时受 ``max_mtp_step`` 和
+    当前逻辑 batch 大小约束。
+
+.. option:: --mtp_scheduler_profile
+
+    可选的动态 MTP 硬件/负载 JSON profile。每个计划将活跃请求区间映射到
+    微批大小、MTP 深度和预估输出吞吐；调度器选择满足 workspace 上限的最高
+    吞吐计划。深度为 ``0`` 时使用 dense decode。profile 未覆盖的负载回退到
+    容量策略。当 ``mtp_workspace_rows`` 小于 ``running_max_req_size`` 时，
+    profile 必须覆盖所有活跃请求数量。
 
 DeepSeek 冗余专家参数
 ---------------------

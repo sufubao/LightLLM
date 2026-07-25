@@ -709,14 +709,33 @@ def make_argument_parser() -> argparse.ArgumentParser:
         used for loading the MTP multi-output token model.""",
     )
     parser.add_argument(
-        "--mtp_step",
+        "--max_mtp_step",
         type=int,
         default=0,
-        help="""Specifies the number of additional tokens to predict using the draft model.
-        Currently, this feature supports only the DeepSeekV3 model.
-        Increasing this value allows for more predictions,
-        but ensure that the model is compatible with the specified step count.
-        currently, deepseekv3 model only support 1 step""",
+        help="""Maximum number of additional tokens predicted by the draft model.
+        Dynamic MTP may choose a smaller runtime step for larger decode batches.""",
+    )
+    parser.add_argument(
+        "--mtp_step",
+        dest="mtp_step",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--mtp_workspace_rows",
+        type=int,
+        default=0,
+        help="""Number of runtime SSM workspace rows for dynamic MTP.
+        Zero uses running_max_req_size.""",
+    )
+    parser.add_argument(
+        "--mtp_scheduler_profile",
+        type=str,
+        default=None,
+        help="""JSON hardware/workload profile used to choose runtime MTP
+        microbatch size and depth. Without a matching plan, dynamic MTP falls
+        back to the workspace-capacity policy.""",
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",

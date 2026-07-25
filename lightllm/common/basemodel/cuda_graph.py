@@ -8,6 +8,9 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.mtp_workspace import (
+    get_contiguous_mtp_workspace_request_capacity,
+)
 from .infer_struct import InferStateInfo
 
 
@@ -18,9 +21,9 @@ class CudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
     @staticmethod
-    def gen_cuda_graph_batch_sizes(max_batch_size=8, tp_world_size: int = 1):
+    def gen_cuda_graph_batch_sizes(max_batch_size=8, tp_world_size: int = 1, mtp_step: int = None):
         args = get_env_start_args()
-        mtp_size = args.mtp_step + 1
+        mtp_size = (args.mtp_step if mtp_step is None else mtp_step) + 1
 
         # gen cuda graph batch_sizes
         # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
@@ -35,7 +38,17 @@ class CudaGraph:
             batch_sizes.append(_batch_size)
 
         batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
+        if mtp_size > 1 and getattr(args, "dynamic_mtp", False) and args.mtp_workspace_rows > 0:
+            contiguous_capacity = get_contiguous_mtp_workspace_request_capacity(
+                workspace_rows=args.mtp_workspace_rows,
+                max_mtp_step=args.max_mtp_step,
+                runtime_mtp_step=mtp_size - 1,
+            )
+            contiguous_batch_size = contiguous_capacity * mtp_size
+            if 0 < contiguous_batch_size < max_batch_size:
+                batch_sizes.append(contiguous_batch_size)
         batch_sizes.append(max_batch_size)
+        batch_sizes = list(set(batch_sizes))
         batch_sizes.sort()
         if args.enable_tpsp_mix_mode:
             batch_sizes = [triton.cdiv(e, tp_world_size) * tp_world_size for e in batch_sizes]
@@ -45,12 +58,21 @@ class CudaGraph:
         assert batch_sizes[-1] == max_batch_size
         return batch_sizes
 
-    def __init__(self, max_batch_size=8, max_len_in_batch=8192, tp_world_size: int = 1):
+    def __init__(
+        self,
+        max_batch_size=8,
+        max_len_in_batch=8192,
+        tp_world_size: int = 1,
+        mtp_step: int = None,
+        mempool=None,
+    ):
         self.graph = {}
         self.tp_world_size = tp_world_size
-        self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
+        self.mempool = (
+            mempool if mempool is not None else (torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None)
+        )
         self.args = get_env_start_args()
-        self.mtp_step = self.args.mtp_step
+        self.mtp_step = self.args.mtp_step if mtp_step is None else mtp_step
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
@@ -58,6 +80,7 @@ class CudaGraph:
         self.cuda_graph_batch_sizes = self.gen_cuda_graph_batch_sizes(
             max_batch_size=max_batch_size,
             tp_world_size=tp_world_size,
+            mtp_step=self.mtp_step,
         )
         assert self.cuda_graph_batch_sizes[-1] == self.max_batch_size
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
@@ -221,6 +244,17 @@ class CudaGraph:
             b_seq_len.fill_(seq_len)
             b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
 
+            special_model_input = model._gen_special_model_input(batch_size)
+            use_contiguous_mtp_ssm_workspace = False
+            if getattr(model.req_manager, "memory_aware_mtp", False) and self.mtp_step > 0:
+                logical_batch_size = batch_size // (self.mtp_step + 1)
+                special_model_input["b_mtp_workspace_idx"] = torch.arange(
+                    logical_batch_size, dtype=torch.int32, device="cuda"
+                )
+                use_contiguous_mtp_ssm_workspace = model.req_manager.can_use_contiguous_mtp_ssm_workspace(
+                    logical_batch_size=logical_batch_size,
+                    runtime_mtp_step=self.mtp_step,
+                )
             model_input = ModelInput(
                 batch_size=batch_size,
                 total_token_num=total_token_num,
@@ -234,7 +268,9 @@ class CudaGraph:
                 b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-                **model._gen_special_model_input(batch_size),
+                runtime_mtp_step=self.mtp_step,
+                use_contiguous_mtp_ssm_workspace=(use_contiguous_mtp_ssm_workspace),
+                **special_model_input,
             )
             model_output: ModelOutput = model.forward(model_input)
             del model_output
@@ -280,6 +316,17 @@ class CudaGraph:
                 b_seq_len.fill_(seq_len)
                 b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
 
+                special_model_input = model._gen_special_model_input(batch_size)
+                use_contiguous_mtp_ssm_workspace = False
+                if getattr(model.req_manager, "memory_aware_mtp", False) and self.mtp_step > 0:
+                    logical_batch_size = batch_size // (self.mtp_step + 1)
+                    special_model_input["b_mtp_workspace_idx"] = torch.arange(
+                        logical_batch_size, dtype=torch.int32, device="cuda"
+                    )
+                    use_contiguous_mtp_ssm_workspace = model.req_manager.can_use_contiguous_mtp_ssm_workspace(
+                        logical_batch_size=logical_batch_size,
+                        runtime_mtp_step=self.mtp_step,
+                    )
                 micro_batch = ModelInput(
                     is_prefill=False,
                     batch_size=batch_size,
@@ -293,7 +340,9 @@ class CudaGraph:
                     b_seq_len=b_seq_len,
                     b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                     multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-                    **model._gen_special_model_input(batch_size),
+                    runtime_mtp_step=self.mtp_step,
+                    use_contiguous_mtp_ssm_workspace=(use_contiguous_mtp_ssm_workspace),
+                    **special_model_input,
                 )
                 decode_batches.append(micro_batch)
                 del micro_batch

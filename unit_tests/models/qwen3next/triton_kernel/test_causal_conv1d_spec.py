@@ -136,6 +136,56 @@ def make_tensors(
     return x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc
 
 
+def test_runtime_step_uses_prefix_of_max_step_workspace():
+    batch = 3
+    dim = 64
+    width = 4
+    runtime_mtp_step = 2
+    max_mtp_step = 4
+    x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc = make_tensors(
+        batch=batch,
+        dim=dim,
+        width=width,
+        mtp_step=runtime_mtp_step,
+        has_bias=True,
+    )
+    extra_columns = torch.randn(
+        batch,
+        dim,
+        max_mtp_step - runtime_mtp_step,
+        device=conv_state.device,
+        dtype=conv_state.dtype,
+    )
+    conv_state = torch.cat((conv_state, extra_columns), dim=-1)
+    tail_before = conv_state[..., width - 1 + runtime_mtp_step :].clone()
+
+    out_ref = causal_conv1d_ref(
+        x.clone(),
+        conv_state[..., : width - 1 + runtime_mtp_step].contiguous(),
+        weight,
+        mtp_step=runtime_mtp_step,
+        bias=bias,
+        activation="silu",
+        conv_state_indices=conv_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        query_start_loc=query_start_loc,
+    )
+    out = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        mtp_step=runtime_mtp_step,
+        bias=bias,
+        activation="silu",
+        conv_state_indices=conv_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        query_start_loc=query_start_loc,
+    )
+
+    assert torch.allclose(out, out_ref, rtol=1e-2, atol=1e-2)
+    assert torch.equal(conv_state[..., width - 1 + runtime_mtp_step :], tail_before)
+
+
 @pytest.mark.parametrize("width", [2, 3, 4, 5, 6])
 @pytest.mark.parametrize("dim", [64, 128])
 @pytest.mark.parametrize("mtp_step", [0, 1, 2])

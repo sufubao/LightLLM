@@ -95,7 +95,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     return model_input, run_reqs
 
 
-def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[InferReq]]:
+def prepare_decode_inputs(req_objs: List[InferReq], runtime_mtp_step: int = None) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs: List[InferReq] = []
     total_token_num = 0
     b_req_idx = []
@@ -114,7 +114,8 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        for step in range(req.mtp_step):
+        req_mtp_step = req.mtp_step if runtime_mtp_step is None else runtime_mtp_step
+        for step in range(req_mtp_step):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
@@ -158,6 +159,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mark_shared_group=b_mark_shared_group,
         is_prefill=False,
         multimodal_params=multimodal_params,
+        runtime_mtp_step=runtime_mtp_step,
     )
     return model_input, run_reqs
 

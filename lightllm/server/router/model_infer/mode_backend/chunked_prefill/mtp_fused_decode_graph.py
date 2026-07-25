@@ -12,7 +12,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_verify,
     mtp_scatter_next_token_ids,
 )
-from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -28,7 +28,6 @@ class FusedStepOutput:
     next_token_logprobs: torch.Tensor
     mtp_accept_len: torch.Tensor
     accepted_index: torch.Tensor
-    eagle_mem_indexes_cpu: torch.Tensor
 
 
 @dataclass
@@ -62,19 +61,20 @@ class MTPFusedDecodeGraph:
     含惩罚项、自定义随机种子、logit_bias 等请求走原有慢速路径 (can_run 判定)。
     """
 
-    def __init__(self, backend: "ChunkedPrefillBackend"):
+    def __init__(self, backend: "ChunkedPrefillBackend", runtime_mtp_step: int = None):
         self.backend = backend
         self.model = backend.model
         self.draft_model = backend.draft_models[0]
-        self.mtp_step = backend.mtp_step
+        self.mtp_step = backend.mtp_step if runtime_mtp_step is None else runtime_mtp_step
         self.mtp_size = self.mtp_step + 1
         self.args = get_env_start_args()
 
         model = self.model
-        self.graph_max_batch_size = model.graph_max_batch_size
+        model_graph = model.mtp_graphs[self.mtp_step] if getattr(self.args, "dynamic_mtp", False) else model.graph
+        self.graph_max_batch_size = model_graph.max_batch_size
         self.graph_max_len_in_batch = model.graph_max_len_in_batch
-        self.cuda_graph_batch_sizes = model.graph.cuda_graph_batch_sizes
-        self.mempool = model.graph.mempool
+        self.cuda_graph_batch_sizes = model_graph.cuda_graph_batch_sizes
+        self.mempool = model_graph.mempool
         self.vocab_size = model.vocab_size
 
         B = self.graph_max_batch_size
@@ -87,9 +87,10 @@ class MTPFusedDecodeGraph:
         self.b_seq_len = torch.zeros(B, dtype=torch.int32, device="cuda")
         self.b_mtp_index = torch.arange(self.mtp_size, dtype=torch.int32, device="cuda").repeat(n_max)
         self.mem_indexes = torch.zeros(B, dtype=torch.int32, device="cuda")
-        self.eagle_mem_indexes = torch.zeros(n_max * self.mtp_step, dtype=torch.int32, device="cuda")
+        self.chain_scratch = backend.mtp_chain_scratch
         self.input_ids = torch.zeros(B, dtype=torch.int64, device="cuda")
         self.b_position_delta = torch.zeros(B, dtype=torch.int64, device="cuda")
+        self.mtp_workspace_idx = torch.zeros(n_max, dtype=torch.int32, device="cuda")
         # b_position_delta 前多少行可能残留非零值; bool 不够用: 小 batch 的清零只覆盖前缀,
         # 之后更大的 batch 会读到尾部旧 delta。
         self._position_delta_rows = 0
@@ -105,11 +106,11 @@ class MTPFusedDecodeGraph:
         self.b_req_idx_pin = torch.zeros(B, **pin)
         self.b_seq_len_pin = torch.zeros(B, **pin)
         self.mem_indexes_pin = torch.zeros(B, **pin)
-        self.eagle_mem_indexes_pin = torch.zeros(n_max * self.mtp_step, **pin)
         self.temperature_pin = torch.ones(B, dtype=torch.float32, device="cpu", pin_memory=True)
         self.top_k_pin = torch.ones(B, dtype=torch.int32, device="cpu", pin_memory=True)
         self.top_p_pin = torch.ones(B, dtype=torch.float32, device="cpu", pin_memory=True)
         self.b_position_delta_pin = torch.zeros(B, dtype=torch.int64, device="cpu", pin_memory=True)
+        self.mtp_workspace_idx_pin = torch.zeros(n_max, dtype=torch.int32, device="cpu", pin_memory=True)
 
         # 静态输出 buffer (采样 token 拷贝到此供 D2H / verify / draft chain 使用)。
         self.out_next_token_ids = torch.zeros(B, dtype=torch.int64, device="cuda")
@@ -141,8 +142,6 @@ class MTPFusedDecodeGraph:
         if self.backend.decode_mask_func is not None:
             return False
         for req in decode_reqs:
-            if req.mtp_step != self.mtp_step:
-                return False
             shm_param = req.sampling_param.shm_param
             if req.generator is not None:
                 return False
@@ -196,19 +195,32 @@ class MTPFusedDecodeGraph:
         return
 
     def _stage_warmup_inputs(self, batch_size: int):
+        self._reset_padding_linear_state()
         n_real = batch_size // self.mtp_size
         self.b_req_idx[:batch_size].fill_(self.hold_req_idx)
         seq_pattern = torch.arange(2, self.mtp_size + 2, dtype=torch.int32, device="cuda")
         self.b_seq_len[:batch_size].copy_(seq_pattern.repeat(n_real))
         self.mem_indexes[:batch_size].fill_(self.hold_mem_index)
-        self.eagle_mem_indexes[: n_real * self.mtp_step].fill_(self.hold_mem_index)
         self.temperature[:batch_size].fill_(1.0)
         self.top_k[:batch_size].fill_(1)
         self.top_p[:batch_size].fill_(1.0)
         self.b_position_delta[:batch_size].zero_()
+        self.mtp_workspace_idx[:n_real].copy_(torch.arange(n_real, dtype=torch.int32, device="cuda"))
+        return
+
+    def _reset_padding_linear_state(self):
+        if self.backend.is_linear_att_mixed_model:
+            self.req_manager.req_to_mtp_state_index[self.hold_req_idx].zero_()
         return
 
     def _build_model_input(self, batch_size: int) -> ModelInput:
+        logical_batch_size = batch_size // self.mtp_size
+        use_contiguous_mtp_ssm_workspace = getattr(
+            self.req_manager, "memory_aware_mtp", False
+        ) and self.req_manager.can_use_contiguous_mtp_ssm_workspace(
+            logical_batch_size=logical_batch_size,
+            runtime_mtp_step=self.mtp_step,
+        )
         return ModelInput(
             batch_size=batch_size,
             total_token_num=self.graph_max_len_in_batch * batch_size,
@@ -221,6 +233,13 @@ class MTPFusedDecodeGraph:
             b_mtp_index=self.b_mtp_index[:batch_size],
             is_prefill=False,
             multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+            runtime_mtp_step=self.mtp_step,
+            use_contiguous_mtp_ssm_workspace=(use_contiguous_mtp_ssm_workspace),
+            b_mtp_workspace_idx=(
+                self.mtp_workspace_idx[:logical_batch_size]
+                if getattr(self.req_manager, "memory_aware_mtp", False)
+                else None
+            ),
         )
 
     def _forward_in_body(self, model, model_input: ModelInput):
@@ -297,7 +316,6 @@ class MTPFusedDecodeGraph:
         return mtp_accept_len, accepted_index, model_output.mtp_main_output_hiddens
 
     def _run_draft_body(self, batch_size: int, verify_ctx):
-        """draft chain, 与 _draft_decode_eagle 相同的滑动窗口语义。"""
         mtp_accept_len, _, main_hiddens = verify_ctx
         mtp_size = self.mtp_size
         n_real = batch_size // mtp_size
@@ -306,13 +324,15 @@ class MTPFusedDecodeGraph:
         req_to_next_token_ids = self.sampling_manager.req_to_next_token_ids
 
         draft_model_input = self._build_model_input(batch_size)
-        draft_mem_indexes = self.mem_indexes[:batch_size]
         draft_next_token_ids = self.out_next_token_ids[:batch_size]
         draft_hiddens = main_hiddens
         all_next_token_ids = [draft_next_token_ids]
         for _step in range(self.mtp_step):
             draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.mem_indexes = draft_mem_indexes
+            if _step == 0:
+                draft_model_input.mem_indexes = self.mem_indexes[:batch_size]
+            else:
+                draft_model_input.mem_indexes = self.chain_scratch[(_step - 1) * batch_size : _step * batch_size]
             draft_model_input.mtp_draft_input_hiddens = draft_hiddens
             draft_model_output = self._forward_in_body(self.draft_model, draft_model_input)
             draft_next_token_ids = torch.argmax(draft_model_output.logits, dim=-1)
@@ -320,11 +340,16 @@ class MTPFusedDecodeGraph:
             all_next_token_ids.append(draft_next_token_ids)
 
             b_seq_len += 1
-            eagle_mem_indexes_i = self.eagle_mem_indexes[_step * n_real : (_step + 1) * n_real]
-            draft_mem_indexes = torch.cat(
-                [draft_mem_indexes.view(-1, mtp_size)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
+
+        if self.mtp_step > 1:
+            b_seq_len -= self.mtp_step
+            copy_kv_index_to_req(
+                self.req_manager.req_to_token_indexs,
+                b_req_idx,
+                b_seq_len,
+                self.mem_indexes[:batch_size],
+            )
+            b_seq_len += self.mtp_step
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)
         b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * mtp_size
@@ -360,25 +385,36 @@ class MTPFusedDecodeGraph:
         self._replay_batch_size = batch_size
         n_real = batch_size // self.mtp_size
         real_n = real_batch_size // self.mtp_size
-        mtp_step = self.mtp_step
-
-        # eagle 额外 kv 槽位分配 (真实请求) + HOLD padding
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_n * mtp_step)
-        eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_n * mtp_step)
+        use_contiguous_mtp_ssm_workspace = (
+            self.req_manager.can_use_contiguous_mtp_ssm_workspace(
+                logical_batch_size=n_real,
+                runtime_mtp_step=self.mtp_step,
+            )
+            if getattr(self.req_manager, "memory_aware_mtp", False)
+            else False
+        )
 
         # staging: 填 pinned buffer, 单次 H2D 到静态输入
         self.b_req_idx_pin[:real_batch_size].copy_(model_input.b_req_idx)
         self.b_seq_len_pin[:real_batch_size].copy_(model_input.b_seq_len)
         self.mem_indexes_pin[:real_batch_size].copy_(model_input.mem_indexes_cpu)
-        self.eagle_mem_indexes_pin[: real_n * mtp_step].copy_(eagle_mem_indexes_cpu)
+        if getattr(self.req_manager, "memory_aware_mtp", False):
+            assert model_input.b_mtp_workspace_idx is not None
+            assert model_input.use_contiguous_mtp_ssm_workspace == use_contiguous_mtp_ssm_workspace
+            self.mtp_workspace_idx_pin[:real_n].copy_(model_input.b_mtp_workspace_idx)
         if batch_size != real_batch_size:
             self.b_req_idx_pin[real_batch_size:batch_size].fill_(self.hold_req_idx)
             pad_n = n_real - real_n
             pad_seq = torch.arange(2, self.mtp_size + 2, dtype=torch.int32).repeat(pad_n)
             self.b_seq_len_pin[real_batch_size:batch_size].copy_(pad_seq)
             self.mem_indexes_pin[real_batch_size:batch_size].fill_(self.hold_mem_index)
-            self.eagle_mem_indexes_pin[real_n * mtp_step : n_real * mtp_step].fill_(self.hold_mem_index)
+            if getattr(self.req_manager, "memory_aware_mtp", False):
+                self.mtp_workspace_idx_pin[real_n:n_real].fill_(
+                    self.req_manager.get_mtp_padding_workspace_idx(
+                        runtime_mtp_step=self.mtp_step,
+                        use_contiguous_ssm_workspace=(use_contiguous_mtp_ssm_workspace),
+                    )
+                )
 
         has_delta = False
         for i, req in enumerate(run_reqs):
@@ -402,14 +438,14 @@ class MTPFusedDecodeGraph:
         self.b_req_idx[:batch_size].copy_(self.b_req_idx_pin[:batch_size], non_blocking=True)
         self.b_seq_len[:batch_size].copy_(self.b_seq_len_pin[:batch_size], non_blocking=True)
         self.mem_indexes[:batch_size].copy_(self.mem_indexes_pin[:batch_size], non_blocking=True)
-        self.eagle_mem_indexes[: n_real * mtp_step].copy_(
-            self.eagle_mem_indexes_pin[: n_real * mtp_step], non_blocking=True
-        )
+        if getattr(self.req_manager, "memory_aware_mtp", False):
+            self.mtp_workspace_idx[:n_real].copy_(self.mtp_workspace_idx_pin[:n_real], non_blocking=True)
         self.temperature[:batch_size].copy_(self.temperature_pin[:batch_size], non_blocking=True)
         self.top_k[:batch_size].copy_(self.top_k_pin[:batch_size], non_blocking=True)
         self.top_p[:batch_size].copy_(self.top_p_pin[:batch_size], non_blocking=True)
         self._flush_position_delta(has_delta, batch_size)
 
+        self._reset_padding_linear_state()
         bundle: _GraphBundle = self.graphs[batch_size]
         bundle.verify_graph.replay()
 
@@ -418,7 +454,6 @@ class MTPFusedDecodeGraph:
             next_token_logprobs=self.out_next_token_logprobs[:real_batch_size],
             mtp_accept_len=bundle.mtp_accept_len[:real_n],
             accepted_index=bundle.accepted_index[:real_batch_size],
-            eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,
         )
 
     def replay_draft(self):

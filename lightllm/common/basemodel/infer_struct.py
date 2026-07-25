@@ -38,6 +38,9 @@ class InferStateInfo:
         self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
         self.b_mtp_index: torch.Tensor = None
+        self.runtime_mtp_step: int = 0
+        self.b_mtp_workspace_idx: torch.Tensor = None
+        self.use_contiguous_mtp_ssm_workspace: bool = False
         # only for mrope model in decode phase used.
         self.b_position_delta: torch.Tensor = None
 

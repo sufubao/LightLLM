@@ -55,6 +55,9 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    runtime_mtp_step: Optional[int] = None
+    b_mtp_workspace_idx: Optional[torch.Tensor] = None
+    use_contiguous_mtp_ssm_workspace: bool = False
 
     def to_cuda(self):
         if self.input_ids is not None:
@@ -69,6 +72,8 @@ class ModelInput:
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
+        if self.b_mtp_workspace_idx is not None:
+            self.b_mtp_workspace_idx = self.b_mtp_workspace_idx.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_position_delta is not None:

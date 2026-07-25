@@ -528,13 +528,30 @@ MTP Multi-Prediction Parameters
     
     Used to load the MTP multi-output token model.
 
-.. option:: --mtp_step
+.. option:: --max_mtp_step
 
-    Specify the number of additional tokens predicted by the draft model, default is ``0``
+    Specify the maximum number of additional tokens predicted by the draft model, default is ``0``.
     
-    Currently this feature only supports DeepSeekV3/R1 models.
-    Increasing this value allows more predictions, but ensure the model is compatible with the specified number of steps.
-    Currently deepseekv3/r1 models only support 1 step
+    Increasing this value allows more predictions, but ensure the model and
+    draft checkpoint are compatible with the specified number of steps.
+    Hybrid linear-attention models may select a lower runtime depth according
+    to ``mtp_workspace_rows`` and the current batch size.
+
+.. option:: --mtp_workspace_rows
+
+    Number of runtime speculative-state rows for hybrid linear-attention MTP.
+    ``0`` uses ``running_max_req_size``. The runtime MTP depth is bounded by
+    both ``max_mtp_step`` and the current logical batch size.
+
+.. option:: --mtp_scheduler_profile
+
+    Optional JSON hardware/workload profile for dynamic MTP. Each plan maps an
+    active-request range to a microbatch size, MTP depth, and estimated output
+    throughput. The highest-throughput plan satisfying the workspace limit is
+    selected. A depth of ``0`` selects dense decode. Loads not covered by the
+    profile use the capacity-based policy. When ``mtp_workspace_rows`` is
+    smaller than ``running_max_req_size``, the profile must cover every active
+    request count.
 
 DeepSeek Redundant Expert Parameters
 ------------------------------------

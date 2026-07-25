@@ -14,7 +14,6 @@ from .generic_pre_process import build_b_position_delta
 def padded_prepare_prefill_inputs(
     req_objs: List[InferReq], dest_batch_size: Optional[int] = None
 ) -> Tuple[ModelInput, List[InferReq], int]:
-
     if dest_batch_size is None:
         req_num = len(req_objs)
         if req_num > 0:
@@ -39,7 +38,6 @@ def padded_prepare_prefill_inputs(
     b_is_decode_req = []
 
     for req in req_objs:
-
         run_reqs.append(req)
         batch_multimodal_params.append(req.multimodal_params)
         b_req_idx.append(req.req_idx)
@@ -133,7 +131,6 @@ def padded_prepare_prefill_inputs(
 def padded_prepare_decode_inputs(
     req_objs: List[InferReq], dest_batch_size: Optional[int] = None
 ) -> Tuple[ModelInput, List[InferReq], int]:
-
     if dest_batch_size is None:
         if len(req_objs) == 0:
             dest_batch_size = 1
@@ -226,6 +223,7 @@ def padded_prepare_decode_inputs(
         b_position_delta=b_position_delta,
         is_prefill=False,
         multimodal_params=batch_multimodal_params,
+        runtime_mtp_step=args_mtp_step,
     )
     return model_input, run_reqs, padded_req_num
 

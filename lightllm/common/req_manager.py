@@ -1,17 +1,31 @@
 import torch
 import collections
+import threading
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional, TYPE_CHECKING
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
-from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
+from lightllm.common.basemodel.triton_kernel.gen_sampling_params import (
+    update_req_to_token_id_counter,
+)
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
-from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
+from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import (
+    LinearAttCacheManager,
+)
+from lightllm.common.mtp_workspace import (
+    MTPWorkspaceAllocator,
+    build_runtime_mtp_conv_state_view,
+    can_use_contiguous_mtp_ssm_workspace,
+    compact_mtp_ssm_size,
+    get_contiguous_mtp_workspace_request_capacity,
+    get_mtp_padding_workspace_idx,
+    get_mtp_workspace_request_capacity,
+)
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -131,7 +145,10 @@ class ReqSamplingParamsManager:
             )
         elif self.penalty_counter_mode == "pin_mem_counter":
             self.req_to_out_token_id_counter = torch.zeros(
-                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cpu", pin_memory=True
+                (max_request_num + 1, self.vocab_size),
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
             )
 
     def init_req_sampling_params(self, req: "InferReq"):
@@ -164,14 +181,18 @@ class ReqSamplingParamsManager:
                     dtype=torch.int32,
                 ).cuda(non_blocking=True)
                 token_id_counter(
-                    prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
+                    prompt_ids=prompt_ids,
+                    out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx],
                 )
                 torch.cuda.current_stream().synchronize()
 
         return
 
     def update_reqs_out_token_counter_gpu(
-        self, b_req_idx: torch.Tensor, next_token_ids: torch.Tensor, mask: torch.Tensor = None
+        self,
+        b_req_idx: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        mask: torch.Tensor = None,
     ):
         if self.penalty_counter_mode not in ["gpu_counter", "pin_mem_counter"]:
             return
@@ -187,7 +208,10 @@ class ReqSamplingParamsManager:
         return
 
     def update_reqs_token_counter(
-        self, req_objs: List["InferReq"], next_token_ids: List[int], accept_mark: Optional[List[List[bool]]] = None
+        self,
+        req_objs: List["InferReq"],
+        next_token_ids: List[int],
+        accept_mark: Optional[List[List[bool]]] = None,
     ):
         if self.penalty_counter_mode != "cpu_counter":
             return
@@ -229,9 +253,19 @@ class ReqSamplingParamsManager:
 
 
 class ReqManagerForMamba(ReqManager):
-    def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
+    def __init__(
+        self,
+        max_request_num,
+        max_sequence_length,
+        mem_manager,
+        linear_config: LinearAttCacheConfig,
+    ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
-        self.mtp_step = get_env_start_args().mtp_step
+        args = get_env_start_args()
+        self.mtp_step = args.mtp_step
+        self.max_mtp_step = self.mtp_step
+        self.mtp_workspace_rows = getattr(args, "mtp_workspace_rows", 0) or max_request_num
+        self.memory_aware_mtp = bool(getattr(args, "dynamic_mtp", False))
         # 因为在mtp的推理中，需要标记每个请求对应的mtp index状态(conv state 和 ssm state)，在mtp对应序列中
         # 的真实位置，所以需要需要一个标记来记录，不然算子无法找到真实的处理起点。
         self.req_to_mtp_state_index = (
@@ -251,38 +285,315 @@ class ReqManagerForMamba(ReqManager):
         self.req_to_conv_state = LayerCache(
             size=(max_request_num + 1),
             dtype=self.linear_config.conv_state_dtype,
-            shape=self.linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step),
+            shape=(
+                self.linear_config.get_conv_state_shape()
+                if self.memory_aware_mtp
+                else self.linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step)
+            ),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
         )
+        ssm_size = (
+            compact_mtp_ssm_size(max_request_num, self.mtp_workspace_rows, self.max_mtp_step)
+            if self.memory_aware_mtp
+            else (max_request_num + 1) * (self.mtp_step + 1)
+        )
         self.req_to_ssm_state = LayerCache(
-            size=(max_request_num + 1) * (self.mtp_step + 1),
+            size=ssm_size,
             dtype=self.linear_config.ssm_state_dtype,
             shape=self.linear_config.get_ssm_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
         )
+        self.mtp_req_to_conv_state = None
+        self.mtp_req_to_ssm_state = None
+        self.mtp_workspace_allocator = None
+        self.mtp_workspace_lock = None
+        self.active_runtime_mtp_step = 0
+        self.active_contiguous_mtp_ssm_workspace = False
+        if self.memory_aware_mtp:
+            workspace_size = self.mtp_workspace_rows + 1
+            self.mtp_req_to_conv_state = LayerCache(
+                size=workspace_size,
+                dtype=self.linear_config.conv_state_dtype,
+                shape=self.linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step),
+                layer_num=self.linear_config.linear_layer_num,
+                device="cuda",
+            )
+            self.mtp_req_to_conv_state.buffer.zero_()
+            self.mtp_workspace_allocator = MTPWorkspaceAllocator(self.mtp_workspace_rows)
+            self.mtp_workspace_lock = threading.Lock()
+
+        if self.memory_aware_mtp:
+            ssm_cell_bytes = self.req_to_ssm_state.get_cell_size()
+            canonical_bytes = self.req_to_conv_state.buffer.nbytes + (max_request_num + 1) * ssm_cell_bytes
+        else:
+            canonical_bytes = self.req_to_conv_state.buffer.nbytes + self.req_to_ssm_state.buffer.nbytes
+        workspace_bytes = 0
+        if self.mtp_req_to_conv_state is not None:
+            workspace_ssm_rows = self.mtp_workspace_rows + self.max_mtp_step
+            workspace_bytes = self.mtp_req_to_conv_state.buffer.nbytes + workspace_ssm_rows * ssm_cell_bytes
+        logger.info(
+            f"linear attention state: canonical={canonical_bytes / 1024**2:.1f} MiB, "
+            f"mtp_workspace={workspace_bytes / 1024**2:.1f} MiB, "
+            f"mtp_workspace_rows={self.mtp_workspace_rows}, max_mtp_step={self.max_mtp_step}"
+        )
         return
 
     def init_linear_att_state(self, req: "InferReq"):
         conv_index = req.req_idx
-        ssm_start = req.req_idx * (self.mtp_step + 1)
         self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
-        # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
-        # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
-        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
+        ssm_start = req.req_idx if self.memory_aware_mtp else req.req_idx * (self.mtp_step + 1)
+        ssm_count = 1 if self.memory_aware_mtp else self.mtp_step + 1
+        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + ssm_count, ...].fill_(0)
         if self.req_to_mtp_state_index is not None:
             self.req_to_mtp_state_index[req.req_idx] = 0
         return
 
-    def get_mamba_cache(self, layer_idx_in_all: int):
+    def get_mamba_cache(
+        self,
+        layer_idx_in_all: int,
+        use_mtp_workspace: bool = False,
+        use_contiguous_ssm_workspace: bool = False,
+        runtime_mtp_step: int = None,
+    ):
         assert (
             0 <= layer_idx_in_all < self.linear_config.all_layer_num
         ), f"invalid transformer layer index {layer_idx_in_all}"
         layer_idx_in_linear = layer_idx_in_all - (layer_idx_in_all // self.linear_config.full_attention_interval)
-        conv_states = self.req_to_conv_state.buffer[layer_idx_in_linear]
-        ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
+        if use_mtp_workspace:
+            assert self.mtp_req_to_conv_state is not None
+            assert runtime_mtp_step is not None and runtime_mtp_step > 0
+            conv_states = self._get_runtime_mtp_conv_state(
+                runtime_mtp_step=runtime_mtp_step,
+                use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+            )[layer_idx_in_linear]
+            ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
+        else:
+            conv_states = self.req_to_conv_state.buffer[layer_idx_in_linear]
+            ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
+
+    def _get_runtime_mtp_conv_state(
+        self,
+        runtime_mtp_step: int,
+        use_contiguous_ssm_workspace: bool,
+    ) -> torch.Tensor:
+        assert self.mtp_req_to_conv_state is not None
+        request_capacity = (
+            get_contiguous_mtp_workspace_request_capacity(
+                self.mtp_workspace_rows,
+                self.max_mtp_step,
+                runtime_mtp_step,
+            )
+            if use_contiguous_ssm_workspace
+            else get_mtp_workspace_request_capacity(self.mtp_workspace_rows, runtime_mtp_step)
+        )
+        return build_runtime_mtp_conv_state_view(
+            storage=self.mtp_req_to_conv_state.buffer,
+            request_capacity=request_capacity,
+            conv_state_shape=self.linear_config.get_mtp_conv_state_shape(mtp_step=runtime_mtp_step),
+        )
+
+    def stage_mtp_state(
+        self,
+        req_idx: torch.Tensor,
+        workspace_idx: torch.Tensor,
+        runtime_mtp_step: int,
+        use_contiguous_ssm_workspace: bool,
+    ):
+        from lightllm.common.basemodel.triton_kernel.linear_att_mtp_state import (
+            copy_canonical_to_mtp_workspace,
+        )
+
+        assert self.memory_aware_mtp
+        assert req_idx.numel() <= self.mtp_workspace_rows
+        workspace_conv = self._get_runtime_mtp_conv_state(
+            runtime_mtp_step=runtime_mtp_step,
+            use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+        )
+        copy_canonical_to_mtp_workspace(
+            canonical_conv=self.req_to_conv_state.buffer,
+            workspace_conv=workspace_conv,
+            req_idx=req_idx,
+            workspace_idx=workspace_idx,
+            ssm_state=self.req_to_ssm_state.buffer,
+            canonical_ssm_size=self.max_request_num + 1,
+            mtp_step=runtime_mtp_step,
+            use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+        )
+        return
+
+    def commit_mtp_state(
+        self,
+        req_idx: torch.Tensor,
+        workspace_idx: torch.Tensor = None,
+        runtime_mtp_step: int = None,
+        use_contiguous_ssm_workspace: bool = False,
+    ):
+        from lightllm.common.basemodel.triton_kernel.linear_att_mtp_state import (
+            copy_mtp_workspace_to_canonical,
+        )
+
+        if not self.memory_aware_mtp:
+            return
+        assert workspace_idx is not None
+        assert runtime_mtp_step is not None and runtime_mtp_step > 0
+        workspace_conv = self._get_runtime_mtp_conv_state(
+            runtime_mtp_step=runtime_mtp_step,
+            use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+        )
+        copy_mtp_workspace_to_canonical(
+            ssm_state=self.req_to_ssm_state.buffer,
+            canonical_conv=self.req_to_conv_state.buffer,
+            workspace_conv=workspace_conv,
+            req_idx=req_idx,
+            workspace_idx=workspace_idx,
+            accepted_idx=self.req_to_mtp_state_index,
+            canonical_ssm_size=self.max_request_num + 1,
+            mtp_step=runtime_mtp_step,
+            use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+        )
+        return
+
+    @staticmethod
+    def _workspace_pairs_to_cuda(pairs):
+        req_idx = torch.tensor([pair[0] for pair in pairs], dtype=torch.int32, device="cuda")
+        workspace_idx = torch.tensor([pair[1] for pair in pairs], dtype=torch.int32, device="cuda")
+        return req_idx, workspace_idx
+
+    def _commit_released(
+        self,
+        released,
+        runtime_mtp_step: int,
+        use_contiguous_ssm_workspace: bool,
+        defer_reuse: bool,
+    ):
+        if not released:
+            return
+        req_idx, workspace_idx = self._workspace_pairs_to_cuda(released)
+        self.commit_mtp_state(
+            req_idx=req_idx,
+            workspace_idx=workspace_idx,
+            runtime_mtp_step=runtime_mtp_step,
+            use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+        )
+        if defer_reuse:
+            commit_event = torch.cuda.Event()
+            commit_event.record()
+            self.mtp_workspace_allocator.defer_reuse(released, commit_event)
+
+    def prepare_mtp_workspace(
+        self,
+        req_indices: List[int],
+        runtime_mtp_step: int,
+        use_contiguous_ssm_workspace: bool,
+    ) -> torch.Tensor:
+        assert self.memory_aware_mtp
+        request_capacity = (
+            get_contiguous_mtp_workspace_request_capacity(
+                self.mtp_workspace_rows,
+                self.max_mtp_step,
+                runtime_mtp_step,
+            )
+            if use_contiguous_ssm_workspace
+            else get_mtp_workspace_request_capacity(self.mtp_workspace_rows, runtime_mtp_step)
+        )
+        assert len(req_indices) <= request_capacity
+        with self.mtp_workspace_lock:
+            if self.active_runtime_mtp_step > 0 and (
+                self.active_runtime_mtp_step != runtime_mtp_step
+                or self.active_contiguous_mtp_ssm_workspace != use_contiguous_ssm_workspace
+            ):
+                released = self.mtp_workspace_allocator.release(list(self.mtp_workspace_allocator.req_to_workspace))
+                self._commit_released(
+                    released,
+                    self.active_runtime_mtp_step,
+                    self.active_contiguous_mtp_ssm_workspace,
+                    defer_reuse=True,
+                )
+                self.active_runtime_mtp_step = 0
+                self.active_contiguous_mtp_ssm_workspace = False
+
+            workspace_indices, evicted, staged = self.mtp_workspace_allocator.prepare(req_indices)
+            if evicted:
+                self._commit_released(
+                    evicted,
+                    runtime_mtp_step,
+                    use_contiguous_ssm_workspace,
+                    defer_reuse=False,
+                )
+            if staged:
+                current_stream = torch.cuda.current_stream()
+                for _, workspace_idx in staged:
+                    pending_event = self.mtp_workspace_allocator.take_reuse_event(workspace_idx)
+                    if pending_event is not None:
+                        current_stream.wait_event(pending_event)
+                req_idx, workspace_idx = self._workspace_pairs_to_cuda(staged)
+                self.req_to_mtp_state_index[req_idx] = 0
+                self.stage_mtp_state(
+                    req_idx=req_idx,
+                    workspace_idx=workspace_idx,
+                    runtime_mtp_step=runtime_mtp_step,
+                    use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+                )
+            assert all(index < request_capacity for index in workspace_indices)
+            self.active_runtime_mtp_step = runtime_mtp_step
+            self.active_contiguous_mtp_ssm_workspace = use_contiguous_ssm_workspace
+        return torch.tensor(workspace_indices, dtype=torch.int32, device="cpu")
+
+    def can_use_contiguous_mtp_ssm_workspace(self, logical_batch_size: int, runtime_mtp_step: int) -> bool:
+        return can_use_contiguous_mtp_ssm_workspace(
+            logical_batch_size=logical_batch_size,
+            workspace_rows=self.mtp_workspace_rows,
+            max_mtp_step=self.max_mtp_step,
+            runtime_mtp_step=runtime_mtp_step,
+        )
+
+    def get_mtp_padding_workspace_idx(
+        self,
+        runtime_mtp_step: int,
+        use_contiguous_ssm_workspace: bool,
+    ) -> int:
+        return get_mtp_padding_workspace_idx(
+            workspace_rows=self.mtp_workspace_rows,
+            max_mtp_step=self.max_mtp_step,
+            runtime_mtp_step=runtime_mtp_step,
+            use_contiguous_ssm_workspace=use_contiguous_ssm_workspace,
+        )
+
+    def materialize_mtp_state(self, req_indices: List[int]):
+        if not self.memory_aware_mtp:
+            return
+        with self.mtp_workspace_lock:
+            released = self.mtp_workspace_allocator.release(req_indices)
+            if released:
+                assert self.active_runtime_mtp_step > 0
+                self._commit_released(
+                    released,
+                    self.active_runtime_mtp_step,
+                    self.active_contiguous_mtp_ssm_workspace,
+                    defer_reuse=True,
+                )
+            if not self.mtp_workspace_allocator.req_to_workspace:
+                self.active_runtime_mtp_step = 0
+                self.active_contiguous_mtp_ssm_workspace = False
+        return
+
+    def has_mtp_workspace(self, req_idx: int) -> bool:
+        if not self.memory_aware_mtp:
+            return False
+        with self.mtp_workspace_lock:
+            return self.mtp_workspace_allocator.workspace_for(req_idx) is not None
+
+    def free_all(self):
+        super().free_all()
+        if self.mtp_workspace_allocator is not None:
+            with self.mtp_workspace_lock:
+                self.mtp_workspace_allocator.reset()
+                self.active_runtime_mtp_step = 0
+                self.active_contiguous_mtp_ssm_workspace = False
+        return
 
     def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
         from .linear_att_cache_manager import LinearAttCacheManager
@@ -291,7 +602,7 @@ class ReqManagerForMamba(ReqManager):
 
         conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
         conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        ssm_dest = req.req_idx if self.memory_aware_mtp else req.req_idx * (self.mtp_step + 1)
         conv_cache_width = conv_state.shape[-1]
         self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
@@ -306,7 +617,7 @@ class ReqManagerForMamba(ReqManager):
             buffer_idx=req.shared_kv_node.small_page_buffer_idx
         )
         conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        ssm_dest = req.req_idx if self.memory_aware_mtp else req.req_idx * (self.mtp_step + 1)
         conv_cache_width = conv_state.shape[-1]
         # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
         # 同时，非连续对象的拷贝，可能存在效率问题。

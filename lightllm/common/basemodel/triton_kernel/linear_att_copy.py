@@ -50,7 +50,7 @@ def _copy_linear_att_state_to_kv_buffer(
         return
 
     cur_req_idx = tl.load(b_req_idx + cur_batch).to(tl.int64)
-    cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
+    cur_state_req_idx = cur_req_idx
 
     gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + cur_req_idx * gpu_conv_stride_s
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l

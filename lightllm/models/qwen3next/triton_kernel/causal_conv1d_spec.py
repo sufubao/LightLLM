@@ -326,8 +326,9 @@ def causal_conv1d_update(
         x: ``(num_tokens, dim)`` float — flattened varlen input grouped by
             ``query_start_loc``.  Each request contributes ``mtp_step + 1``
             tokens.
-        conv_state: ``(num_slots, dim, state_len)`` float with
-            ``state_len == width - 1 + mtp_step``.
+        conv_state: ``(num_slots, dim, storage_state_len)`` float with
+            ``storage_state_len >= width - 1 + mtp_step``. Dynamic MTP uses
+            the prefix required by the current runtime step.
         weight: depthwise filter of shape ``(dim, width)``.
         mtp_step: number of speculative (draft) tokens per request
             (``seqlen == mtp_step + 1``).
@@ -355,10 +356,10 @@ def causal_conv1d_update(
     batch = conv_state_indices.size(0)  # number of requests
     dim = x.size(1)
     _, width = weight.shape
-    # conv_state: (num_slots, dim, state_len) with state_len == width - 1 + mtp_step
-    _, _, state_len = conv_state.size()
-
-    assert state_len == width - 1 + mtp_step
+    _, _, storage_state_len = conv_state.size()
+    state_len = width - 1 + mtp_step
+    assert storage_state_len >= state_len
+    conv_state = conv_state[..., :state_len]
 
     # adopt the strategy in vLLM that overwrites 'x' directly, rather than creating a new tensor 'o'
     out = x

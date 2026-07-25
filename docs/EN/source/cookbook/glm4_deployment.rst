@@ -69,7 +69,7 @@ To enable MTP for speculative decoding, add the following parameters:
         --graph_max_batch_size 512 \
         --tool_call_parser glm47 \
         --reasoning_parser glm45 \
-        --mtp_step 4 \
+        --max_mtp_step 4 \
         --mtp_mode eagle_with_att \
         --mtp_draft_model_dir /path/to/GLM-4.7-Flash/ \
         --host 0.0.0.0 \
@@ -77,7 +77,7 @@ To enable MTP for speculative decoding, add the following parameters:
 
 **MTP Parameters:**
 
-- ``--mtp_step 4``: Number of tokens to predict in each MTP step
+- ``--max_mtp_step 4``: Maximum number of additional tokens to predict in each MTP step
 - ``--mtp_mode eagle_with_att``: MTP mode (supports ``vanilla_with_att`` and ``eagle_with_att``)
 - ``--mtp_draft_model_dir``: Path to the draft model for MTP
 

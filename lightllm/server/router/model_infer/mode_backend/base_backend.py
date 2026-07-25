@@ -18,6 +18,7 @@ from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearA
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
+from lightllm.common.mtp_workspace import get_dynamic_mtp_decode_token_delta
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -541,6 +542,12 @@ class ModeBackend:
             )
         return
 
+    def _select_decode_candidates(self, decode_candidates: List[InferReq]) -> List[InferReq]:
+        return decode_candidates
+
+    def _get_selected_runtime_mtp_step(self):
+        return None
+
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
         self,
@@ -597,9 +604,24 @@ class ModeBackend:
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
+        decode_candidates = []
+        if not no_decode:
+            for req_obj in ready_reqs:
+                if (
+                    not req_obj.filter_mark
+                    and not req_obj.wait_pause
+                    and not req_obj.paused
+                    and not req_obj.infer_aborted
+                    and not req_obj.finish_status.is_finished()
+                    and req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
+                    and not (strict_prefill and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len)
+                ):
+                    decode_candidates.append(req_obj)
+        selected_decode_req_ids = {
+            req.req_id for req in self._select_decode_candidates(decode_candidates=decode_candidates)
+        }
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -629,7 +651,20 @@ class ModeBackend:
                     is_decode = False
 
             if is_decode:
-                token_num = req_obj.decode_need_token_num()
+                if req_obj.req_id not in selected_decode_req_ids:
+                    continue
+                if getattr(self.args, "dynamic_mtp", False):
+                    selected_mtp_step = self._get_selected_runtime_mtp_step()
+                    if selected_mtp_step is None:
+                        token_num = get_dynamic_mtp_decode_token_delta(
+                            next_logical_batch_size=len(decode_reqs) + 1,
+                            workspace_rows=self.args.mtp_workspace_rows,
+                            max_mtp_step=self.args.max_mtp_step,
+                        )
+                    else:
+                        token_num = (selected_mtp_step + 1) * 2
+                else:
+                    token_num = req_obj.decode_need_token_num()
                 if token_num <= can_alloc_token_num:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
@@ -801,7 +836,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

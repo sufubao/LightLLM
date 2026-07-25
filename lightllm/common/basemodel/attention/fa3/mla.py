@@ -4,7 +4,6 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
@@ -107,11 +106,11 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
 
     def init_state(self):
         self.backend: MlaFa3AttBackend = self.backend
-        args_mtp_step = get_env_start_args().mtp_step
+        runtime_mtp_step = self.infer_state.runtime_mtp_step
 
-        if args_mtp_step > 0:
+        if runtime_mtp_step > 0:
             # 修正 mtp 在 fa3 下的输入。
-            mtp_size = args_mtp_step + 1
+            mtp_size = runtime_mtp_step + 1
             b_q_seq_len = torch.full(
                 (self.infer_state.b_seq_len.shape[0] // mtp_size,),
                 fill_value=mtp_size,
@@ -126,8 +125,8 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
             self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
 
-        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
-        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
+        att_batch_size = self.infer_state.batch_size // (runtime_mtp_step + 1)
+        assert self.infer_state.batch_size % (runtime_mtp_step + 1) == 0
 
         model = self.backend.model
         # 可以使用 cuda graph的时候从 buffer中申请
@@ -146,14 +145,14 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
                 device=self.infer_state.input_ids.device,
             )
 
-        if args_mtp_step > 0:
+        if runtime_mtp_step > 0:
             page_table_copy(
                 page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
                 req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.infer_state.b_req_idx[args_mtp_step :: (args_mtp_step + 1)],
+                b_req_idx=self.infer_state.b_req_idx[runtime_mtp_step :: (runtime_mtp_step + 1)],
             )
-            self.b_att_seq_len = self.infer_state.b_seq_len[args_mtp_step :: (args_mtp_step + 1)].contiguous()
-            self.decode_max_q_seq_len = args_mtp_step + 1
+            self.b_att_seq_len = self.infer_state.b_seq_len[runtime_mtp_step :: (runtime_mtp_step + 1)].contiguous()
+            self.decode_max_q_seq_len = runtime_mtp_step + 1
         else:
             page_table_copy(
                 page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],

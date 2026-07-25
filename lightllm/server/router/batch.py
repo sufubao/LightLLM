@@ -4,6 +4,14 @@ from typing import Dict, List, Optional, Tuple, Union
 from lightllm.server.core.objs import ShmReqManager, Req
 from lightllm.utils.log_utils import init_logger
 from .stats import RouterStatics
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.common.mtp_workspace import get_dynamic_mtp_decode_token_num
+from lightllm.common.mtp_scheduler import (
+    get_hysteresis_mtp_decode_token_num,
+    get_mtp_plan_decode_token_num,
+    load_mtp_decode_profile,
+    select_mtp_decode_plan,
+)
 
 logger = init_logger(__name__)
 
@@ -23,11 +31,42 @@ class Batch:
         return batch_input_tokens
 
     def get_batch_decode_need_tokens(self):
-        new_batch_decode_need_tokens = [0 for _ in range(self.dp_size_in_node)]  # for chunked prefill
+        per_dp_need_tokens = [[] for _ in range(self.dp_size_in_node)]
+        args = get_env_start_args()
 
         for req in self.reqs:
             req_dp_index = req.sample_params.suggested_dp_index
-            new_batch_decode_need_tokens[req_dp_index] += req.get_decode_need_tokens()
+            per_dp_need_tokens[req_dp_index].append(req.get_decode_need_tokens())
+
+        new_batch_decode_need_tokens = []
+        for need_tokens in per_dp_need_tokens:
+            if getattr(args, "dynamic_mtp", False):
+                profile_path = getattr(args, "mtp_scheduler_profile", None)
+                if profile_path is None:
+                    need_token_num = get_dynamic_mtp_decode_token_num(
+                        logical_batch_size=len(need_tokens),
+                        workspace_rows=args.mtp_workspace_rows,
+                        max_mtp_step=args.max_mtp_step,
+                    )
+                else:
+                    profile = load_mtp_decode_profile(profile_path)
+                    plan = select_mtp_decode_plan(
+                        active_requests=len(need_tokens),
+                        workspace_rows=args.mtp_workspace_rows,
+                        max_mtp_step=args.max_mtp_step,
+                        profile=profile,
+                    )
+                    if profile.plan_switch_steps > 0:
+                        need_token_num = get_hysteresis_mtp_decode_token_num(
+                            active_requests=len(need_tokens),
+                            workspace_rows=args.mtp_workspace_rows,
+                            max_mtp_step=args.max_mtp_step,
+                        )
+                    else:
+                        need_token_num = get_mtp_plan_decode_token_num(plan)
+            else:
+                need_token_num = sum(need_tokens)
+            new_batch_decode_need_tokens.append(need_token_num)
 
         return new_batch_decode_need_tokens
 

@@ -122,6 +122,9 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
+        if self.is_linear_att_mixed_model and self.req_manager.memory_aware_mtp:
+            torch.cuda.current_stream().wait_stream(self.get_overlap_stream())
+            self.req_manager.materialize_mtp_state([req.req_idx])
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         else:
@@ -307,7 +310,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -328,7 +330,6 @@ class InferenceContext:
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
-
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:
@@ -392,7 +393,7 @@ class InferenceContext:
                 gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
                 cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
                 cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
-                mtp_step=self.args.mtp_step,
+                mtp_step=0 if self.req_manager.memory_aware_mtp else self.args.mtp_step,
             )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
@@ -409,7 +410,9 @@ class InferenceContext:
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
                         conv_src_idx = req.req_idx
-                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1)
+                        ssm_src_idx = (
+                            req.req_idx if self.req_manager.memory_aware_mtp else req.req_idx * (self.args.mtp_step + 1)
+                        )
                         conv_cache_width = self.req_manager.linear_config.get_conv_state_shape()[-1]
                         gpu_conv_state = self.req_manager.req_to_conv_state.buffer[
                             :, conv_src_idx, ..., :conv_cache_width
@@ -559,6 +562,7 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+        self.mtp_proposal_step: int = 0
         if self.mtp_step > 0:
             self.decode_need_token_num = self._mtp_decode_need_token_num
         else:

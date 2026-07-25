@@ -211,12 +211,69 @@ def normal_or_p_d_start(args):
             )
 
     # mtp params check
+    max_mtp_step = getattr(args, "max_mtp_step", 0)
+    legacy_mtp_step = getattr(args, "mtp_step", None)
+    if legacy_mtp_step is not None:
+        assert max_mtp_step in (
+            0,
+            legacy_mtp_step,
+        ), "--max_mtp_step and deprecated --mtp_step must match when both are set"
+        max_mtp_step = legacy_mtp_step
+    args.max_mtp_step = max_mtp_step
+    args.mtp_step = max_mtp_step
+    args.dynamic_mtp = False
+
     if args.mtp_mode is not None:
         assert args.mtp_draft_model_dir is not None
-        assert args.mtp_step > 0
+        assert args.max_mtp_step > 0
+        if is_linear_att_mixed_model(args.model_dir):
+            assert (
+                args.mtp_mode == "eagle_with_att"
+            ), "dynamic MTP for hybrid linear-attention models requires eagle_with_att"
+            assert not args.disable_chunked_prefill, "memory-aware MTP currently requires chunked prefill"
+            assert args.dp == 1, "memory-aware MTP currently requires --dp 1"
+            assert (
+                not args.enable_decode_microbatch_overlap
+            ), "memory-aware MTP does not yet support decode microbatch overlap"
+            if args.mtp_workspace_rows == 0:
+                args.mtp_workspace_rows = args.running_max_req_size
+            assert args.mtp_workspace_rows > 0
+            if args.mtp_scheduler_profile is not None:
+                from lightllm.common.mtp_scheduler import (
+                    get_uncovered_active_request_counts,
+                    load_mtp_decode_profile,
+                )
+
+                mtp_profile = load_mtp_decode_profile(args.mtp_scheduler_profile)
+                if args.mtp_workspace_rows < args.running_max_req_size:
+                    uncovered = get_uncovered_active_request_counts(
+                        profile=mtp_profile,
+                        running_max_req_size=args.running_max_req_size,
+                        workspace_rows=args.mtp_workspace_rows,
+                        max_mtp_step=args.max_mtp_step,
+                    )
+                    assert not uncovered, (
+                        "--mtp_scheduler_profile must cover every active request "
+                        "count when mtp_workspace_rows is smaller than "
+                        f"running_max_req_size; uncovered={uncovered}"
+                    )
+            else:
+                assert args.mtp_workspace_rows >= args.running_max_req_size, (
+                    "--mtp_workspace_rows smaller than running_max_req_size " "requires --mtp_scheduler_profile"
+                )
+            args.dynamic_mtp = True
+        else:
+            assert (
+                args.mtp_workspace_rows == 0
+            ), "--mtp_workspace_rows currently supports only hybrid linear-attention models"
+            assert (
+                args.mtp_scheduler_profile is None
+            ), "--mtp_scheduler_profile currently supports only hybrid linear-attention models"
     else:
         assert args.mtp_draft_model_dir is None
-        assert args.mtp_step == 0
+        assert args.max_mtp_step == 0
+        assert args.mtp_workspace_rows == 0, "--mtp_workspace_rows requires --mtp_mode"
+        assert args.mtp_scheduler_profile is None, "--mtp_scheduler_profile requires --mtp_mode"
 
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
@@ -429,7 +486,6 @@ def normal_or_p_d_start(args):
         )
 
     if not args.disable_vision:
-
         if not args.visual_use_proxy_mode:
             from .visualserver.manager import start_visual_process
 

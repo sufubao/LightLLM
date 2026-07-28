@@ -462,21 +462,18 @@ Quantization Parameters
        * - ``fp8w8a8``
          - FP8 W8A8; W: per-channel, A: per-token
          - vLLM
-       * - ``fp8w8a8-pt-vllm``
+       * - ``fp8w8a8-pt``
          - FP8 W8A8; W: per-tensor, A: per-token
-         - vLLM
-       * - ``fp8w8a8-pt-sgl``
-         - FP8 W8A8; W: per-tensor, A: per-token
-         - SGL
+         - Triton
        * - ``fp8w8a8-b128``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - vLLM
-       * - ``fp8w8a8-b128-vllm``
-         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - vLLM
-       * - ``fp8w8a8-b128-deepgemm``
-         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - DeepGEMM
+         - Triton
+       * - ``fp8w8a8g128``
+         - FP8 W8A8; W: per-channel, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64``
+         - FP8 W8A8; W: per-channel, A: per-token-group 64
+         - Triton
        * - ``awq``
          - INT4 weight-only; group size comes from the checkpoint
          - vLLM
@@ -486,20 +483,23 @@ Quantization Parameters
        * - ``none``
          - No quantization
          - -
-       * - ``fp8w8a8-pt``
+       * - ``fp8w8a8-pt-vllm``
          - FP8 W8A8; W: per-tensor, A: per-token
-         - Triton
+         - vLLM
+       * - ``fp8w8a8-pt-sgl``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - SGL
        * - ``fp8w8a8-pt-triton``
          - FP8 W8A8; W: per-tensor, A: per-token
          - Triton
+       * - ``fp8w8a8-b128-vllm``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - vLLM
+       * - ``fp8w8a8-b128-deepgemm``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - DeepGEMM
        * - ``fp8w8a8-b128-triton``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - Triton
-       * - ``fp8w8a8g128``
-         - FP8 W8A8; W: per-channel, A: per-token-group 128
-         - Triton
-       * - ``fp8w8a8g64``
-         - FP8 W8A8; W: per-channel, A: per-token-group 64
          - Triton
 
 .. option:: --quant_cfg

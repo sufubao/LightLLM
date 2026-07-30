@@ -13,12 +13,6 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
 
     monkeypatch.setattr(gdn, "fused_gdn_gating", lambda _log, a, b, _bias: (a, b))
     monkeypatch.setattr(gdn, "causal_conv1d_fn", lambda mixed, *args, **kwargs: mixed)
-    monkeypatch.setattr(
-        gdn,
-        "chunk_gated_delta_rule",
-        lambda *args, **kwargs: (None, final_state),
-    )
-
     qkv = torch.zeros((1, 3), dtype=cache_dtype)
     q = torch.zeros((1, 1, 1, 1), dtype=cache_dtype)
     backend = SimpleNamespace(
@@ -26,6 +20,7 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
         activation="silu",
         ssm_state_dtype=cache_dtype,
         _rearrange_mixed_qkv=lambda mixed: (q, q, q),
+        _gdn_prefill_chunk=lambda *args, **kwargs: (None, final_state),
     )
     state = gdn.LinearAttPrefillAttState(
         backend=backend,

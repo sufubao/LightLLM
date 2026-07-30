@@ -467,18 +467,76 @@ PD 分离模式参数
 
 .. option:: --quant_type
 
-    量化方法，可选值：
+    ``W`` 表示权重，``A`` 表示激活。可选值如下：
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
-    * ``vllm-fp8w8a8-b128``
-    * ``deepgemm-fp8w8a8-b128``
-    * ``triton-fp8w8a8-block128``
-    * ``triton-fp8w8a8g128``: 权重 per-channel 量化和激活 per-group 128 量化
-    * ``triton-fp8w8a8g64``: 权重 per-channel 量化, group size 64
-    * ``awq``
-    * ``awq_marlin``
-    * ``none`` (默认)
+    .. list-table::
+       :header-rows: 1
+       :widths: 35 45 20
+       :align: left
+
+       * - ``quant_type``
+         - 量化介绍
+         - 实现 backend
+       * - ``w8a8``
+         - INT8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8``
+         - FP8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8-pt``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - Triton
+       * - ``fp8w8a8-b128``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128``
+         - FP8 W8A8；W：per-channel，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64``
+         - FP8 W8A8；W：per-channel，A：per-token-group 64
+         - Triton
+       * - ``awq``
+         - INT4 weight-only；group size 由 checkpoint 提供
+         - vLLM
+       * - ``awq_marlin``
+         - INT4 weight-only；group size 由 checkpoint 提供
+         - vLLM
+       * - ``none``
+         - 不量化
+         - -
+       * - ``w8a8-vllm``
+         - INT8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8-vllm``
+         - FP8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8-pt-vllm``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - vLLM
+       * - ``fp8w8a8-pt-sgl``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - SGL
+       * - ``fp8w8a8-pt-triton``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - Triton
+       * - ``fp8w8a8-b128-vllm``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - vLLM
+       * - ``fp8w8a8-b128-deepgemm``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - DeepGEMM
+       * - ``fp8w8a8-b128-triton``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128-triton``
+         - FP8 W8A8；W：per-channel，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64-triton``
+         - FP8 W8A8；W：per-channel，A：per-token-group 64
+         - Triton
+       * - ``fp4fp8-b32-deepgemm``
+         - FP4/FP8 混合量化；仅用于 fused MoE 专家权重（SM100）
+         - DeepGEMM
 
 .. option:: --quant_cfg
 
@@ -498,8 +556,8 @@ PD 分离模式参数
 
     ViT 量化方法，可选值：
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
+    * ``w8a8``
+    * ``fp8w8a8``
     * ``none`` (默认)
 
 .. option:: --vit_quant_cfg

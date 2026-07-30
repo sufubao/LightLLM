@@ -469,18 +469,76 @@ Quantization Parameters
 
 .. option:: --quant_type
 
-    Quantization method, optional values:
+    ``W`` denotes weights and ``A`` denotes activations. The available values are listed below.
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
-    * ``vllm-fp8w8a8-b128``
-    * ``deepgemm-fp8w8a8-b128``
-    * ``triton-fp8w8a8-block128``
-    * ``triton-fp8w8a8g128``: weight per-channel quant and activation per-group 128 quant
-    * ``triton-fp8w8a8g64``: weight per-channel quantization with group size 64
-    * ``awq``
-    * ``awq_marlin``
-    * ``none`` (default)
+    .. list-table::
+       :header-rows: 1
+       :widths: 35 45 20
+       :align: left
+
+       * - ``quant_type``
+         - Quantization
+         - Implementation backend
+       * - ``w8a8``
+         - INT8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8``
+         - FP8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8-pt``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - Triton
+       * - ``fp8w8a8-b128``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128``
+         - FP8 W8A8; W: per-channel, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64``
+         - FP8 W8A8; W: per-channel, A: per-token-group 64
+         - Triton
+       * - ``awq``
+         - INT4 weight-only; group size comes from the checkpoint
+         - vLLM
+       * - ``awq_marlin``
+         - INT4 weight-only; group size comes from the checkpoint
+         - vLLM
+       * - ``none``
+         - No quantization
+         - -
+       * - ``w8a8-vllm``
+         - INT8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8-vllm``
+         - FP8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8-pt-vllm``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - vLLM
+       * - ``fp8w8a8-pt-sgl``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - SGL
+       * - ``fp8w8a8-pt-triton``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - Triton
+       * - ``fp8w8a8-b128-vllm``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - vLLM
+       * - ``fp8w8a8-b128-deepgemm``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - DeepGEMM
+       * - ``fp8w8a8-b128-triton``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128-triton``
+         - FP8 W8A8; W: per-channel, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64-triton``
+         - FP8 W8A8; W: per-channel, A: per-token-group 64
+         - Triton
+       * - ``fp4fp8-b32-deepgemm``
+         - FP4/FP8 mixed quantization; fused MoE expert weights only (SM100)
+         - DeepGEMM
 
 .. option:: --quant_cfg
 
@@ -500,8 +558,8 @@ Quantization Parameters
 
     ViT quantization method, optional values:
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
+    * ``w8a8``
+    * ``fp8w8a8``
     * ``none`` (default)
 
 .. option:: --vit_quant_cfg

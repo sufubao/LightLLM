@@ -35,6 +35,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
+        "--hypercorn_config",
+        type=str,
+        default=None,
+        help="Path to a Hypercorn TOML configuration file. See test/hypercorn_config.toml for an example.",
+    )
+    parser.add_argument(
         "--zmq_mode",
         type=str,
         default="ipc:///tmp/",

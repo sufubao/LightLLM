@@ -40,6 +40,11 @@ APIServer 参数详解
 
     HTTP 服务器工作进程数，默认为 ``1``
 
+.. option:: --hypercorn_config
+
+    Hypercorn TOML 配置文件路径，仅支持 TOML 格式。示例文件见 ``test/hypercorn_config.toml``。
+    默认为 ``None``。LightLLM 显式设置的监听地址、HTTP worker 数和 keep-alive 超时会覆盖配置文件中的对应值。
+
 .. option:: --zmq_mode
 
     ZMQ 通信模式，可选值：

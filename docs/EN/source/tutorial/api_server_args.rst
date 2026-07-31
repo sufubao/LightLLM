@@ -40,6 +40,13 @@ Basic Configuration Parameters
 
     HTTP server worker process count, default is ``1``
 
+.. option:: --hypercorn_config
+
+    Path to a Hypercorn TOML configuration file. Only TOML configuration files are supported.
+    See ``test/hypercorn_config.toml`` for an example. Default: ``None``. The bind address, HTTP worker
+    count, and keep-alive timeout explicitly set by LightLLM override the corresponding values in the
+    configuration file.
+
 .. option:: --zmq_mode
 
     ZMQ communication mode, optional values:

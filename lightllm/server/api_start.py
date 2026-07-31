@@ -399,6 +399,7 @@ def normal_or_p_d_start(args: StartArgs):
     # 启动 Hypercorn
     command = [
         "hypercorn",
+        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
@@ -463,6 +464,7 @@ def pd_master_start(args: StartArgs):
 
     command = [
         "hypercorn",
+        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
         "--workers",
         "1",
         "--bind",
@@ -552,6 +554,7 @@ def config_server_start(args):
 
     command = [
         "hypercorn",
+        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
         "--workers",
         "1",
         "--bind",

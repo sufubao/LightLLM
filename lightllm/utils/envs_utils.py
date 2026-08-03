@@ -239,9 +239,9 @@ def enable_huge_page():
 
 
 @lru_cache(maxsize=None)
-def disable_cpu_cache_numa_interleave() -> bool:
-    """是否禁用 CPU KV cache 共享内存的 NUMA 交错分配策略。"""
-    return enable_env_vars("LIGHTLLM_DISABLE_NUMA_INTERLEAVE")
+def enable_cpu_cache_numa_interleave() -> bool:
+    """是否启用 CPU KV cache 共享内存的 NUMA 交错分配策略。"""
+    return enable_env_vars("LIGHTLLM_ENABLE_NUMA_INTERLEAVE")
 
 
 @lru_cache(maxsize=None)

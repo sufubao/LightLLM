@@ -11,7 +11,7 @@ from functools import lru_cache
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     enable_huge_page,
-    disable_cpu_cache_numa_interleave,
+    enable_cpu_cache_numa_interleave,
     get_llm_data_type,
     get_added_mtp_kv_layer_num,
 )
@@ -364,8 +364,9 @@ def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
     可用 NUMA 节点。调用方应在首次触页前设置策略：creator 在启动 prefault 线程前调用；
     HugeTLB 的共享策略不会可靠地传播到其他进程的 VMA，因此 attacher 也需要在访问映射前调用。
 
-    调用未设置 ``MPOL_MF_MOVE``，所以只影响后续缺页分配，不迁移已经分配的物理页。禁用开关、
-    单 NUMA、不支持的架构或 syscall 失败都会安全回退到原有 first-touch 行为。
+    调用未设置 ``MPOL_MF_MOVE``，所以只影响后续缺页分配，不迁移已经分配的物理页。该功能默认
+    关闭，只有设置 ``LIGHTLLM_ENABLE_NUMA_INTERLEAVE`` 后才会启用；未启用、单 NUMA、不支持的
+    架构或 syscall 失败都会安全回退到原有 first-touch 行为。
 
     Args:
         libc: 使用 ``use_errno=True`` 加载的 libc 对象，用于发起 raw ``mbind`` syscall。
@@ -377,6 +378,9 @@ def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
     """
     MPOL_INTERLEAVE = 3
     SYS_MBIND = {"x86_64": 237, "aarch64": 235}.get(os.uname().machine)
+
+    if not enable_cpu_cache_numa_interleave():
+        return False
 
     if SYS_MBIND is None:
         logger.warning(f"unsupported architecture {os.uname().machine}, skip cpu cache numa interleave")
@@ -401,9 +405,6 @@ def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
             ctypes.c_uint(0),
         )
 
-    if disable_cpu_cache_numa_interleave():
-        logger.info("cpu cache numa interleave disabled by LIGHTLLM_DISABLE_NUMA_INTERLEAVE")
-        return False
     nodes = _get_online_numa_nodes()
     if len(nodes) <= 1:
         return False

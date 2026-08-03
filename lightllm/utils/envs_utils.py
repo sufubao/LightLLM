@@ -239,6 +239,12 @@ def enable_huge_page():
 
 
 @lru_cache(maxsize=None)
+def disable_cpu_cache_numa_interleave() -> bool:
+    """是否禁用 CPU KV cache 共享内存的 NUMA 交错分配策略。"""
+    return enable_env_vars("LIGHTLLM_DISABLE_NUMA_INTERLEAVE")
+
+
+@lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
     # mtp 模式下需要在mem manger上扩展draft model使用的layer
     added_mtp_layer_num = 0

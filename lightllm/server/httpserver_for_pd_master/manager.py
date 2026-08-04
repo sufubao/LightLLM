@@ -187,6 +187,8 @@ class HttpServerManagerForPDMaster:
                 logger.error(f"{origin_group_request_id}: No p_node or d_node found")
                 raise Exception(f"{origin_group_request_id}: No p_node or d_node found")
 
+            origin_prompt_cache_len = None
+
             for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
@@ -213,6 +215,9 @@ class HttpServerManagerForPDMaster:
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
+                    if iter_index == 0 and origin_prompt_cache_len is None:
+                        origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                    metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_group_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
@@ -381,6 +386,7 @@ class HttpServerManagerForPDMaster:
 
         out_token_counter = 0
         first_token_cost_ms = float("inf")
+        prompt_cache_len = 0
         group_request_id = sampling_params.group_request_id
         unfinished_count = sampling_params.best_of
         is_first_token = True
@@ -396,6 +402,7 @@ class HttpServerManagerForPDMaster:
 
             prompt_tokens = metadata["prompt_tokens"]
             out_token_counter += 1
+            prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))
             sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
             if is_first_token:
                 first_token_cost_ms = (time.time() - start_time) * 1000
@@ -414,7 +421,6 @@ class HttpServerManagerForPDMaster:
         self.per_token_costs.add(mean_per_token_cost_time_ms)
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
-        prompt_cache_len = metadata.pop("prompt_cache_len", 0)
         prompt_cache_ratio = prompt_cache_len / prompt_tokens
         mtp_avg_token_per_step = out_token_counter / max(
             (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1

@@ -664,6 +664,12 @@ class PDManager:
         if pd_client.mode == "prefill":
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
+            # dispatched_prompt_chars is the cumulative counter used by the
+            # CacheAware policy to balance request dispatch across prefill nodes.
+            # Reset all counters together when a node registers or reconnects so
+            # stale history does not bias CacheAware toward the zero-valued node.
+            for prefill_node in self.prefill_nodes:
+                prefill_node.dispatched_prompt_chars = 0
         elif pd_client.mode == "decode":
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)

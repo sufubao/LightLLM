@@ -184,6 +184,60 @@ def test_pd_manager_without_connected_nodes_is_healthy():
     assert asyncio.run(manager.check_pd_nodes_health()) is True
 
 
+def test_prefill_registration_resets_all_dispatched_prompt_chars():
+    args = StartArgs()
+    manager = PDManager(args)
+
+    def register_prefill(node_id, client_ip_port):
+        manager.register_pd(
+            {
+                "node_id": node_id,
+                "client_ip_port": client_ip_port,
+                "mode": "prefill",
+                "start_args": {
+                    "max_req_total_len": args.max_req_total_len,
+                    "max_image_pixels": args.max_image_pixels,
+                    "disable_image_resize": args.disable_image_resize,
+                },
+            },
+            websocket=object(),
+        )
+
+    register_prefill(1, "10.0.0.1:8000")
+    manager.prefill_nodes[0].dispatched_prompt_chars = 1234
+
+    register_prefill(2, "10.0.0.2:8000")
+
+    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [0, 0]
+
+
+def test_prefill_reconnection_resets_all_dispatched_prompt_chars():
+    args = StartArgs()
+    manager = PDManager(args)
+
+    def pd_info(node_id, client_ip_port):
+        return {
+            "node_id": node_id,
+            "client_ip_port": client_ip_port,
+            "mode": "prefill",
+            "start_args": {
+                "max_req_total_len": args.max_req_total_len,
+                "max_image_pixels": args.max_image_pixels,
+                "disable_image_resize": args.disable_image_resize,
+            },
+        }
+
+    manager.register_pd(pd_info(1, "10.0.0.1:8000"), websocket=object())
+    manager.register_pd(pd_info(2, "10.0.0.2:8000"), websocket=object())
+    manager.prefill_nodes[0].dispatched_prompt_chars = 100
+    manager.prefill_nodes[1].dispatched_prompt_chars = 200
+
+    manager.register_pd(pd_info(3, "10.0.0.2:8000"), websocket=object())
+
+    assert [node.client_ip_port for node in manager.prefill_nodes] == ["10.0.0.1:8000", "10.0.0.2:8000"]
+    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [0, 0]
+
+
 def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):
     monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.time.time", lambda: 1000)
     manager = SimpleNamespace(

@@ -129,7 +129,10 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
+        was_idle = self.running_request_count == 0
         self.running_request_count += 1
+        if was_idle:
+            self.latest_success_infer_time = time.time()
         try:
             async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
                 async for result in generator:

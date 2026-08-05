@@ -145,6 +145,7 @@ async def do_turn(
     itl_sum = 0.0
     itl_n = 0
     ntok = 0
+    reply_parts: List[str] = []
     err = None
     try:
         resp = await client.chat.completions.create(
@@ -167,6 +168,7 @@ async def do_turn(
                 or getattr(delta, "reasoning", None)
             )
             if text:
+                reply_parts.append(text)
                 now = time.perf_counter()
                 ntok += 1
                 if first_t is None:
@@ -180,8 +182,9 @@ async def do_turn(
         if ntok < 1:
             err = "no tokens"
         else:
-            # append assistant reply so the next turn's prefix includes it
-            sess.history.append({"role": "assistant", "content": "(reply)"})
+            # append the real generated reply so the next turn's prefix grows
+            # like a real multi-turn agent (full history re-sent)
+            sess.history.append({"role": "assistant", "content": "".join(reply_parts)})
             if time.perf_counter() >= warmup_until:
                 metrics.append(
                     {

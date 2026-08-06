@@ -6,7 +6,7 @@ import os
 from typing import List, Optional, Union, Tuple
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
-from lightllm.utils.seed_utils import normalize_seed, validate_seed
+from .sampling_params import normalize_seed, validate_seed
 
 
 _SAMPLING_EPS = 1e-5

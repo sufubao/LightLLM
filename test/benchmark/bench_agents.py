@@ -311,7 +311,6 @@ def summarize(metrics, fired, blocked, total_time, args):
     all_ok = [m for m in metrics if "error" not in m]
     all_fail = [m for m in metrics if "error" in m]
     ok = [m for m in all_ok if m["measured"]]
-    fail = [m for m in all_fail if m["measured"]]
     ttfts = [m["ttft"] for m in ok]
     itls = [m["itl"] for m in ok if m["itl"] is not None]
     tpots = [m["tpot"] for m in ok if m["tpot"] > 0]

@@ -52,7 +52,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from dataclasses import asdict, dataclass, is_dataclass
 
-from .api_openai import chat_completions_impl, completions_impl
+from .api_openai import chat_completions_impl, completions_impl, prime_pd_master_streaming_response
 from .api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -161,6 +161,8 @@ def create_error_response(
             err_type = "InternalServerError"
         elif status_code == HTTPStatus.NOT_FOUND:
             err_type = "NotFoundError"
+        elif status_code == HTTPStatus.TOO_MANY_REQUESTS:
+            err_type = "RateLimitError"
         else:
             err_type = "BadRequestError"
 
@@ -169,6 +171,17 @@ def create_error_response(
         {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
         status_code=status_code.value,
     )
+
+
+def create_server_busy_response(exc: ServerBusyError) -> JSONResponse:
+    status = HTTPStatus(exc.status_code)
+    return create_error_response(status, str(exc), err_type="RateLimitError")
+
+
+@app.exception_handler(ServerBusyError)
+async def server_busy_exception_handler(request: Request, exc: ServerBusyError) -> JSONResponse:
+    logger.warning(str(exc))
+    return create_server_busy_response(exc)
 
 
 @app.get("/liveness")
@@ -294,8 +307,8 @@ async def generate(request: Request) -> Response:
     try:
         return await g_objs.g_generate_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
@@ -314,10 +327,11 @@ async def generate_stream(request: Request) -> Response:
         )
 
     try:
-        return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
+        response = await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
+        return await prime_pd_master_streaming_response(response)
     except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
@@ -337,6 +351,9 @@ async def get_score(request: Request) -> Response:
 
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -368,11 +385,12 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
     try:
         resp = await chat_completions_impl(request, raw_request)
+        resp = await prime_pd_master_streaming_response(resp)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
         logger.warning(str(e))
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -388,11 +406,12 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 
     try:
         resp = await completions_impl(request, raw_request)
+        resp = await prime_pd_master_streaming_response(resp)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
         logger.warning(str(e))
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -405,10 +424,15 @@ async def anthropic_messages(raw_request: Request) -> Response:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
-    from .api_anthropic import anthropic_messages_impl
+    from .api_anthropic import _anthropic_error_response, anthropic_messages_impl
 
     try:
-        return await anthropic_messages_impl(raw_request)
+        response = await anthropic_messages_impl(raw_request)
+        return await prime_pd_master_streaming_response(response)
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus(e.status_code), str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -423,10 +447,11 @@ async def openai_responses(raw_request: Request) -> Response:
     from .api_responses import responses_impl
 
     try:
-        return await responses_impl(raw_request)
+        response = await responses_impl(raw_request)
+        return await prime_pd_master_streaming_response(response)
     except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:

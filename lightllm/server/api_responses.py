@@ -528,7 +528,12 @@ async def _openai_sse_to_responses_events(
 
     if failed_error is not None:
         response["status"] = "failed"
-        response["error"] = {"code": "server_error", "message": failed_error.get("message", "generation failed")}
+        error_code = failed_error.get("code")
+        if error_code == 429 or failed_error.get("type") in ("RateLimitError", "rate_limit_error"):
+            error_code = "rate_limit_error"
+        else:
+            error_code = "server_error"
+        response["error"] = {"code": error_code, "message": failed_error.get("message", "generation failed")}
         yield event("response.failed", {"response": response})
         return
 
@@ -547,7 +552,7 @@ async def _openai_sse_to_responses_events(
 
 async def responses_impl(raw_request: Request) -> Response:
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
-    from .api_openai import chat_completions_impl, create_error_response
+    from .api_openai import chat_completions_impl, create_error_response, prime_pd_master_streaming_response
 
     try:
         body = await raw_request.json()
@@ -582,6 +587,7 @@ async def responses_impl(raw_request: Request) -> Response:
     if chat_request.stream:
         if not isinstance(downstream, StreamingResponse):
             return downstream
+        downstream = await prime_pd_master_streaming_response(downstream)
         return StreamingResponse(
             _openai_sse_to_responses_events(downstream.body_iterator, body),
             media_type="text/event-stream",

@@ -30,7 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.error_utils import ClientDisconnected
+from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -60,14 +60,52 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
+async def prime_pd_master_streaming_response(response: Response) -> Response:
+    """In PD-master mode, read the first stream item before sending the HTTP status."""
+    if not isinstance(response, StreamingResponse):
+        return response
+    if get_env_start_args().run_mode != "pd_master":
+        return response
+
+    body_iterator = response.body_iterator
+    try:
+        first_item = await body_iterator.__anext__()
+    except StopAsyncIteration:
+        return response
+
+    async def replay_stream():
+        try:
+            yield first_item
+            async for item in body_iterator:
+                yield item
+        finally:
+            close = getattr(body_iterator, "aclose", None)
+            if close is not None:
+                await close()
+
+    response.body_iterator = replay_stream()
+    return response
+
+
 async def _safe_stream_wrapper(stream_generator):
     """Wrap a streaming generator to catch ValueError (e.g. input too long) and yield an SSE error
     event instead of letting the exception propagate to Starlette which prints a long traceback."""
+    stream_started = False
     try:
         async for item in stream_generator:
             yield item
+            stream_started = True
     except ValueError as e:
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+    except ServerBusyError as e:
+        if not stream_started:
+            raise
+        logger.error("Generation interrupted after the stream started: %s", e.message)
+        error_data = json.dumps(
+            {"error": {"message": e.message, "type": "server_error", "code": "stream_error"}},
+            ensure_ascii=False,
+        )
         yield f"data: {error_data}\n\n"
     except ClientDisconnected as e:
         logger.warning(str(e))

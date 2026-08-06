@@ -4,8 +4,7 @@ from pydantic import ValidationError
 from lightllm.server.api_models import ChatCompletionRequest, CompletionRequest
 from lightllm.server.core.objs.py_sampling_params import SamplingParams as PySamplingParams
 from lightllm.server.core.objs.sampling_params import SamplingParams
-
-MAX_SEED = (1 << 63) - 1
+from lightllm.utils.seed_utils import MAX_SEED
 
 
 def _chat_request(**kwargs):
@@ -64,9 +63,8 @@ def test_sampling_params_reject_values_below_random_sentinel():
         params = SamplingParams()
         params.init(tokenizer=None, seed=-2)
 
-    py_params = PySamplingParams(seed=-2)
     with pytest.raises(ValueError, match="seed must be -1"):
-        py_params.verify()
+        PySamplingParams(seed=-2)
 
 
 @pytest.mark.parametrize("seed", [MAX_SEED + 1, (1 << 64) - 1, 10 ** 100])
@@ -75,6 +73,5 @@ def test_sampling_params_reject_seed_before_int64_wraparound(seed):
         params = SamplingParams()
         params.init(tokenizer=None, seed=seed)
 
-    py_params = PySamplingParams(seed=seed)
     with pytest.raises(ValueError, match=f"integer in \\[0, {MAX_SEED}\\]"):
-        py_params.verify()
+        PySamplingParams(seed=seed)

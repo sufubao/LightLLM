@@ -4,6 +4,7 @@ from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.seed_utils import normalize_seed, validate_seed
 from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
@@ -20,7 +21,6 @@ GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_L
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
-MAX_SEED = (1 << 63) - 1
 
 
 class StopSequence(ctypes.Structure):
@@ -345,11 +345,7 @@ class SamplingParams(ctypes.Structure):
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
-        seed = kwargs.get("seed")
-        seed = -1 if seed is None else seed
-        if seed < -1 or seed > MAX_SEED:
-            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {seed}")
-        self.seed = seed
+        self.seed = normalize_seed(kwargs.get("seed"))
         prompt_logprobs = kwargs.get("prompt_logprobs", None)
         self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
 
@@ -453,8 +449,7 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
         if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
-        if self.seed < -1 or self.seed > MAX_SEED:
-            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {self.seed}")
+        validate_seed(self.seed)
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 

@@ -5,8 +5,7 @@ import uuid
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
 from transformers import GenerationConfig
-
-MAX_SEED = (1 << 63) - 1
+from lightllm.utils.seed_utils import MAX_SEED
 
 
 class ImageURL(BaseModel):

@@ -20,6 +20,16 @@ GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_L
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
+MAX_SEED = (1 << 63) - 1
+
+
+def normalize_seed(seed: Optional[int]) -> int:
+    return -1 if seed is None else seed
+
+
+def validate_seed(seed: int) -> None:
+    if seed < -1 or seed > MAX_SEED:
+        raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {seed}")
 
 
 class StopSequence(ctypes.Structure):
@@ -344,7 +354,11 @@ class SamplingParams(ctypes.Structure):
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
-        self.seed = kwargs.get("seed", -1)
+        seed = normalize_seed(kwargs.get("seed"))
+        # ctypes silently wraps out-of-range integers, so validate the Python
+        # value before assigning it to the c_int64 field.
+        validate_seed(seed)
+        self.seed = seed
         prompt_logprobs = kwargs.get("prompt_logprobs", None)
         self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
 
@@ -448,6 +462,7 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
         if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
+        validate_seed(self.seed)
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 

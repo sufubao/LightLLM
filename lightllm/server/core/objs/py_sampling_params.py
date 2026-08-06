@@ -6,6 +6,7 @@ import os
 from typing import List, Optional, Union, Tuple
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
+from .sampling_params import normalize_seed, validate_seed
 
 
 _SAMPLING_EPS = 1e-5
@@ -92,7 +93,7 @@ class SamplingParams:
         self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.suggested_dp_index = suggested_dp_index
-        self.seed = seed
+        self.seed = normalize_seed(seed)
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -154,6 +155,7 @@ class SamplingParams:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
+        validate_seed(self.seed)
 
         if len(self.exponential_decay_length_penalty) != 2:
             raise ValueError(

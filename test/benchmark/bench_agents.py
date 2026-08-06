@@ -374,8 +374,11 @@ def summarize(metrics, fired, blocked, total_time, args):
 
 def _run_phase(name: str, out_dir, base: dict, **kw) -> dict:
     args = make_args(**{**base, **kw, "report_sec": 5})
-    print(f"\n>>> {name}  qps={args.qps} sessions={args.num_sessions} "
-          f"isl={args.isl} osl={args.osl} dur={args.duration_sec}s warmup={args.warmup_sec}s", flush=True)
+    print(
+        f"\n>>> {name}  qps={args.qps} sessions={args.num_sessions} "
+        f"isl={args.isl} osl={args.osl} dur={args.duration_sec}s warmup={args.warmup_sec}s",
+        flush=True,
+    )
     buf = io.StringIO()
     t0 = time.perf_counter()
     with contextlib.redirect_stdout(buf):
@@ -385,17 +388,22 @@ def _run_phase(name: str, out_dir, base: dict, **kw) -> dict:
     Path(out_dir, f"{name}.log").write_text(buf.getvalue())
     ttft, tpot = res["ttft"], res["tpot"]
     err = f"  err={res['fail']}({res['top_error'][:40]})" if res["fail"] else ""
-    print(f"    done in {res['suite_wall']:4.0f}s | ok={res['ok']:<4} fail={res['fail']:<3} "
-          f"blocked={res['blocked']:<3} achQPS={res['achieved_qps']:.2f} "
-          f"TTFT p50={ttft['p50']:.0f} p95={ttft['p95']:.0f}  "
-          f"TPOT p50={tpot['p50']:.0f} p95={tpot['p95']:.0f}{err}", flush=True)
+    print(
+        f"    done in {res['suite_wall']:4.0f}s | ok={res['ok']:<4} fail={res['fail']:<3} "
+        f"blocked={res['blocked']:<3} achQPS={res['achieved_qps']:.2f} "
+        f"TTFT p50={ttft['p50']:.0f} p95={ttft['p95']:.0f}  "
+        f"TPOT p50={tpot['p50']:.0f} p95={tpot['p95']:.0f}{err}",
+        flush=True,
+    )
     return res
 
 
 def _md_table(rows: list) -> str:
-    head = ("| phase | targetQPS | fired | ok | fail | blocked | achQPS | "
-            "TTFT p50 | TTFT p95 | TPOT p50 | TPOT p95 | top error |\n"
-            "|---|---|---|---|---|---|---|---|---|---|---|---|")
+    head = (
+        "| phase | targetQPS | fired | ok | fail | blocked | achQPS | "
+        "TTFT p50 | TTFT p95 | TPOT p50 | TPOT p95 | top error |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|"
+    )
     body = []
     for r in rows:
         t, p = r["ttft"], r["tpot"]
@@ -433,8 +441,11 @@ def run_suite(args) -> None:
             ("longrun", dict(qps=8, num_sessions=64, duration_sec=dur(600), warmup_sec=dur(30), report_sec=30))
         )
 
-    print(f"SUITE -> {args.base_url} model={args.model} isl={args.isl} osl={args.osl} "
-          f"quick={args.quick} full={args.full} out={out_dir}", flush=True)
+    print(
+        f"SUITE -> {args.base_url} model={args.model} isl={args.isl} osl={args.osl} "
+        f"quick={args.quick} full={args.full} out={out_dir}",
+        flush=True,
+    )
     t_start = time.perf_counter()
     results = [_run_phase(name, out_dir, base, **kw) for name, kw in phases]
     total = time.perf_counter() - t_start

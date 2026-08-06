@@ -20,6 +20,7 @@ GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_L
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
+MAX_SEED = (1 << 63) - 1
 
 
 class StopSequence(ctypes.Structure):
@@ -345,7 +346,10 @@ class SamplingParams(ctypes.Structure):
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
         seed = kwargs.get("seed")
-        self.seed = -1 if seed is None else seed
+        seed = -1 if seed is None else seed
+        if seed < -1 or seed > MAX_SEED:
+            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {seed}")
+        self.seed = seed
         prompt_logprobs = kwargs.get("prompt_logprobs", None)
         self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
 
@@ -449,8 +453,8 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
         if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
-        if self.seed < -1:
-            raise ValueError(f"seed must be -1 (random), or a non-negative integer, got {self.seed}")
+        if self.seed < -1 or self.seed > MAX_SEED:
+            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {self.seed}")
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 

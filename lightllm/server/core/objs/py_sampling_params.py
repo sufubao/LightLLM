@@ -11,6 +11,7 @@ from lightllm.server.req_id_generator import MAX_BEST_OF
 _SAMPLING_EPS = 1e-5
 # 用环境变量控制是否进行输入惩罚的默认值
 DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
+MAX_SEED = (1 << 63) - 1
 
 
 class SamplingParams:
@@ -154,8 +155,8 @@ class SamplingParams:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
-        if self.seed < -1:
-            raise ValueError(f"seed must be -1 (random), or a non-negative integer, got {self.seed}")
+        if self.seed < -1 or self.seed > MAX_SEED:
+            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {self.seed}")
 
         if len(self.exponential_decay_length_penalty) != 2:
             raise ValueError(

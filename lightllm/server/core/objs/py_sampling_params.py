@@ -92,7 +92,7 @@ class SamplingParams:
         self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.suggested_dp_index = suggested_dp_index
-        self.seed = seed
+        self.seed = -1 if seed is None else seed
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -154,6 +154,8 @@ class SamplingParams:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
+        if self.seed < -1:
+            raise ValueError(f"seed must be -1 (random), or a non-negative integer, got {self.seed}")
 
         if len(self.exponential_decay_length_penalty) != 2:
             raise ValueError(

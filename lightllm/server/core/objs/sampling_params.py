@@ -344,7 +344,8 @@ class SamplingParams(ctypes.Structure):
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
-        self.seed = kwargs.get("seed", -1)
+        seed = kwargs.get("seed")
+        self.seed = -1 if seed is None else seed
         prompt_logprobs = kwargs.get("prompt_logprobs", None)
         self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
 
@@ -448,6 +449,8 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
         if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
+        if self.seed < -1:
+            raise ValueError(f"seed must be -1 (random), or a non-negative integer, got {self.seed}")
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 

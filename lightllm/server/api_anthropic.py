@@ -840,6 +840,22 @@ async def _openai_sse_to_anthropic_events(
                 logger.debug("Skipping non-JSON SSE payload: %r", payload)
                 continue
 
+            if "error" in chunk and "choices" not in chunk:
+                error = chunk["error"]
+                error_type = error.get("type")
+                if error.get("code") == 429 or error_type in ("RateLimitError", "rate_limit_error"):
+                    error_type = "rate_limit_error"
+                elif error_type != "invalid_request_error":
+                    error_type = "api_error"
+                yield _sse_event(
+                    "error",
+                    {
+                        "type": "error",
+                        "error": {"type": error_type, "message": error.get("message", "generation failed")},
+                    },
+                )
+                return
+
             # final_output_tokens is sourced exclusively from the trailing usage
             # chunk emitted by chat_completions_impl; we intentionally do not
             # estimate it per delta because that would diverge from the
@@ -1096,7 +1112,7 @@ def _rewrap_openai_error_as_anthropic(resp: JSONResponse) -> JSONResponse:
 async def anthropic_messages_impl(raw_request: Request) -> Response:
     # Lazy imports to avoid pulling in heavy server deps at module import time.
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
-    from .api_openai import chat_completions_impl
+    from .api_openai import chat_completions_impl, prime_pd_master_streaming_response
 
     try:
         raw_body = await raw_request.json()
@@ -1134,6 +1150,8 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
             if isinstance(downstream, JSONResponse):
                 return _rewrap_openai_error_as_anthropic(downstream)
             return downstream
+
+        downstream = await prime_pd_master_streaming_response(downstream)
 
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         anthropic_stream = _openai_sse_to_anthropic_events(

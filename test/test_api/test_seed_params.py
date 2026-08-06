@@ -35,7 +35,7 @@ def test_request_seed_rejects_values_below_random_sentinel(request_factory):
 
 
 @pytest.mark.parametrize("request_factory", [_chat_request, _completion_request])
-@pytest.mark.parametrize("seed", [MAX_SEED + 1, (1 << 64) - 1, 10**100])
+@pytest.mark.parametrize("seed", [MAX_SEED + 1, (1 << 64) - 1, 10 ** 100])
 def test_request_seed_rejects_values_above_int64_max(request_factory, seed):
     with pytest.raises(ValidationError, match=f"less than or equal to {MAX_SEED}"):
         request_factory(seed=seed)
@@ -69,7 +69,7 @@ def test_sampling_params_reject_values_below_random_sentinel():
         py_params.verify()
 
 
-@pytest.mark.parametrize("seed", [MAX_SEED + 1, (1 << 64) - 1, 10**100])
+@pytest.mark.parametrize("seed", [MAX_SEED + 1, (1 << 64) - 1, 10 ** 100])
 def test_sampling_params_reject_seed_before_int64_wraparound(seed):
     with pytest.raises(ValueError, match=f"integer in \\[0, {MAX_SEED}\\]"):
         params = SamplingParams()

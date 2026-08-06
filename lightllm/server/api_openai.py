@@ -125,6 +125,58 @@ def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
     return json.dumps(d, ensure_ascii=False)
 
 
+class _StopSequenceFilter:
+    """Hide stop strings while preserving text that only partially matches one."""
+
+    def __init__(self, stop_sequences: List[str]):
+        self.stop_sequences = [sequence for sequence in stop_sequences if sequence]
+        self.pending = ""
+        self.stopped = False
+
+    def process(self, text: str, *, final: bool = False) -> str:
+        if self.stopped:
+            return ""
+
+        self.pending += text
+        stop_index = None
+        for stop_sequence in self.stop_sequences:
+            index = self.pending.find(stop_sequence)
+            if index != -1 and (stop_index is None or index < stop_index):
+                stop_index = index
+
+        if stop_index is not None:
+            output = self.pending[:stop_index]
+            self.pending = ""
+            self.stopped = True
+            return output
+
+        if final or not self.stop_sequences:
+            output = self.pending
+            self.pending = ""
+            return output
+
+        partial_match_length = 0
+        for stop_sequence in self.stop_sequences:
+            max_length = min(len(self.pending), len(stop_sequence) - 1)
+            for length in range(max_length, 0, -1):
+                if self.pending.endswith(stop_sequence[:length]):
+                    partial_match_length = max(partial_match_length, length)
+                    break
+
+        if partial_match_length == 0:
+            output = self.pending
+            self.pending = ""
+            return output
+
+        output = self.pending[:-partial_match_length]
+        self.pending = self.pending[-partial_match_length:]
+        return output
+
+
+def _remove_stop_sequences(text: str, stop_sequences: List[str]) -> str:
+    return _StopSequenceFilter(stop_sequences).process(text, final=True)
+
+
 def create_error_response(
     status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
 ) -> JSONResponse:
@@ -426,6 +478,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
+            if finish_reason == "stop":
+                text = _remove_stop_sequences(text, sampling_params.stop_sequences.to_strings())
 
             # Handle reasoning content
             reasoning_text = None
@@ -513,6 +567,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
         has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
+        stop_sequences = sampling_params.stop_sequences.to_strings()
+        stop_filters: Dict[int, _StopSequenceFilter] = collections.defaultdict(
+            lambda: _StopSequenceFilter(stop_sequences)
+        )
         from .req_id_generator import convert_sub_id_to_group_id
 
         prompt_tokens = 0
@@ -525,8 +583,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
 
-            delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
+            delta = stop_filters[sub_req_id].process(request_output, final=current_finish_reason is not None)
 
             # Emit the initial role-only chunk once per choice, as required by the
             # OpenAI SSE spec: role appears only in the first delta with content="".
@@ -960,6 +1018,10 @@ async def _handle_streaming_completion(
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
+        stop_sequences = sampling_params.stop_sequences.to_strings()
+        stop_filters: Dict[int, _StopSequenceFilter] = collections.defaultdict(
+            lambda: _StopSequenceFilter(stop_sequences)
+        )
 
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -971,7 +1033,7 @@ async def _handle_streaming_completion(
             if finish_status.is_finished():
                 current_finish_reason = finish_status.get_finish_reason()
 
-            output_text = request_output
+            output_text = stop_filters[sub_req_id].process(request_output, final=current_finish_reason is not None)
             if request.echo and metadata.get("is_first_token", False):
                 prompt_str = prompt
                 if isinstance(prompt, list):
@@ -1050,16 +1112,9 @@ async def _collect_generation_results(
             prompt_tokens = metadata["prompt_tokens"]
             prompt_cache_len = metadata.get("prompt_cache_len", 0)
 
-    # 处理停止序列剔除
     final_text = "".join(final_output)
     if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
-        valid_stop_strings = sampling_params.stop_sequences.to_strings()
-        for stop_str in valid_stop_strings:
-            stop_index = final_text.rfind(stop_str, max(0, len(final_text) - len(stop_str) - 20), len(final_text))
-            if stop_index != -1:
-                logger.debug(f"removed stop sequence in tail: '{final_text[stop_index:]}'")
-                final_text = final_text[:stop_index]
-                break
+        final_text = _remove_stop_sequences(final_text, sampling_params.stop_sequences.to_strings())
 
     return {
         "index": prompt_index,

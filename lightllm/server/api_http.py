@@ -37,6 +37,7 @@ from typing import AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
@@ -176,6 +177,36 @@ def create_error_response(
 def create_server_busy_response(exc: ServerBusyError) -> JSONResponse:
     status = HTTPStatus(exc.status_code)
     return create_error_response(status, str(exc), err_type="RateLimitError")
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    if not errors:
+        return create_error_response(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            str(exc),
+            err_type="invalid_request_error",
+        )
+
+    error = errors[0]
+    location = error.get("loc", ())
+    param_parts = [str(part) for part in location if part != "body"]
+    param = ".".join(param_parts) or None
+
+    if error.get("type") == "missing" and param is not None:
+        message = f"Missing required parameter: '{param}'."
+    elif param is not None:
+        message = f"Invalid value for '{param}': {error.get('msg', 'Request validation failed')}"
+    else:
+        message = error.get("msg", "Request validation failed")
+
+    return create_error_response(
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        message,
+        err_type="invalid_request_error",
+        param=param,
+    )
 
 
 @app.exception_handler(ServerBusyError)

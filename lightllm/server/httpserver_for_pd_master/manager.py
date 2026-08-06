@@ -244,7 +244,7 @@ class HttpServerManagerForPDMaster:
                 async for sub_req_id, request_output, metadata, finish_status in results_generator:
                     # pd 分离模式下，返回的 metadata 可能序号信息可能存在不准确性。
                     assert sub_req_id == block_group_request_id
-                    if finish_status.get_finish_reason() == "length" and (not is_last_block):
+                    if finish_status.is_finished_length() and not is_last_block:
                         finish_status = FinishStatus()  # 转换为NoFinished
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
@@ -255,6 +255,8 @@ class HttpServerManagerForPDMaster:
                     yield origin_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
+                if finish_status.is_finished():
+                    break
 
         except (ClientDisconnected, BaseException) as e:
             logger.error(f"has exception {str(e)}")

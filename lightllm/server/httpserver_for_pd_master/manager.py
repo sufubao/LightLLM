@@ -211,9 +211,12 @@ class HttpServerManagerForPDMaster:
         block_group_request_id = origin_request_id
         p_node = None
         d_node = None
+        prefill_load_released = False
 
         try:
             p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
+            # 记录当前 P 节点的在途 prompt 负载，首 token 生成后即可释放。
+            p_node.dispatched_prompt_chars += len(prompt)
 
             history_gen_token_strs = []
 
@@ -252,6 +255,9 @@ class HttpServerManagerForPDMaster:
                     if iter_index == 0 and origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
+                    if not prefill_load_released:
+                        p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - len(prompt))
+                        prefill_load_released = True
                     yield origin_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
@@ -271,6 +277,8 @@ class HttpServerManagerForPDMaster:
             raise e
 
         finally:
+            if p_node is not None and not prefill_load_released:
+                p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - len(prompt))
             await self.remove_req(block_group_request_id)
         return
 
@@ -731,12 +739,6 @@ class PDManager:
         if pd_client.mode == "prefill":
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
-            # dispatched_prompt_chars is the cumulative counter used by the
-            # CacheAware policy to balance request dispatch across prefill nodes.
-            # Reset all counters together when a node registers or reconnects so
-            # stale history does not bias CacheAware toward the zero-valued node.
-            for prefill_node in self.prefill_nodes:
-                prefill_node.dispatched_prompt_chars = 0
         elif pd_client.mode == "decode":
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)

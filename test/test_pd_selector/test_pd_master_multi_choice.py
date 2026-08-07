@@ -36,7 +36,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
         started = set()
         all_started = asyncio.Event()
         captured_params = []
-        p_node = MagicMock()
+        p_node = MagicMock(dispatched_prompt_chars=0)
         d_node = MagicMock()
         manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node))
         manager._split_max_new_tokens = MagicMock(return_value=[4])
@@ -93,6 +93,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
             call("lightllm_request_count"),
             call("lightllm_request_success"),
         ]
+        assert p_node.dispatched_prompt_chars == 0
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
@@ -201,5 +202,74 @@ def test_pd_master_closing_merged_stream_closes_choice_generators():
         await merged.aclose()
 
         assert choice_closed.is_set()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_releases_prefill_load_when_generation_fails():
+    async def run():
+        manager = _manager()
+        manager._split_max_new_tokens = MagicMock(return_value=[4])
+        manager.id_gen.generate_id.return_value = 808
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        p_node = MagicMock(dispatched_prompt_chars=0)
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node))
+
+        async def failing_wait_to_token_package(*_args, **_kwargs):
+            raise RuntimeError("generation failed")
+            yield None
+
+        manager._wait_to_token_package = failing_wait_to_token_package
+
+        with pytest.raises(RuntimeError, match="generation failed"):
+            async for _ in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+            ):
+                pass
+
+        assert p_node.dispatched_prompt_chars == 0
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_releases_prefill_load_when_stream_is_closed():
+    async def run():
+        manager = _manager()
+        manager._split_max_new_tokens = MagicMock(return_value=[4])
+        manager.id_gen.generate_id.return_value = 808
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        other_request_load = 17
+        p_node = MagicMock(dispatched_prompt_chars=other_request_load)
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node))
+
+        async def wait_to_token_package(*_args, **_kwargs):
+            yield 808, "first", {"prompt_tokens": 1}, FinishStatus()
+            await asyncio.sleep(10)
+
+        manager._wait_to_token_package = wait_to_token_package
+        generator = manager._generate_one(
+            "prompt",
+            SamplingParams(),
+            MagicMock(),
+            MagicMock(),
+            0,
+            800,
+        )
+
+        assert (await generator.__anext__())[1] == "first"
+        assert p_node.dispatched_prompt_chars == other_request_load
+        await generator.aclose()
+
+        assert p_node.dispatched_prompt_chars == other_request_load
+        manager.abort.assert_awaited_once()
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))

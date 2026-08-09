@@ -428,6 +428,8 @@ class HttpServerManagerForPDMaster:
         )
 
         first_token_gen = False
+        wait_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        pending_decode_tokens = []
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
@@ -439,15 +441,23 @@ class HttpServerManagerForPDMaster:
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
+                    node_run_mode = metadata.get("node_mode")
+                    if not first_token_gen and wait_prefill_first_token and node_run_mode != "prefill":
+                        pending_decode_tokens.append((sub_req_id, request_output, metadata, finish_status))
+                        continue
                     # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
                     if output_index == 1:
                         if first_token_gen is False:
                             first_token_gen = True
-                            node_run_mode = metadata.pop("node_mode", None)
+                            metadata.pop("node_mode", None)
                             if node_run_mode == "prefill":
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             yield sub_req_id, request_output, metadata, finish_status
+                            for pending_token in pending_decode_tokens:
+                                if pending_token[2].get("count_output_tokens") != 1:
+                                    yield pending_token
+                            pending_decode_tokens.clear()
                         else:
                             continue
                     else:

@@ -111,7 +111,12 @@ def _fwd_kernel_gather(
     return
 
 
-def gather_token(req_to_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b_mtp_index: torch.Tensor):
+def gather_token(
+    req_to_next_token_ids: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_mtp_index: torch.Tensor,
+    out: torch.Tensor = None,
+):
     """
     This function is used to gather the token_info(CPU tensor) to the token_info(GPU tensor).
     Args:
@@ -122,7 +127,7 @@ def gather_token(req_to_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b
         output: (batch_size,)
     """
     batch_size = b_req_idx.shape[0]
-    output = torch.empty(batch_size, dtype=req_to_next_token_ids.dtype, device="cuda")
+    output = out if out is not None else torch.empty(batch_size, dtype=req_to_next_token_ids.dtype, device="cuda")
     BLOCK = 256
     grid = (triton.cdiv(batch_size, BLOCK),)
     num_warps = 1

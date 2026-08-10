@@ -427,9 +427,9 @@ class HttpServerManagerForPDMaster:
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
-        first_token_gen = False
-        wait_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
-        pending_decode_tokens = []
+        first_token_emitted = False
+        waiting_for_prefill_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        token_list = []
         prefill_prompt_cache_len = None
         while True:
             await req_status.wait_to_ready()
@@ -439,38 +439,45 @@ class HttpServerManagerForPDMaster:
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
             if await req_status.can_read(self.req_id_to_out_inf):
-                token_list = await req_status.pop_all_tokens()
-                for sub_req_id, request_output, metadata, finish_status in token_list:
-                    output_index = metadata.get("count_output_tokens")
-                    node_run_mode = metadata.pop("node_mode", None)
-                    if not first_token_gen and wait_prefill_first_token and node_run_mode != "prefill":
-                        pending_decode_tokens.append((sub_req_id, request_output, metadata, finish_status))
-                        continue
-                    # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
-                    if output_index == 1:
-                        if first_token_gen is False:
-                            first_token_gen = True
-                            if node_run_mode == "prefill":
-                                prefill_prompt_cache_len = metadata.get("prompt_cache_len", 0)
-                                if old_max_new_tokens != 1 and finish_status.is_finished_length():
-                                    finish_status = FinishStatus(FinishStatus.NO_FINISH)
-                            yield sub_req_id, request_output, metadata, finish_status
-                            for pending_token in pending_decode_tokens:
-                                if pending_token[2].get("count_output_tokens") != 1:
-                                    pending_token[2]["prompt_cache_len"] = prefill_prompt_cache_len
-                                    yield pending_token
-                            pending_decode_tokens.clear()
-                        else:
-                            continue
-                    else:
-                        if prefill_prompt_cache_len is not None:
-                            metadata["prompt_cache_len"] = prefill_prompt_cache_len
-                        yield sub_req_id, request_output, metadata, finish_status
-            elif pending_decode_tokens and pending_decode_tokens[-1][3].is_finished():
+                token_list.extend(await req_status.pop_all_tokens())
+            elif token_list and token_list[-1][3].is_finished():
+                # D 已完成且一个轮询周期内仍未收到 P 首 token，用完整 D 输出兜底。
                 logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
-                for pending_token in pending_decode_tokens:
-                    yield pending_token
+                for token in token_list:
+                    token[2].pop("node_mode", None)
+                    yield token
                 return
+            else:
+                continue
+
+            # 需要 prefill 时先累计 D 输出，直到拿到带权威缓存统计的 P 首 token。
+            if waiting_for_prefill_token:
+                prefill_index = next(
+                    (index for index, token in enumerate(token_list) if token[2].get("node_mode") == "prefill"),
+                    None,
+                )
+                if prefill_index is None:
+                    continue
+                # P 首 token 必须先输出，后面的统一逻辑会丢弃重复的 D 首 token。
+                prefill_token = token_list.pop(prefill_index)
+                token_list.insert(0, prefill_token)
+                waiting_for_prefill_token = False
+
+            for sub_req_id, request_output, metadata, finish_status in token_list:
+                output_index = metadata.get("count_output_tokens")
+                node_run_mode = metadata.pop("node_mode", None)
+                if output_index == 1:
+                    if first_token_emitted:
+                        continue
+                    first_token_emitted = True
+                    if node_run_mode == "prefill":
+                        prefill_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                        if old_max_new_tokens != 1 and finish_status.is_finished_length():
+                            finish_status = FinishStatus(FinishStatus.NO_FINISH)
+                if prefill_prompt_cache_len is not None:
+                    metadata["prompt_cache_len"] = prefill_prompt_cache_len
+                yield sub_req_id, request_output, metadata, finish_status
+            token_list.clear()
 
         return
 

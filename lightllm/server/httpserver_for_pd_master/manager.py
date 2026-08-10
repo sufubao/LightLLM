@@ -430,6 +430,7 @@ class HttpServerManagerForPDMaster:
         first_token_emitted = False
         waiting_for_prefill_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
         token_list = []
+        prefill_token = None
         prefill_prompt_cache_len = None
         while True:
             await req_status.wait_to_ready()
@@ -439,7 +440,7 @@ class HttpServerManagerForPDMaster:
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
             if await req_status.can_read(self.req_id_to_out_inf):
-                token_list.extend(await req_status.pop_all_tokens())
+                new_tokens = await req_status.pop_all_tokens()
             else:
                 if not token_list:
                     continue
@@ -453,20 +454,21 @@ class HttpServerManagerForPDMaster:
                     yield sub_req_id, request_output, metadata, finish_status
                 return
 
-            # 需要 prefill 时先累计 D 输出，直到拿到带权威缓存统计的 P 首 token。
+            # 只检查本轮新 token，避免等待 P 时反复扫描已缓存的 D 输出。
             if waiting_for_prefill_token:
-                prefill_index = None
-                for index, token in enumerate(token_list):
+                for token in new_tokens:
                     _, _, metadata, _ = token
-                    if metadata.get("node_mode") == "prefill":
-                        prefill_index = index
-                        break
-                if prefill_index is None:
+                    if prefill_token is None and metadata.get("node_mode") == "prefill":
+                        prefill_token = token
+                    else:
+                        token_list.append(token)
+                if prefill_token is None:
                     continue
                 # P 首 token 必须先输出，后面的统一逻辑会丢弃重复的 D 首 token。
-                prefill_token = token_list.pop(prefill_index)
                 token_list.insert(0, prefill_token)
                 waiting_for_prefill_token = False
+            else:
+                token_list.extend(new_tokens)
 
             for sub_req_id, request_output, metadata, finish_status in token_list:
                 output_index = metadata.get("count_output_tokens")

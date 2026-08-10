@@ -442,7 +442,7 @@ class HttpServerManagerForPDMaster:
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
-                    node_run_mode = metadata.get("node_mode")
+                    node_run_mode = metadata.pop("node_mode", None)
                     if not first_token_gen and wait_prefill_first_token and node_run_mode != "prefill":
                         pending_decode_tokens.append((sub_req_id, request_output, metadata, finish_status))
                         continue
@@ -450,7 +450,6 @@ class HttpServerManagerForPDMaster:
                     if output_index == 1:
                         if first_token_gen is False:
                             first_token_gen = True
-                            metadata.pop("node_mode", None)
                             if node_run_mode == "prefill":
                                 prefill_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():

@@ -432,13 +432,15 @@ class HttpServerManagerForPDMaster:
         buffered_decode_tokens = []
         prompt_cache_len_from_prefill = None
         while True:
-            new_tokens = await req_status.drain_tokens(self.req_id_to_out_inf)
+            new_tokens = await req_status.out_tokens.wait_to_get_all_data(timeout=5)
+            assert group_request_id in self.req_id_to_out_inf, f"error state req_id {group_request_id}"
             if await request.is_disconnected():
                 raise ClientDisconnected(
                     group_request_id=group_request_id,
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
 
+            # 本轮无新 token 且 D 已完成时，释放缓冲避免因 P 首 token 缺失而挂起。
             if not new_tokens:
                 if not buffered_decode_tokens or not buffered_decode_tokens[-1][3].is_finished():
                     continue
@@ -618,18 +620,15 @@ class HttpServerManagerForPDMaster:
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             try:
                                 req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
-                                async with req_status.lock:
-                                    req_status.out_token_info_list.append((sub_req_id, text, metadata, finish_status))
-                                    req_status.event.set()
+                                await req_status.out_tokens.put((sub_req_id, text, metadata, finish_status))
                             except:
                                 pass
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
                             req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
-                            async with req_status.lock:
-                                req_status.prefill_prompt_ids_event.prompt_ids = prompt_ids
-                                req_status.prefill_prompt_ids_event.set()
+                            req_status.prefill_prompt_ids_event.prompt_ids = prompt_ids
+                            req_status.prefill_prompt_ids_event.set()
                         except:
                             logger.error(
                                 f"PD_UPLOAD_PREFILL_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
@@ -652,25 +651,11 @@ class HttpServerManagerForPDMaster:
 class ReqStatus:
     def __init__(self, req_id, p_node, d_node) -> None:
         self.req_id = req_id
-        self.lock = asyncio.Lock()
-        self.event = asyncio.Event()
+        self.out_tokens = AsyncQueue()
         self.up_status_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
-        self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
-
-    async def drain_tokens(self, req_id_to_out_inf):
-        try:
-            await asyncio.wait_for(self.event.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            pass
-        async with self.lock:
-            self.event.clear()
-            assert self.req_id in req_id_to_out_inf, f"error state req_id {self.req_id}"
-            tokens = self.out_token_info_list
-            self.out_token_info_list = []
-            return tokens
 
 
 class PDManager:

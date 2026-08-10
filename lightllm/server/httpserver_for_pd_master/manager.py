@@ -432,19 +432,12 @@ class HttpServerManagerForPDMaster:
         pending_decode_tokens = []
         prefill_prompt_cache_len = None
         while True:
-            tokens_ready = await req_status.wait_to_ready()
+            await req_status.wait_to_ready()
             if await request.is_disconnected():
                 raise ClientDisconnected(
                     group_request_id=group_request_id,
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
-            if not tokens_ready and any(token[3].is_finished() for token in pending_decode_tokens):
-                logger.warning(
-                    f"group_request_id: {group_request_id} prefill first token missing; releasing decode output"
-                )
-                for pending_token in pending_decode_tokens:
-                    yield pending_token
-                return
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
@@ -474,6 +467,11 @@ class HttpServerManagerForPDMaster:
                         if prefill_prompt_cache_len is not None:
                             metadata["prompt_cache_len"] = prefill_prompt_cache_len
                         yield sub_req_id, request_output, metadata, finish_status
+            elif pending_decode_tokens and pending_decode_tokens[-1][3].is_finished():
+                logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
+                for pending_token in pending_decode_tokens:
+                    yield pending_token
+                return
 
         return
 
@@ -662,9 +660,8 @@ class ReqStatus:
     async def wait_to_ready(self):
         try:
             await asyncio.wait_for(self.event.wait(), timeout=5)
-            return True
         except asyncio.TimeoutError:
-            return False
+            pass
 
     async def can_read(self, req_id_to_out_inf):
         async with self.lock:

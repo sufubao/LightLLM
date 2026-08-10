@@ -440,22 +440,27 @@ class HttpServerManagerForPDMaster:
                 )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list.extend(await req_status.pop_all_tokens())
-            elif token_list and token_list[-1][3].is_finished():
+            else:
+                if not token_list:
+                    continue
+                _, _, _, last_finish_status = token_list[-1]
+                if not last_finish_status.is_finished():
+                    continue
                 # D 已完成且一个轮询周期内仍未收到 P 首 token，用完整 D 输出兜底。
                 logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
-                for token in token_list:
-                    token[2].pop("node_mode", None)
-                    yield token
+                for sub_req_id, request_output, metadata, finish_status in token_list:
+                    metadata.pop("node_mode", None)
+                    yield sub_req_id, request_output, metadata, finish_status
                 return
-            else:
-                continue
 
             # 需要 prefill 时先累计 D 输出，直到拿到带权威缓存统计的 P 首 token。
             if waiting_for_prefill_token:
-                prefill_index = next(
-                    (index for index, token in enumerate(token_list) if token[2].get("node_mode") == "prefill"),
-                    None,
-                )
+                prefill_index = None
+                for index, token in enumerate(token_list):
+                    _, _, metadata, _ = token
+                    if metadata.get("node_mode") == "prefill":
+                        prefill_index = index
+                        break
                 if prefill_index is None:
                     continue
                 # P 首 token 必须先输出，后面的统一逻辑会丢弃重复的 D 首 token。

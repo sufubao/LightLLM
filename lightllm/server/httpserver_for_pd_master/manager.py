@@ -430,13 +430,21 @@ class HttpServerManagerForPDMaster:
         first_token_gen = False
         wait_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
         pending_decode_tokens = []
+        prefill_prompt_cache_len = None
         while True:
-            await req_status.wait_to_ready()
+            tokens_ready = await req_status.wait_to_ready()
             if await request.is_disconnected():
                 raise ClientDisconnected(
                     group_request_id=group_request_id,
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
+            if not tokens_ready and any(token[3].is_finished() for token in pending_decode_tokens):
+                logger.warning(
+                    f"group_request_id: {group_request_id} prefill first token missing; releasing decode output"
+                )
+                for pending_token in pending_decode_tokens:
+                    yield pending_token
+                return
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
@@ -451,16 +459,20 @@ class HttpServerManagerForPDMaster:
                             first_token_gen = True
                             metadata.pop("node_mode", None)
                             if node_run_mode == "prefill":
+                                prefill_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             yield sub_req_id, request_output, metadata, finish_status
                             for pending_token in pending_decode_tokens:
                                 if pending_token[2].get("count_output_tokens") != 1:
+                                    pending_token[2]["prompt_cache_len"] = prefill_prompt_cache_len
                                     yield pending_token
                             pending_decode_tokens.clear()
                         else:
                             continue
                     else:
+                        if prefill_prompt_cache_len is not None:
+                            metadata["prompt_cache_len"] = prefill_prompt_cache_len
                         yield sub_req_id, request_output, metadata, finish_status
 
         return
@@ -650,8 +662,9 @@ class ReqStatus:
     async def wait_to_ready(self):
         try:
             await asyncio.wait_for(self.event.wait(), timeout=5)
+            return True
         except asyncio.TimeoutError:
-            pass
+            return False
 
     async def can_read(self, req_id_to_out_inf):
         async with self.lock:

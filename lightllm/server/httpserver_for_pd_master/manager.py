@@ -427,63 +427,41 @@ class HttpServerManagerForPDMaster:
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
+        first_token_emitted = False
         needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
         buffered_decode_tokens = []
-        initial_tokens = []
+        prompt_cache_len_from_prefill = None
+        while True:
+            new_tokens = await req_status.drain_tokens(self.req_id_to_out_inf)
+            if await request.is_disconnected():
+                raise ClientDisconnected(
+                    group_request_id=group_request_id,
+                    reason="fetch_pd_stream decode period check network disconnected",
+                )
 
-        # 阶段 1：缓存先到的 D 输出，直到收到携带缓存统计的 P 首 token。
-        if needs_prefill_first_token:
-            while True:
-                new_tokens = await req_status.drain_tokens(self.req_id_to_out_inf)
-                if await request.is_disconnected():
-                    raise ClientDisconnected(
-                        group_request_id=group_request_id,
-                        reason="fetch_pd_stream decode period check network disconnected",
-                    )
-
-                if new_tokens:
-                    prefill_token = None
-                    for token in new_tokens:
-                        _, _, metadata, _ = token
-                        if prefill_token is None and metadata.get("node_mode") == "prefill":
-                            prefill_token = token
-                        else:
-                            buffered_decode_tokens.append(token)
-                    if prefill_token is None:
-                        continue
-                    # P 首 token 必须先输出，后面的统一逻辑会丢弃重复的 D 首 token。
-                    initial_tokens = [prefill_token, *buffered_decode_tokens]
-                    buffered_decode_tokens.clear()
-                    break
-
-                if not buffered_decode_tokens:
+            if not new_tokens:
+                if not buffered_decode_tokens or not buffered_decode_tokens[-1][3].is_finished():
                     continue
-                _, _, _, last_finish_status = buffered_decode_tokens[-1]
-                if not last_finish_status.is_finished():
-                    continue
-                # D 已完成且一个轮询周期内仍未收到 P 首 token，用完整 D 输出兜底。
                 logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
                 for sub_req_id, request_output, metadata, finish_status in buffered_decode_tokens:
                     metadata.pop("node_mode", None)
                     yield sub_req_id, request_output, metadata, finish_status
                 return
 
-        # 阶段 2：输出合并后的 token 流，并将 P 的缓存统计传递给后续 D token。
-        first_token_emitted = False
-        prompt_cache_len_from_prefill = None
-        token_batch = initial_tokens
-        while True:
-            if not token_batch:
-                token_batch = await req_status.drain_tokens(self.req_id_to_out_inf)
-                if await request.is_disconnected():
-                    raise ClientDisconnected(
-                        group_request_id=group_request_id,
-                        reason="fetch_pd_stream decode period check network disconnected",
-                    )
-                if not token_batch:
+            # P 首 token 携带缓存统计，需先于已缓冲的 D 输出返回。
+            if needs_prefill_first_token:
+                prefill_token = next(
+                    (token for token in new_tokens if token[2].get("node_mode") == "prefill"), None
+                )
+                if prefill_token is None:
+                    buffered_decode_tokens.extend(new_tokens)
                     continue
+                new_tokens.remove(prefill_token)
+                new_tokens = [prefill_token, *buffered_decode_tokens, *new_tokens]
+                buffered_decode_tokens.clear()
+                needs_prefill_first_token = False
 
-            for sub_req_id, request_output, metadata, finish_status in token_batch:
+            for sub_req_id, request_output, metadata, finish_status in new_tokens:
                 output_index = metadata.get("count_output_tokens")
                 node_run_mode = metadata.pop("node_mode", None)
                 if output_index == 1:
@@ -497,7 +475,6 @@ class HttpServerManagerForPDMaster:
                 if prompt_cache_len_from_prefill is not None:
                     metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                 yield sub_req_id, request_output, metadata, finish_status
-            token_batch = []
 
         return
 

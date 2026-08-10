@@ -427,50 +427,63 @@ class HttpServerManagerForPDMaster:
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
-        first_token_emitted = False
-        waiting_for_prefill_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
-        token_list = []
-        prefill_token = None
-        prefill_prompt_cache_len = None
-        while True:
-            await req_status.wait_to_ready()
-            if await request.is_disconnected():
-                raise ClientDisconnected(
-                    group_request_id=group_request_id,
-                    reason="fetch_pd_stream decode period check network disconnected",
-                )
-            if await req_status.can_read(self.req_id_to_out_inf):
-                new_tokens = await req_status.pop_all_tokens()
-            else:
-                if not token_list:
+        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        buffered_decode_tokens = []
+        initial_tokens = []
+
+        # 阶段 1：缓存先到的 D 输出，直到收到携带缓存统计的 P 首 token。
+        if needs_prefill_first_token:
+            while True:
+                new_tokens = await req_status.drain_tokens(self.req_id_to_out_inf)
+                if await request.is_disconnected():
+                    raise ClientDisconnected(
+                        group_request_id=group_request_id,
+                        reason="fetch_pd_stream decode period check network disconnected",
+                    )
+
+                if new_tokens:
+                    prefill_token = None
+                    for token in new_tokens:
+                        _, _, metadata, _ = token
+                        if prefill_token is None and metadata.get("node_mode") == "prefill":
+                            prefill_token = token
+                        else:
+                            buffered_decode_tokens.append(token)
+                    if prefill_token is None:
+                        continue
+                    # P 首 token 必须先输出，后面的统一逻辑会丢弃重复的 D 首 token。
+                    initial_tokens = [prefill_token, *buffered_decode_tokens]
+                    buffered_decode_tokens.clear()
+                    break
+
+                if not buffered_decode_tokens:
                     continue
-                _, _, _, last_finish_status = token_list[-1]
+                _, _, _, last_finish_status = buffered_decode_tokens[-1]
                 if not last_finish_status.is_finished():
                     continue
                 # D 已完成且一个轮询周期内仍未收到 P 首 token，用完整 D 输出兜底。
                 logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
-                for sub_req_id, request_output, metadata, finish_status in token_list:
+                for sub_req_id, request_output, metadata, finish_status in buffered_decode_tokens:
                     metadata.pop("node_mode", None)
                     yield sub_req_id, request_output, metadata, finish_status
                 return
 
-            # 只检查本轮新 token，避免等待 P 时反复扫描已缓存的 D 输出。
-            if waiting_for_prefill_token:
-                for token in new_tokens:
-                    _, _, metadata, _ = token
-                    if prefill_token is None and metadata.get("node_mode") == "prefill":
-                        prefill_token = token
-                    else:
-                        token_list.append(token)
-                if prefill_token is None:
+        # 阶段 2：输出合并后的 token 流，并将 P 的缓存统计传递给后续 D token。
+        first_token_emitted = False
+        prompt_cache_len_from_prefill = None
+        token_batch = initial_tokens
+        while True:
+            if not token_batch:
+                token_batch = await req_status.drain_tokens(self.req_id_to_out_inf)
+                if await request.is_disconnected():
+                    raise ClientDisconnected(
+                        group_request_id=group_request_id,
+                        reason="fetch_pd_stream decode period check network disconnected",
+                    )
+                if not token_batch:
                     continue
-                # P 首 token 必须先输出，后面的统一逻辑会丢弃重复的 D 首 token。
-                token_list.insert(0, prefill_token)
-                waiting_for_prefill_token = False
-            else:
-                token_list.extend(new_tokens)
 
-            for sub_req_id, request_output, metadata, finish_status in token_list:
+            for sub_req_id, request_output, metadata, finish_status in token_batch:
                 output_index = metadata.get("count_output_tokens")
                 node_run_mode = metadata.pop("node_mode", None)
                 if output_index == 1:
@@ -478,13 +491,13 @@ class HttpServerManagerForPDMaster:
                         continue
                     first_token_emitted = True
                     if node_run_mode == "prefill":
-                        prefill_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                        prompt_cache_len_from_prefill = metadata.get("prompt_cache_len", 0)
                         if old_max_new_tokens != 1 and finish_status.is_finished_length():
                             finish_status = FinishStatus(FinishStatus.NO_FINISH)
-                if prefill_prompt_cache_len is not None:
-                    metadata["prompt_cache_len"] = prefill_prompt_cache_len
+                if prompt_cache_len_from_prefill is not None:
+                    metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                 yield sub_req_id, request_output, metadata, finish_status
-            token_list.clear()
+            token_batch = []
 
         return
 
@@ -670,26 +683,17 @@ class ReqStatus:
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
 
-    async def wait_to_ready(self):
+    async def drain_tokens(self, req_id_to_out_inf):
         try:
             await asyncio.wait_for(self.event.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
-
-    async def can_read(self, req_id_to_out_inf):
         async with self.lock:
             self.event.clear()
             assert self.req_id in req_id_to_out_inf, f"error state req_id {self.req_id}"
-            if len(self.out_token_info_list) == 0:
-                return False
-            else:
-                return True
-
-    async def pop_all_tokens(self):
-        async with self.lock:
-            ans = self.out_token_info_list.copy()
-            self.out_token_info_list.clear()
-        return ans
+            tokens = self.out_token_info_list
+            self.out_token_info_list = []
+            return tokens
 
 
 class PDManager:

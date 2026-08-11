@@ -452,9 +452,7 @@ class HttpServerManagerForPDMaster:
 
             # P 首 token 携带缓存统计，需先于已缓冲的 D 输出返回。
             if needs_prefill_first_token:
-                prefill_token = next(
-                    (token for token in new_tokens if token[2].get("node_mode") == "prefill"), None
-                )
+                prefill_token = next((token for token in new_tokens if token[2].get("node_mode") == "prefill"), None)
                 if prefill_token is None:
                     buffered_decode_tokens.extend(new_tokens)
                     continue

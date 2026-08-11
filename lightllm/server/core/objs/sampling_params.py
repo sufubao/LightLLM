@@ -21,6 +21,7 @@ JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 MAX_SEED = (1 << 63) - 1
+_MAX_INT32 = (1 << 31) - 1
 
 
 class StopSequence(ctypes.Structure):
@@ -221,6 +222,8 @@ class InvalidTokenIds(ctypes.Structure):
         assert (
             self.size <= INVALID_TOKEN_IDS_MAX_LENGTH
         ), f"Too many invalid token IDs {self.size} > {INVALID_TOKEN_IDS_MAX_LENGTH}."
+        if not all(isinstance(token_id, int) and 0 <= token_id <= _MAX_INT32 for token_id in ids):
+            raise ValueError("invalid token IDs must be non-negative 32-bit integers")
         self.ids[: self.size] = ids[:]
         return
 

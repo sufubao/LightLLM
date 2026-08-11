@@ -476,9 +476,9 @@ class InferSamplingParams:
                 self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
 
         if len(self.invalid_token_ids) > 0:
-            if not all(e < vocab_size for e in self.invalid_token_ids):
-                logger.error("invalid_token_ids contain tokenid >= vobsize, we remove these token ids")
-                self.invalid_token_ids = [e for e in self.invalid_token_ids if e < vocab_size]
+            if not all(0 <= e < vocab_size for e in self.invalid_token_ids):
+                logger.error("invalid_token_ids contain token IDs outside the vocabulary; removing them")
+                self.invalid_token_ids = [e for e in self.invalid_token_ids if 0 <= e < vocab_size]
 
         # pd decode node information
         if self.shm_param.pd_kv_trans_params.data_len > 0:

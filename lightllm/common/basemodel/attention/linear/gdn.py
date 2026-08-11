@@ -9,8 +9,10 @@ from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import c
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import fused_recurrent_gated_delta_rule
-from .create_utils import get_gdn_prefill_backend
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
+    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
+    fused_recurrent_gated_delta_rule,
+)
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -23,6 +25,29 @@ class LinearAttBackend(BaseAttBackend):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
+        self._chunk_gated_delta_rule = self._get_chunk_gated_delta_rule()
+
+    @staticmethod
+    def _get_ssm_state_dtype():
+        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+        return ssm_dtype_dict.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
+
+    @classmethod
+    def get_gdn_prefill_validation_args(cls, model: "TpPartBaseModel"):
+        network_config = model.config
+        tp_world_size = model.tp_world_size_
+        return (
+            network_config["linear_num_key_heads"] // tp_world_size,
+            network_config["linear_num_value_heads"] // tp_world_size,
+            network_config["linear_key_head_dim"],
+            network_config["linear_value_head_dim"],
+            model.data_type,
+            cls._get_ssm_state_dtype(),
+        )
+
+    @staticmethod
+    def _get_chunk_gated_delta_rule():
+        raise NotImplementedError
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
@@ -50,18 +75,7 @@ class LinearAttBackend(BaseAttBackend):
         self.num_v_heads_per_k_head = self.num_v_heads // self.num_k_heads
 
         # SSM state dtype optimization
-        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        start_args = get_env_start_args()
-        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.linear_att_ssm_data_type, torch.bfloat16)
-
-        self._chunk_gated_delta_rule = get_gdn_prefill_backend(
-            self.tp_num_k_heads,
-            self.tp_num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            self.model.data_type,
-            self.ssm_state_dtype,
-        )
+        self.ssm_state_dtype = self._get_ssm_state_dtype()
         return
 
     def _split_qkvzba(self, mixed_qkvzba):
@@ -103,6 +117,20 @@ class LinearAttBackend(BaseAttBackend):
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "LinearAttDecodeAttState":
         return LinearAttDecodeAttState(backend=self, infer_state=infer_state)
+
+
+class FlashQlaLinearAttBackend(LinearAttBackend):
+    @staticmethod
+    def _get_chunk_gated_delta_rule():
+        from flash_qla import chunk_gated_delta_rule
+
+        return chunk_gated_delta_rule
+
+
+class FlaLinearAttBackend(LinearAttBackend):
+    @staticmethod
+    def _get_chunk_gated_delta_rule():
+        return fla_chunk_gated_delta_rule
 
 
 @dataclasses.dataclass

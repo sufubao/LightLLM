@@ -112,8 +112,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             self.prefill_att_backend1 = None
             self.decode_att_backend1 = None
             return
-        from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
+        from lightllm.common.basemodel.attention.linear.create_utils import get_linear_att_backend_class
 
-        self.prefill_att_backend1 = LinearAttBackend(model=self)
-        self.decode_att_backend1 = LinearAttBackend(model=self)
+        linear_att_backend_class = get_linear_att_backend_class(self)
+        self.prefill_att_backend1 = linear_att_backend_class(model=self)
+        self.decode_att_backend1 = linear_att_backend_class(model=self)
         return

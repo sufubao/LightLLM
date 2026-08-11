@@ -6,11 +6,11 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.common.basemodel.triton_kernel.linear_att.gdn_prefill_backend import get_gdn_prefill_backend
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import fused_recurrent_gated_delta_rule
+from .create_utils import get_gdn_prefill_backend
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -54,7 +54,7 @@ class LinearAttBackend(BaseAttBackend):
         start_args = get_env_start_args()
         self.ssm_state_dtype = ssm_dtype_dict.get(start_args.linear_att_ssm_data_type, torch.bfloat16)
 
-        self._gdn_prefill_backend = get_gdn_prefill_backend(
+        self._chunk_gated_delta_rule = get_gdn_prefill_backend(
             self.tp_num_k_heads,
             self.tp_num_v_heads,
             self.head_k_dim,
@@ -179,7 +179,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
         initial_state = ssm_states[self.b_ssm_buffer_idx]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
-        core_attn_out, last_recurrent_state = backend._gdn_prefill_backend(
+        core_attn_out, last_recurrent_state = backend._chunk_gated_delta_rule(
             q=query,
             k=key,
             v=value,

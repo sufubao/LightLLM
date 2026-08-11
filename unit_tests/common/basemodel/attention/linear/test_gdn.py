@@ -5,7 +5,7 @@ import pytest
 import torch
 
 import lightllm.common.basemodel.attention.linear.gdn as gdn
-import lightllm.common.basemodel.triton_kernel.linear_att.gdn_prefill_backend as gdn_prefill_backend
+import lightllm.common.basemodel.attention.linear.create_utils as linear_create_utils
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
@@ -22,7 +22,7 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
         activation="silu",
         ssm_state_dtype=cache_dtype,
         _rearrange_mixed_qkv=lambda mixed: (q, q, q),
-        _gdn_prefill_backend=lambda *args, **kwargs: (None, final_state),
+        _chunk_gated_delta_rule=lambda *args, **kwargs: (None, final_state),
     )
     state = gdn.LinearAttPrefillAttState(
         backend=backend,
@@ -55,38 +55,40 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
 
 @pytest.fixture(autouse=True)
 def clear_gdn_prefill_backend_cache():
-    gdn_prefill_backend.get_gdn_prefill_backend.cache_clear()
+    linear_create_utils.get_gdn_prefill_backend.cache_clear()
     yield
-    gdn_prefill_backend.get_gdn_prefill_backend.cache_clear()
+    linear_create_utils.get_gdn_prefill_backend.cache_clear()
 
 
 def test_gdn_prefill_backend_uses_validated_flashqla(monkeypatch):
     backend_args = (1, 2, 128, 128, torch.bfloat16, torch.float32)
     validate_calls = []
+    monkeypatch.setenv("FLA_FLASH_QLA", "1")
     flashqla = ModuleType("flash_qla")
     flashqla.chunk_gated_delta_rule = lambda **kwargs: ("flashqla", kwargs)
     monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
     monkeypatch.setattr(
-        gdn_prefill_backend,
+        linear_create_utils,
         "validate",
         lambda name, *args: validate_calls.append((name, args)) or True,
     )
 
-    backend = gdn_prefill_backend.get_gdn_prefill_backend(*backend_args)
+    backend = linear_create_utils.get_gdn_prefill_backend(*backend_args)
 
     assert backend(q="q", k="k", v="v")[0] == "flashqla"
     assert validate_calls == [("flashqla", backend_args)]
 
 
 def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypatch):
-    monkeypatch.setattr(gdn_prefill_backend, "validate", lambda *args: False)
+    monkeypatch.setenv("FLA_FLASH_QLA", "1")
+    monkeypatch.setattr(linear_create_utils, "validate", lambda *args: False)
     monkeypatch.setattr(
-        gdn_prefill_backend,
+        linear_create_utils,
         "_fla_chunk_gated_delta_rule",
         lambda **kwargs: ("fla", kwargs),
     )
 
-    backend = gdn_prefill_backend.get_gdn_prefill_backend(1, 2, 128, 128, torch.bfloat16, torch.float32)
+    backend = linear_create_utils.get_gdn_prefill_backend(1, 2, 128, 128, torch.bfloat16, torch.float32)
 
     assert backend(q="q", k="k", v="v")[0] == "fla"
 
@@ -94,16 +96,39 @@ def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypat
 def test_flashqla_backend_respects_disable_env(monkeypatch):
     monkeypatch.setenv("FLA_FLASH_QLA", "0")
     monkeypatch.setattr(
-        gdn_prefill_backend,
+        linear_create_utils,
         "validate",
         lambda *args: pytest.fail("disabled FlashQLA must not be validated"),
     )
     monkeypatch.setattr(
-        gdn_prefill_backend,
+        linear_create_utils,
         "_fla_chunk_gated_delta_rule",
         lambda **kwargs: ("fla", kwargs),
     )
 
-    backend = gdn_prefill_backend.get_gdn_prefill_backend(1, 2, 128, 128, torch.bfloat16, torch.float32)
+    backend = linear_create_utils.get_gdn_prefill_backend(1, 2, 128, 128, torch.bfloat16, torch.float32)
 
     assert backend(q="q", k="k", v="v")[0] == "fla"
+
+
+def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch):
+    validate_calls = []
+    monkeypatch.setenv("FLA_FLASH_QLA", "1")
+    monkeypatch.setattr(
+        linear_create_utils,
+        "_GDN_PREFILL_BACKENDS",
+        (
+            ("flashqla2", lambda: pytest.fail("an invalid backend must not be loaded")),
+            ("flashqla3", lambda: lambda **kwargs: ("flashqla3", kwargs)),
+        ),
+    )
+    monkeypatch.setattr(
+        linear_create_utils,
+        "validate",
+        lambda name, *args: validate_calls.append(name) or name == "flashqla3",
+    )
+
+    backend = linear_create_utils.get_gdn_prefill_backend(1, 2, 128, 128, torch.bfloat16, torch.float32)
+
+    assert backend(q="q")[0] == "flashqla3"
+    assert validate_calls == ["flashqla2", "flashqla3"]

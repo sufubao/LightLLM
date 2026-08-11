@@ -54,7 +54,14 @@ class LinearAttBackend(BaseAttBackend):
         start_args = get_env_start_args()
         self.ssm_state_dtype = ssm_dtype_dict.get(start_args.linear_att_ssm_data_type, torch.bfloat16)
 
-        self._gdn_prefill_backend = get_gdn_prefill_backend(self.head_k_dim, self.head_v_dim)
+        self._gdn_prefill_backend = get_gdn_prefill_backend(
+            self.tp_num_k_heads,
+            self.tp_num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.model.data_type,
+            self.ssm_state_dtype,
+        )
         return
 
     def _split_qkvzba(self, mixed_qkvzba):

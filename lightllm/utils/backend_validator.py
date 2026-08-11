@@ -92,6 +92,48 @@ def _validate_flashinfer():
     return True, None
 
 
+def _validate_flashqla(num_k_heads, num_v_heads, head_k_dim, head_v_dim, qkv_dtype, state_dtype):
+    """Validate FlashQLA against LightLLM's vendored FLA kernel."""
+    from flash_qla import chunk_gated_delta_rule as flashqla_chunk_gated_delta_rule
+
+    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
+        chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
+    )
+
+    batch, seq = 1, 64
+    torch.manual_seed(0)
+    q = torch.randn(batch, seq, num_k_heads, head_k_dim, dtype=qkv_dtype, device="cuda")
+    k = torch.randn_like(q)
+    v = torch.randn(batch, seq, num_v_heads, head_v_dim, dtype=qkv_dtype, device="cuda")
+    g = -torch.rand(batch, seq, num_v_heads, dtype=torch.float32, device="cuda")
+    beta = torch.rand(batch, seq, num_v_heads, dtype=torch.float32, device="cuda")
+    initial_state = torch.randn(batch, num_v_heads, head_k_dim, head_v_dim, dtype=state_dtype, device="cuda")
+    cu_seqlens = torch.tensor([0, seq], dtype=torch.int32, device="cuda")
+    kwargs = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "g": g,
+        "beta": beta,
+        "initial_state": initial_state,
+        "output_final_state": True,
+        "cu_seqlens": cu_seqlens,
+        "use_qk_l2norm_in_kernel": True,
+    }
+
+    expected_out, expected_state = fla_chunk_gated_delta_rule(**kwargs)
+    out, final_state = flashqla_chunk_gated_delta_rule(**kwargs)
+    torch.cuda.synchronize()
+
+    for name, actual, expected in (
+        ("output", out, expected_out),
+        ("final state", final_state, expected_state),
+    ):
+        if not torch.allclose(actual, expected, rtol=1e-2, atol=1e-2):
+            return False, f"{name} mismatch: max diff {(actual - expected).abs().max().item():.6f}"
+    return True, None
+
+
 def _validate_triton():
     """Validate Triton with softmax ground truth."""
     import triton
@@ -230,7 +272,7 @@ def _validate_flashmla_sparse():
     return True, None
 
 
-def _run_in_subprocess(backend_name, pipe):
+def _run_in_subprocess(backend_name, backend_args, pipe):
     """Run validation in subprocess with suppressed output."""
     import sys
 
@@ -248,6 +290,8 @@ def _run_in_subprocess(backend_name, pipe):
             success, err = _validate_sdpa()
         elif backend_name == "flashinfer":
             success, err = _validate_flashinfer()
+        elif backend_name == "flashqla":
+            success, err = _validate_flashqla(*backend_args)
         elif backend_name == "triton":
             success, err = _validate_triton()
         elif backend_name == "flashmla_sparse":
@@ -262,9 +306,9 @@ def _run_in_subprocess(backend_name, pipe):
 
 
 @lru_cache(maxsize=None)
-def validate(backend_name: str) -> bool:
+def validate(backend_name: str, *backend_args) -> bool:
     if get_global_rank() == 0:
-        validate_ok = _validate(backend_name)
+        validate_ok = _validate(backend_name, *backend_args)
         torch.distributed.broadcast_object_list([validate_ok], src=0)
     else:
         validate_ok = [None]
@@ -273,13 +317,13 @@ def validate(backend_name: str) -> bool:
     return validate_ok
 
 
-def _validate(backend_name: str) -> bool:
+def _validate(backend_name: str, *backend_args) -> bool:
     """Validate backend in subprocess with ground truth check."""
     try:
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe(duplex=False)
         logger.info(f"Validating {backend_name} backend start, please wait ...")
-        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, child))
+        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, backend_args, child))
         proc.start()
         proc.join(timeout=_VALIDATION_TIMEOUT)
 

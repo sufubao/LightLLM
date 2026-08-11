@@ -1,4 +1,5 @@
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -52,46 +53,57 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     assert torch.equal(ssm_states, final_state.to(cache_dtype))
 
 
-def test_flashqla_backend_falls_back_for_unsupported_call(monkeypatch):
+@pytest.fixture(autouse=True)
+def clear_gdn_prefill_backend_cache():
+    gdn_prefill_backend.get_gdn_prefill_backend.cache_clear()
+    yield
+    gdn_prefill_backend.get_gdn_prefill_backend.cache_clear()
+
+
+def test_gdn_prefill_backend_uses_validated_flashqla(monkeypatch):
+    backend_args = (1, 2, 128, 128, torch.bfloat16, torch.float32)
+    validate_calls = []
+    flashqla = ModuleType("flash_qla")
+    flashqla.chunk_gated_delta_rule = lambda **kwargs: ("flashqla", kwargs)
+    monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
+    monkeypatch.setattr(
+        gdn_prefill_backend,
+        "validate",
+        lambda name, *args: validate_calls.append((name, args)) or True,
+    )
+
+    backend = gdn_prefill_backend.get_gdn_prefill_backend(*backend_args)
+
+    assert backend(q="q", k="k", v="v")[0] == "flashqla"
+    assert validate_calls == [("flashqla", backend_args)]
+
+
+def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypatch):
+    monkeypatch.setattr(gdn_prefill_backend, "validate", lambda *args: False)
     monkeypatch.setattr(
         gdn_prefill_backend,
         "_fla_chunk_gated_delta_rule",
         lambda **kwargs: ("fla", kwargs),
     )
-    backend = gdn_prefill_backend.FlashQlaGdnPrefillBackend(lambda **kwargs: ("flashqla", kwargs))
-    q = torch.zeros((1, 1, 1, 128), dtype=torch.float32)
 
-    result, _ = backend(q=q, k=q, v=q)
+    backend = gdn_prefill_backend.get_gdn_prefill_backend(1, 2, 128, 128, torch.bfloat16, torch.float32)
 
-    assert result == "fla"
-    assert not backend.initialized
-
-
-def test_flashqla_backend_disables_after_initialization_failure(monkeypatch):
-    calls = {"flashqla": 0, "fla": 0}
-
-    def flashqla(**kwargs):
-        calls["flashqla"] += 1
-        raise RuntimeError("compile failed")
-
-    def fla(**kwargs):
-        calls["fla"] += 1
-        return "fla", None
-
-    monkeypatch.setattr(gdn_prefill_backend, "_fla_chunk_gated_delta_rule", fla)
-    backend = gdn_prefill_backend.FlashQlaGdnPrefillBackend(flashqla)
-    monkeypatch.setattr(backend, "supports", lambda *args: True)
-    q = torch.zeros((1, 1, 1, 128), dtype=torch.bfloat16)
-
-    assert backend(q=q, k=q, v=q)[0] == "fla"
-    assert backend(q=q, k=q, v=q)[0] == "fla"
-    assert calls == {"flashqla": 1, "fla": 2}
+    assert backend(q="q", k="k", v="v")[0] == "fla"
 
 
 def test_flashqla_backend_respects_disable_env(monkeypatch):
     monkeypatch.setenv("FLA_FLASH_QLA", "0")
+    monkeypatch.setattr(
+        gdn_prefill_backend,
+        "validate",
+        lambda *args: pytest.fail("disabled FlashQLA must not be validated"),
+    )
+    monkeypatch.setattr(
+        gdn_prefill_backend,
+        "_fla_chunk_gated_delta_rule",
+        lambda **kwargs: ("fla", kwargs),
+    )
 
-    available, reason = gdn_prefill_backend.FlashQlaGdnPrefillBackend.is_available(128, 128)
+    backend = gdn_prefill_backend.get_gdn_prefill_backend(1, 2, 128, 128, torch.bfloat16, torch.float32)
 
-    assert not available
-    assert reason == "disabled by FLA_FLASH_QLA=0"
+    assert backend(q="q", k="k", v="v")[0] == "fla"

@@ -29,6 +29,8 @@ from .pd_selector import create_selector
 
 logger = init_logger(__name__)
 
+_PREFILL_TOKEN_WAIT_TIMEOUT = 5
+
 
 class HttpServerManagerForPDMaster:
     def __init__(
@@ -430,9 +432,13 @@ class HttpServerManagerForPDMaster:
         first_token_emitted = False
         needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
         buffered_decode_tokens = []
+        prefill_token_deadline = None
         prompt_cache_len_from_prefill = None
         while True:
-            new_tokens = await req_status.out_tokens.wait_to_get_all_data(timeout=5)
+            wait_timeout = 5
+            if prefill_token_deadline is not None:
+                wait_timeout = min(wait_timeout, max(0, prefill_token_deadline - time.monotonic()))
+            new_tokens = await req_status.out_tokens.wait_to_get_all_data(timeout=wait_timeout)
             assert group_request_id in self.req_id_to_out_inf, f"error state req_id {group_request_id}"
             if await request.is_disconnected():
                 raise ClientDisconnected(
@@ -440,26 +446,27 @@ class HttpServerManagerForPDMaster:
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
 
-            # 本轮无新 token 且 D 已完成时，释放缓冲避免因 P 首 token 缺失而挂起。
-            if not new_tokens:
-                if not buffered_decode_tokens or not buffered_decode_tokens[-1][3].is_finished():
-                    continue
-                logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
-                for sub_req_id, request_output, metadata, finish_status in buffered_decode_tokens:
-                    metadata.pop("node_mode", None)
-                    yield sub_req_id, request_output, metadata, finish_status
-                return
+            if not new_tokens and not buffered_decode_tokens:
+                continue
 
             # P 首 token 携带缓存统计，需先于已缓冲的 D 输出返回。
             if needs_prefill_first_token:
                 prefill_token = next((token for token in new_tokens if token[2].get("node_mode") == "prefill"), None)
                 if prefill_token is None:
                     buffered_decode_tokens.extend(new_tokens)
-                    continue
-                new_tokens.remove(prefill_token)
-                new_tokens = [prefill_token, *buffered_decode_tokens, *new_tokens]
-                buffered_decode_tokens.clear()
+                    if prefill_token_deadline is None:
+                        prefill_token_deadline = time.monotonic() + _PREFILL_TOKEN_WAIT_TIMEOUT
+                    if time.monotonic() < prefill_token_deadline:
+                        continue
+                    logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
+                    new_tokens = buffered_decode_tokens
+                    buffered_decode_tokens = []
+                else:
+                    new_tokens.remove(prefill_token)
+                    new_tokens = [prefill_token, *buffered_decode_tokens, *new_tokens]
+                    buffered_decode_tokens.clear()
                 needs_prefill_first_token = False
+                prefill_token_deadline = None
 
             for sub_req_id, request_output, metadata, finish_status in new_tokens:
                 output_index = metadata.get("count_output_tokens")

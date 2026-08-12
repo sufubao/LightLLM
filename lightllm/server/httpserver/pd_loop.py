@@ -239,8 +239,15 @@ async def _pd_process_generate(
 
 # 转发token的task
 async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
+    batch_wait = float(os.environ.get("LIGHTLLM_PD_WS_BATCH_WAIT", "0.0"))
     while True:
         handle_list = await forwarding_queue.wait_to_get_all_data()
+
+        if batch_wait > 0 and handle_list:
+            await asyncio.sleep(batch_wait)
+            more = await forwarding_queue.get_all_data()
+            if more:
+                handle_list += more
 
         if handle_list:
             load_info: dict = _get_load_info()

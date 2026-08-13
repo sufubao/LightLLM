@@ -472,7 +472,8 @@ class HttpServerManagerForPDMaster:
                 output_index = metadata.get("count_output_tokens")
                 node_run_mode = metadata.pop("node_mode", None)
                 if output_index == 1:
-                    if first_token_emitted:
+                    # D 首 token 可能是 KV 传输失败产生的唯一结束标记，不能按重复 token 丢弃。
+                    if first_token_emitted and not (node_run_mode == "decode" and finish_status.is_finished()):
                         continue
                     first_token_emitted = True
                     if node_run_mode == "prefill":

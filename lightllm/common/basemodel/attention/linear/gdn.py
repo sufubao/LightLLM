@@ -1,5 +1,6 @@
 import dataclasses
 import torch
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.envs_utils import get_env_start_args
@@ -10,7 +11,6 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent impo
     mtp_fused_recurrent_gated_delta_rule,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
-    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
 
@@ -21,20 +21,15 @@ if TYPE_CHECKING:
     from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerWeight
 
 
-class LinearAttBackend(BaseAttBackend):
+class LinearAttBackend(BaseAttBackend, ABC):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
-        self._chunk_gated_delta_rule = self._get_chunk_gated_delta_rule()
+        self.prefill_kernel = self.get_prefill_kernel()
 
-    @staticmethod
-    def _get_ssm_state_dtype():
-        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        return ssm_dtype_dict.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
-
-    @staticmethod
-    def _get_chunk_gated_delta_rule():
-        raise NotImplementedError
+    @abstractmethod
+    def get_prefill_kernel(self):
+        pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
@@ -62,7 +57,8 @@ class LinearAttBackend(BaseAttBackend):
         self.num_v_heads_per_k_head = self.num_v_heads // self.num_k_heads
 
         # SSM state dtype optimization
-        self.ssm_state_dtype = self._get_ssm_state_dtype()
+        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+        self.ssm_state_dtype = ssm_dtype_dict.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
         return
 
     def _split_qkvzba(self, mixed_qkvzba):
@@ -104,20 +100,6 @@ class LinearAttBackend(BaseAttBackend):
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "LinearAttDecodeAttState":
         return LinearAttDecodeAttState(backend=self, infer_state=infer_state)
-
-
-class FlashQlaLinearAttBackend(LinearAttBackend):
-    @staticmethod
-    def _get_chunk_gated_delta_rule():
-        from flash_qla import chunk_gated_delta_rule
-
-        return chunk_gated_delta_rule
-
-
-class FlaLinearAttBackend(LinearAttBackend):
-    @staticmethod
-    def _get_chunk_gated_delta_rule():
-        return fla_chunk_gated_delta_rule
 
 
 @dataclasses.dataclass
@@ -194,7 +176,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
         initial_state = ssm_states[self.b_ssm_buffer_idx]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
-        core_attn_out, last_recurrent_state = backend._chunk_gated_delta_rule(
+        core_attn_out, last_recurrent_state = backend.prefill_kernel(
             q=query,
             k=key,
             v=value,

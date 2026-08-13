@@ -32,19 +32,6 @@ class LinearAttBackend(BaseAttBackend):
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
         return ssm_dtype_dict.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
 
-    @classmethod
-    def get_gdn_prefill_validation_args(cls, model: "TpPartBaseModel"):
-        network_config = model.config
-        tp_world_size = model.tp_world_size_
-        return (
-            network_config["linear_num_key_heads"] // tp_world_size,
-            network_config["linear_num_value_heads"] // tp_world_size,
-            network_config["linear_key_head_dim"],
-            network_config["linear_value_head_dim"],
-            model.data_type,
-            cls._get_ssm_state_dtype(),
-        )
-
     @staticmethod
     def _get_chunk_gated_delta_rule():
         raise NotImplementedError

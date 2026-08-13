@@ -6,6 +6,9 @@ import torch
 
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.linear.create_utils as linear_create_utils
+import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
+from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+import lightllm.utils.backend_validator as backend_validator
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
@@ -73,7 +76,6 @@ def linear_model(monkeypatch):
 
 
 def test_gdn_prefill_backend_uses_validated_flashqla(monkeypatch, linear_model):
-    backend_args = (1, 2, 128, 128, torch.bfloat16, torch.float32)
     validate_calls = []
     monkeypatch.setenv("FLA_FLASH_QLA", "1")
     flashqla = ModuleType("flash_qla")
@@ -82,14 +84,75 @@ def test_gdn_prefill_backend_uses_validated_flashqla(monkeypatch, linear_model):
     monkeypatch.setattr(
         linear_create_utils,
         "validate",
-        lambda name, *args: validate_calls.append((name, args)) or True,
+        lambda name: validate_calls.append(name) or True,
     )
 
     backend_class = linear_create_utils.get_linear_att_backend_class(linear_model)
 
     assert backend_class is gdn.FlashQlaLinearAttBackend
     assert backend_class._get_chunk_gated_delta_rule()(q="q")[0] == "flashqla"
-    assert validate_calls == [("flashqla", backend_args)]
+    assert validate_calls == ["flashqla"]
+
+
+def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
+    linear_config = SimpleNamespace(
+        num_linear_k_heads=2,
+        num_linear_v_heads=4,
+        head_linear_k_dim=8,
+        head_linear_v_dim=16,
+        conv_state_dtype=torch.bfloat16,
+        ssm_state_dtype=torch.float32,
+    )
+    load_calls = []
+    monkeypatch.setattr(
+        LinearAttCacheConfig,
+        "load_from_args",
+        staticmethod(lambda: load_calls.append(True) or linear_config),
+    )
+
+    kernel_calls = []
+
+    def kernel(**kwargs):
+        kernel_calls.append(kwargs)
+        return kwargs["q"], kwargs["initial_state"]
+
+    flashqla = ModuleType("flash_qla")
+    flashqla.chunk_gated_delta_rule = kernel
+    monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
+    monkeypatch.setattr(fla_ops, "chunk_gated_delta_rule", kernel)
+
+    original_randn = torch.randn
+    original_rand = torch.rand
+    original_tensor = torch.tensor
+
+    def cpu_randn(*args, **kwargs):
+        kwargs.pop("device", None)
+        return original_randn(*args, **kwargs)
+
+    def cpu_rand(*args, **kwargs):
+        kwargs.pop("device", None)
+        return original_rand(*args, **kwargs)
+
+    def cpu_tensor(*args, **kwargs):
+        kwargs.pop("device", None)
+        return original_tensor(*args, **kwargs)
+
+    monkeypatch.setattr(backend_validator.torch, "randn", cpu_randn)
+    monkeypatch.setattr(backend_validator.torch, "rand", cpu_rand)
+    monkeypatch.setattr(backend_validator.torch, "tensor", cpu_tensor)
+    monkeypatch.setattr(backend_validator.torch.cuda, "synchronize", lambda: None)
+
+    success, error = backend_validator._validate_flashqla()
+
+    assert success is True
+    assert error is None
+    assert load_calls == [True]
+    assert len(kernel_calls) == 2
+    assert kernel_calls[0]["q"].shape == (1, 64, 2, 8)
+    assert kernel_calls[0]["v"].shape == (1, 64, 4, 16)
+    assert kernel_calls[0]["q"].dtype == torch.bfloat16
+    assert kernel_calls[0]["initial_state"].shape == (1, 4, 8, 16)
+    assert kernel_calls[0]["initial_state"].dtype == torch.float32
 
 
 def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypatch, linear_model):

@@ -92,13 +92,22 @@ def _validate_flashinfer():
     return True, None
 
 
-def _validate_flashqla(num_k_heads, num_v_heads, head_k_dim, head_v_dim, qkv_dtype, state_dtype):
+def _validate_flashqla():
     """Validate FlashQLA against LightLLM's vendored FLA kernel."""
     from flash_qla import chunk_gated_delta_rule as flashqla_chunk_gated_delta_rule
 
     from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
         chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
     )
+    from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+
+    linear_config = LinearAttCacheConfig.load_from_args()
+    num_k_heads = linear_config.num_linear_k_heads
+    num_v_heads = linear_config.num_linear_v_heads
+    head_k_dim = linear_config.head_linear_k_dim
+    head_v_dim = linear_config.head_linear_v_dim
+    qkv_dtype = linear_config.conv_state_dtype
+    state_dtype = linear_config.ssm_state_dtype
 
     batch, seq = 1, 64
     torch.manual_seed(0)
@@ -272,7 +281,7 @@ def _validate_flashmla_sparse():
     return True, None
 
 
-def _run_in_subprocess(backend_name, backend_args, pipe):
+def _run_in_subprocess(backend_name, pipe):
     """Run validation in subprocess with suppressed output."""
     import sys
 
@@ -291,7 +300,7 @@ def _run_in_subprocess(backend_name, backend_args, pipe):
         elif backend_name == "flashinfer":
             success, err = _validate_flashinfer()
         elif backend_name == "flashqla":
-            success, err = _validate_flashqla(*backend_args)
+            success, err = _validate_flashqla()
         elif backend_name == "triton":
             success, err = _validate_triton()
         elif backend_name == "flashmla_sparse":
@@ -306,9 +315,9 @@ def _run_in_subprocess(backend_name, backend_args, pipe):
 
 
 @lru_cache(maxsize=None)
-def validate(backend_name: str, *backend_args) -> bool:
+def validate(backend_name: str) -> bool:
     if get_global_rank() == 0:
-        validate_ok = _validate(backend_name, *backend_args)
+        validate_ok = _validate(backend_name)
         torch.distributed.broadcast_object_list([validate_ok], src=0)
     else:
         validate_ok = [None]
@@ -317,13 +326,13 @@ def validate(backend_name: str, *backend_args) -> bool:
     return validate_ok
 
 
-def _validate(backend_name: str, *backend_args) -> bool:
+def _validate(backend_name: str) -> bool:
     """Validate backend in subprocess with ground truth check."""
     try:
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe(duplex=False)
         logger.info(f"Validating {backend_name} backend start, please wait ...")
-        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, backend_args, child))
+        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, child))
         proc.start()
         proc.join(timeout=_VALIDATION_TIMEOUT)
 

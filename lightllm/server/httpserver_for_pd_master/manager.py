@@ -29,6 +29,8 @@ from .pd_selector import create_selector
 
 logger = init_logger(__name__)
 
+_PREFILL_TOKEN_WAIT_TIMEOUT = 5
+
 
 class HttpServerManagerForPDMaster:
     def __init__(
@@ -427,31 +429,60 @@ class HttpServerManagerForPDMaster:
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
-        first_token_gen = False
+        first_token_emitted = False
+        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        buffered_decode_tokens = []
+        prefill_token_deadline = None
+        prompt_cache_len_from_prefill = None
         while True:
-            await req_status.wait_to_ready()
+            wait_timeout = 5
+            if prefill_token_deadline is not None:
+                wait_timeout = min(wait_timeout, max(0, prefill_token_deadline - time.monotonic()))
+            new_tokens = await req_status.out_tokens.wait_to_get_all_data(timeout=wait_timeout)
+            assert group_request_id in self.req_id_to_out_inf, f"error state req_id {group_request_id}"
             if await request.is_disconnected():
                 raise ClientDisconnected(
                     group_request_id=group_request_id,
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
-            if await req_status.can_read(self.req_id_to_out_inf):
-                token_list = await req_status.pop_all_tokens()
-                for sub_req_id, request_output, metadata, finish_status in token_list:
-                    output_index = metadata.get("count_output_tokens")
-                    # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
-                    if output_index == 1:
-                        if first_token_gen is False:
-                            first_token_gen = True
-                            node_run_mode = metadata.pop("node_mode", None)
-                            if node_run_mode == "prefill":
-                                if old_max_new_tokens != 1 and finish_status.is_finished_length():
-                                    finish_status = FinishStatus(FinishStatus.NO_FINISH)
-                            yield sub_req_id, request_output, metadata, finish_status
-                        else:
-                            continue
-                    else:
-                        yield sub_req_id, request_output, metadata, finish_status
+
+            if not new_tokens and not buffered_decode_tokens:
+                continue
+
+            # P 首 token 携带缓存统计，需先于已缓冲的 D 输出返回。
+            if needs_prefill_first_token:
+                prefill_token = next((token for token in new_tokens if token[2].get("node_mode") == "prefill"), None)
+                if prefill_token is None:
+                    buffered_decode_tokens.extend(new_tokens)
+                    if prefill_token_deadline is None:
+                        prefill_token_deadline = time.monotonic() + _PREFILL_TOKEN_WAIT_TIMEOUT
+                    if time.monotonic() < prefill_token_deadline:
+                        continue
+                    logger.warning(f"{group_request_id}: prefill token missing; releasing decode output")
+                    new_tokens = buffered_decode_tokens
+                    buffered_decode_tokens = []
+                else:
+                    new_tokens.remove(prefill_token)
+                    new_tokens = [prefill_token, *buffered_decode_tokens, *new_tokens]
+                    buffered_decode_tokens.clear()
+                needs_prefill_first_token = False
+                prefill_token_deadline = None
+
+            for sub_req_id, request_output, metadata, finish_status in new_tokens:
+                output_index = metadata.get("count_output_tokens")
+                node_run_mode = metadata.pop("node_mode", None)
+                if output_index == 1:
+                    # D 首 token 可能是 KV 传输失败产生的唯一结束标记，不能按重复 token 丢弃。
+                    if first_token_emitted and not (node_run_mode == "decode" and finish_status.is_finished()):
+                        continue
+                    first_token_emitted = True
+                    if node_run_mode == "prefill":
+                        prompt_cache_len_from_prefill = metadata.get("prompt_cache_len", 0)
+                        if old_max_new_tokens != 1 and finish_status.is_finished_length():
+                            finish_status = FinishStatus(FinishStatus.NO_FINISH)
+                if prompt_cache_len_from_prefill is not None:
+                    metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
+                yield sub_req_id, request_output, metadata, finish_status
 
         return
 
@@ -595,18 +626,15 @@ class HttpServerManagerForPDMaster:
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             try:
                                 req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
-                                async with req_status.lock:
-                                    req_status.out_token_info_list.append((sub_req_id, text, metadata, finish_status))
-                                    req_status.event.set()
+                                await req_status.out_tokens.put((sub_req_id, text, metadata, finish_status))
                             except:
                                 pass
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
                             req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
-                            async with req_status.lock:
-                                req_status.prefill_prompt_ids_event.prompt_ids = prompt_ids
-                                req_status.prefill_prompt_ids_event.set()
+                            req_status.prefill_prompt_ids_event.prompt_ids = prompt_ids
+                            req_status.prefill_prompt_ids_event.set()
                         except:
                             logger.error(
                                 f"PD_UPLOAD_PREFILL_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
@@ -629,34 +657,11 @@ class HttpServerManagerForPDMaster:
 class ReqStatus:
     def __init__(self, req_id, p_node, d_node) -> None:
         self.req_id = req_id
-        self.lock = asyncio.Lock()
-        self.event = asyncio.Event()
+        self.out_tokens = AsyncQueue()
         self.up_status_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
-        self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
-
-    async def wait_to_ready(self):
-        try:
-            await asyncio.wait_for(self.event.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            pass
-
-    async def can_read(self, req_id_to_out_inf):
-        async with self.lock:
-            self.event.clear()
-            assert self.req_id in req_id_to_out_inf, f"error state req_id {self.req_id}"
-            if len(self.out_token_info_list) == 0:
-                return False
-            else:
-                return True
-
-    async def pop_all_tokens(self):
-        async with self.lock:
-            ans = self.out_token_info_list.copy()
-            self.out_token_info_list.clear()
-        return ans
 
 
 class PDManager:

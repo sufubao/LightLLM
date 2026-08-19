@@ -88,6 +88,23 @@ def get_anthropic_messages_adapter() -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _preserve_replayed_thinking(openai_dict: Dict[str, Any]) -> None:
+    """Move LiteLLM's thinking blocks to a field understood by LightLLM."""
+    for message in openai_dict.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        thinking_blocks = message.pop("thinking_blocks", None)
+        if not isinstance(thinking_blocks, list):
+            continue
+        reasoning_text = "".join(
+            block.get("thinking", "")
+            for block in thinking_blocks
+            if isinstance(block, dict) and block.get("type") == "thinking" and isinstance(block.get("thinking"), str)
+        )
+        if reasoning_text and not message.get("reasoning_content"):
+            message["reasoning_content"] = reasoning_text
+
+
 def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """Translate an Anthropic Messages request body into a dict suitable
     for constructing a LightLLM ``ChatCompletionRequest``.
@@ -123,6 +140,8 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
         openai_dict = openai_request.model_dump(exclude_none=True)
     else:
         openai_dict = dict(openai_request)
+
+    _preserve_replayed_thinking(openai_dict)
 
     if "max_tokens" not in openai_dict and "max_completion_tokens" not in openai_dict:
         if "max_tokens" in anthropic_body:
@@ -686,6 +705,7 @@ _FINISH_REASON_TO_STOP_REASON = {
     "tool_calls": "tool_use",
     None: "end_turn",
 }
+_SYNTHETIC_THINKING_SIGNATURE = "lightllm"
 
 
 def _extract_reasoning_text(openai_dict: Dict[str, Any]) -> str:
@@ -706,7 +726,14 @@ def _prepend_thinking_block(result: Dict[str, Any], reasoning_text: str) -> None
     content = result.setdefault("content", [])
     if any(isinstance(block, dict) and block.get("type") == "thinking" for block in content):
         return
-    content.insert(0, {"type": "thinking", "thinking": reasoning_text})
+    content.insert(
+        0,
+        {
+            "type": "thinking",
+            "thinking": reasoning_text,
+            "signature": _SYNTHETIC_THINKING_SIGNATURE,
+        },
+    )
 
 
 def _chat_response_to_anthropic(
@@ -783,6 +810,10 @@ def _normalize_anthropic_response(result: Dict[str, Any], requested_model: str) 
             continue
         if block.get("type") == "text" and not block.get("text"):
             continue
+        if block.get("type") == "thinking":
+            signature = block.get("signature")
+            if not isinstance(signature, str) or not signature:
+                block["signature"] = _SYNTHETIC_THINKING_SIGNATURE
         block.pop("provider_specific_fields", None)
         cleaned_content.append(block)
     result["content"] = cleaned_content
@@ -805,7 +836,13 @@ def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: 
     reasoning_text = _extract_reasoning_text(openai_dict)
     content = []
     if reasoning_text:
-        content.append({"type": "thinking", "thinking": reasoning_text})
+        content.append(
+            {
+                "type": "thinking",
+                "thinking": reasoning_text,
+                "signature": _SYNTHETIC_THINKING_SIGNATURE,
+            }
+        )
     if text:
         content.append({"type": "text", "text": text})
     usage = openai_dict.get("usage") or {}
@@ -835,6 +872,33 @@ def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: 
 def _sse_event(event_type: str, data_obj: Dict[str, Any]) -> bytes:
     """Encode an Anthropic-style SSE event."""
     return f"event: {event_type}\ndata: {json.dumps(data_obj)}\n\n".encode("utf-8")
+
+
+def _content_block_close_events(current_open: tuple[str, int]) -> list[bytes]:
+    """Return the protocol events required to close an Anthropic block."""
+    block_type, block_index = current_open
+    events = []
+    if block_type == "thinking":
+        events.append(
+            _sse_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": _SYNTHETIC_THINKING_SIGNATURE,
+                    },
+                },
+            )
+        )
+    events.append(
+        _sse_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": block_index},
+        )
+    )
+    return events
 
 
 def _anthropic_error_type(error: Dict[str, Any]) -> str:
@@ -973,10 +1037,8 @@ async def _openai_sse_to_anthropic_events(
             if reasoning_piece:
                 if current_open is None or current_open[0] != "thinking":
                     if current_open is not None:
-                        yield _sse_event(
-                            "content_block_stop",
-                            {"type": "content_block_stop", "index": current_open[1]},
-                        )
+                        for event in _content_block_close_events(current_open):
+                            yield event
                     thinking_block_index = next_content_index
                     next_content_index += 1
                     current_open = ("thinking", thinking_block_index)
@@ -985,7 +1047,7 @@ async def _openai_sse_to_anthropic_events(
                         {
                             "type": "content_block_start",
                             "index": thinking_block_index,
-                            "content_block": {"type": "thinking", "thinking": ""},
+                            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                         },
                     )
                 yield _sse_event(
@@ -1002,10 +1064,8 @@ async def _openai_sse_to_anthropic_events(
             if content_piece:
                 if current_open is None or current_open[0] != "text":
                     if current_open is not None:
-                        yield _sse_event(
-                            "content_block_stop",
-                            {"type": "content_block_stop", "index": current_open[1]},
-                        )
+                        for event in _content_block_close_events(current_open):
+                            yield event
                     text_block_index = next_content_index
                     next_content_index += 1
                     current_open = ("text", text_block_index)
@@ -1055,10 +1115,8 @@ async def _openai_sse_to_anthropic_events(
                     # Close whatever block is currently open (text or a
                     # previous tool_use) before opening this one.
                     if current_open is not None:
-                        yield _sse_event(
-                            "content_block_stop",
-                            {"type": "content_block_stop", "index": current_open[1]},
-                        )
+                        for event in _content_block_close_events(current_open):
+                            yield event
                     state["anthropic_index"] = next_content_index
                     next_content_index += 1
                     current_open = ("tool_use", state["anthropic_index"])
@@ -1098,10 +1156,8 @@ async def _openai_sse_to_anthropic_events(
                     if new_args:
                         if current_open is None or current_open != ("tool_use", state["anthropic_index"]):
                             if current_open is not None:
-                                yield _sse_event(
-                                    "content_block_stop",
-                                    {"type": "content_block_stop", "index": current_open[1]},
-                                )
+                                for event in _content_block_close_events(current_open):
+                                    yield event
                             current_open = ("tool_use", state["anthropic_index"])
                             yield _sse_event(
                                 "content_block_start",
@@ -1133,10 +1189,8 @@ async def _openai_sse_to_anthropic_events(
 
     # Close any still-open content block.
     if current_open is not None:
-        yield _sse_event(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": current_open[1]},
-        )
+        for event in _content_block_close_events(current_open):
+            yield event
 
     # message_delta carries the final stop_reason and cumulative output_tokens.
     if message_started:

@@ -22,6 +22,7 @@ from lightllm.server.api_anthropic import (
     _fallback_openai_to_anthropic,
     _openai_sse_to_anthropic_events,
 )
+from lightllm.server.api_models import ChatCompletionRequest
 
 
 def _base_body():
@@ -138,6 +139,28 @@ def test_native_thinking_parameter_is_forwarded():
     assert "thinking" not in chat_dict
 
 
+def test_replayed_thinking_is_preserved_through_request_validation():
+    body = _tool_result_body("file contents")
+    body["messages"][1]["content"].insert(
+        0,
+        {
+            "type": "thinking",
+            "thinking": "I should read the requested file.",
+            "signature": "client-signature",
+        },
+    )
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+    assistant_dict = chat_dict["messages"][1]
+    assert "thinking_blocks" not in assistant_dict
+    assert assistant_dict["reasoning_content"] == "I should read the requested file."
+
+    request = ChatCompletionRequest(**chat_dict)
+    validated_assistant = request.messages[1].model_dump(exclude_none=True)
+    assert validated_assistant["reasoning_content"] == "I should read the requested file."
+    assert validated_assistant["tool_calls"]
+
+
 def test_extra_body_multiple_fields_forwarded():
     body = _base_body()
     body["extra_body"] = {
@@ -189,7 +212,11 @@ def test_fallback_response_exposes_reasoning_as_thinking_block():
     )
 
     assert response["content"] == [
-        {"type": "thinking", "thinking": "First inspect the input."},
+        {
+            "type": "thinking",
+            "thinking": "First inspect the input.",
+            "signature": api_anthropic._SYNTHETIC_THINKING_SIGNATURE,
+        },
         {"type": "text", "text": "The answer is 42."},
     ]
 
@@ -212,6 +239,7 @@ def test_litellm_response_translation_preserves_reasoning_field():
                     "finish_reason": "stop",
                 }
             ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
         }
     )
 
@@ -219,6 +247,7 @@ def test_litellm_response_translation_preserves_reasoning_field():
 
     assert result["content"][0]["type"] == "thinking"
     assert result["content"][0]["thinking"] == "First inspect the input."
+    assert result["content"][0]["signature"] == api_anthropic._SYNTHETIC_THINKING_SIGNATURE
     assert result["content"][1] == {"type": "text", "text": "The answer is 42."}
 
 
@@ -814,10 +843,7 @@ def test_streaming_reasoning_uses_anthropic_thinking_events():
         yield _chunk({}, usage={"prompt_tokens": 3, "completion_tokens": 4})
 
     async def run():
-        return [
-            event.decode("utf-8")
-            async for event in _openai_sse_to_anthropic_events(chunks(), "m", "msg_x")
-        ]
+        return [event.decode("utf-8") async for event in _openai_sse_to_anthropic_events(chunks(), "m", "msg_x")]
 
     events = []
     for raw in asyncio.run(run()):
@@ -829,6 +855,7 @@ def test_streaming_reasoning_uses_anthropic_thinking_events():
         "content_block_start",
         "content_block_delta",
         "content_block_delta",
+        "content_block_delta",
         "content_block_stop",
         "content_block_start",
         "content_block_delta",
@@ -836,10 +863,14 @@ def test_streaming_reasoning_uses_anthropic_thinking_events():
         "message_delta",
         "message_stop",
     ]
-    assert events[1][1]["content_block"] == {"type": "thinking", "thinking": ""}
+    assert events[1][1]["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
     assert events[2][1]["delta"] == {"type": "thinking_delta", "thinking": "First "}
     assert events[3][1]["delta"] == {"type": "thinking_delta", "thinking": "think."}
-    assert events[6][1]["delta"] == {"type": "text_delta", "text": "42"}
+    assert events[4][1]["delta"] == {
+        "type": "signature_delta",
+        "signature": api_anthropic._SYNTHETIC_THINKING_SIGNATURE,
+    }
+    assert events[7][1]["delta"] == {"type": "text_delta", "text": "42"}
 
 
 def test_chat_response_translation_failure_returns_valid_json():

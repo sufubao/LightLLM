@@ -456,14 +456,12 @@ class HttpServerManagerForPDMaster:
                             if node_run_mode == "prefill":
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
-                            if prompt_cache_len_from_prefill is not None:
-                                metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
+                            metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                             yield sub_req_id, request_output, metadata, finish_status
                         else:
                             continue
                     else:
-                        if prompt_cache_len_from_prefill is not None:
-                            metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
+                        metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                         yield sub_req_id, request_output, metadata, finish_status
 
         return
@@ -707,7 +705,9 @@ class ReqStatus:
             return
 
         async with self.lock:
-            self.out_token_info_list = token_list + self.out_token_info_list
+            merged_tokens = token_list + self.out_token_info_list
+            self.out_token_info_list.clear()
+            self.out_token_info_list.extend(merged_tokens)
             self.event.set()
 
 

@@ -98,6 +98,23 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     """
     adapter = get_anthropic_messages_adapter()
 
+    # LiteLLM's Anthropic request schema does not accept the native
+    # ``thinking`` parameter.  Translate it to the LightLLM controls before
+    # handing the request to LiteLLM, then remove the Anthropic-only field.
+    # This also makes the native Anthropic spelling behave the same as the
+    # existing ``extra_body.chat_template_kwargs`` escape hatch.
+    anthropic_body = dict(anthropic_body)
+    thinking = anthropic_body.pop("thinking", None)
+    if isinstance(thinking, dict) and thinking.get("type") in {"enabled", "disabled"}:
+        extra_body = dict(anthropic_body.get("extra_body") or {})
+        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        chat_template_kwargs["enable_thinking"] = thinking["type"] == "enabled"
+        extra_body["chat_template_kwargs"] = chat_template_kwargs
+        # Anthropic has a separate thinking content block, so make sure the
+        # downstream response keeps reasoning separate from normal text.
+        extra_body["separate_reasoning"] = True
+        anthropic_body["extra_body"] = extra_body
+
     _replace_anthropic_pdf_documents(anthropic_body)
     tool_result_image_urls = _tool_result_image_urls(anthropic_body)
     openai_request, tool_name_mapping = adapter.translate_anthropic_to_openai(anthropic_body)
@@ -671,6 +688,27 @@ _FINISH_REASON_TO_STOP_REASON = {
 }
 
 
+def _extract_reasoning_text(openai_dict: Dict[str, Any]) -> str:
+    """Return reasoning emitted by either of LightLLM's response fields."""
+    choice = (openai_dict.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _prepend_thinking_block(result: Dict[str, Any], reasoning_text: str) -> None:
+    """Expose OpenAI reasoning as the Anthropic extended-thinking block."""
+    if not reasoning_text:
+        return
+    content = result.setdefault("content", [])
+    if any(isinstance(block, dict) and block.get("type") == "thinking" for block in content):
+        return
+    content.insert(0, {"type": "thinking", "thinking": reasoning_text})
+
+
 def _chat_response_to_anthropic(
     chat_response: Any,
     tool_name_mapping: Dict[str, str],
@@ -688,6 +726,14 @@ def _chat_response_to_anthropic(
         openai_dict = chat_response.model_dump(exclude_none=True)
     else:
         openai_dict = dict(chat_response)
+    reasoning_text = _extract_reasoning_text(openai_dict)
+
+    # LiteLLM currently consumes ``reasoning_content`` but not LightLLM's
+    # legacy ``reasoning`` field.  Normalise both names before translation;
+    # the post-translation guard below covers adapters that drop the field.
+    if reasoning_text:
+        message = ((openai_dict.get("choices") or [{}])[0]).get("message") or {}
+        message.setdefault("reasoning_content", reasoning_text)
 
     try:
         # Lazy import so this module stays importable when litellm is absent.
@@ -704,7 +750,9 @@ def _chat_response_to_anthropic(
     else:
         result = dict(anthropic_obj)
 
-    return _normalize_anthropic_response(result, requested_model)
+    result = _normalize_anthropic_response(result, requested_model)
+    _prepend_thinking_block(result, reasoning_text)
+    return result
 
 
 def _normalize_anthropic_response(result: Dict[str, Any], requested_model: str) -> Dict[str, Any]:
@@ -754,6 +802,12 @@ def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: 
     if message.get("tool_calls"):
         raise RuntimeError("Fallback translator cannot handle tool_calls; LiteLLM adapter path is required.")
     text = message.get("content") or ""
+    reasoning_text = _extract_reasoning_text(openai_dict)
+    content = []
+    if reasoning_text:
+        content.append({"type": "thinking", "thinking": reasoning_text})
+    if text:
+        content.append({"type": "text", "text": text})
     usage = openai_dict.get("usage") or {}
     finish_reason = choice.get("finish_reason")
     return {
@@ -761,7 +815,7 @@ def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: 
         "type": "message",
         "role": "assistant",
         "model": requested_model,
-        "content": [{"type": "text", "text": text}],
+        "content": content,
         "stop_reason": _FINISH_REASON_TO_STOP_REASON.get(finish_reason, "end_turn"),
         "stop_sequence": None,
         "usage": {
@@ -811,7 +865,8 @@ async def _openai_sse_to_anthropic_events(
     next_content_index = 0
 
     # Currently open content block, if any.
-    # current_open is either None or a tuple ("text"|"tool_use", anthropic_index).
+    # current_open is either None or a tuple
+    # ("thinking"|"text"|"tool_use", anthropic_index).
     current_open = None
 
     text_block_index = None  # Anthropic index of the active text block.
@@ -910,6 +965,35 @@ async def _openai_sse_to_anthropic_events(
                                 "cache_read_input_tokens": 0,
                             },
                         },
+                    },
+                )
+
+            # ---- Thinking delta ----
+            reasoning_piece = delta.get("reasoning_content") or delta.get("reasoning")
+            if reasoning_piece:
+                if current_open is None or current_open[0] != "thinking":
+                    if current_open is not None:
+                        yield _sse_event(
+                            "content_block_stop",
+                            {"type": "content_block_stop", "index": current_open[1]},
+                        )
+                    thinking_block_index = next_content_index
+                    next_content_index += 1
+                    current_open = ("thinking", thinking_block_index)
+                    yield _sse_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": thinking_block_index,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        },
+                    )
+                yield _sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": current_open[1],
+                        "delta": {"type": "thinking_delta", "thinking": reasoning_piece},
                     },
                 )
 

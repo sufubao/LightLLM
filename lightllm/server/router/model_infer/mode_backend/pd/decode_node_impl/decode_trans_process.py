@@ -369,7 +369,6 @@ class _DecodeTransModule:
                     self.waiting_dict.pop(key, None)
                 logger.error(f"send write ready task to prefill node failed: {trans_task.to_str()}")
                 logger.exception(str(e))
-                self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)
                 trans_task.error_info = f"send write ready task to prefill node failed: {str(e)}"
                 self.failed_queue.put(trans_task)
                 continue

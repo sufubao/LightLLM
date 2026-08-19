@@ -225,7 +225,6 @@ class _PrefillTransModule:
                 logger.error(f"send WRITE request to decode failed: {trans_task.to_str()}")
                 logger.exception(str(e))
                 trans_task.error_info = f"send WRITE request to decode failed: {str(e)}"
-                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
                 self.failed_queue.put(trans_task)
                 continue
         return
@@ -316,7 +315,6 @@ class _PrefillTransModule:
             except BaseException as e:
                 logger.error(f"write_blocks_paged failed: {trans_task.to_str()}")
                 logger.exception(str(e))
-                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
                 trans_task.error_info = f"write_blocks_paged failed: {str(e)}"
                 self.failed_queue.put(trans_task)
                 continue
@@ -342,11 +340,11 @@ class _PrefillTransModule:
                     if ret == "DONE":
                         trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
                         if self.transporter.capture_telemetry:
-                            telem = self.transporter.nixl_agent.get_xfer_telemetry(trans_task.xfer_handle)
+                            telem = self.transporter.get_xfer_telemetry(trans_task.xfer_handle)
                             total_us = telem.xferDuration
                             post_us = telem.postDuration
                             backend_us = telem.xferDuration - telem.postDuration
-                            nixl_backend = self.transporter.nixl_agent.query_xfer_backend(trans_task.xfer_handle)
+                            nixl_backend = self.transporter.query_xfer_backend(trans_task.xfer_handle)
                             logger.info(
                                 f"write trans task request_id={trans_task.request_id} "
                                 f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "

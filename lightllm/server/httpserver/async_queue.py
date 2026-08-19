@@ -7,9 +7,9 @@ class AsyncQueue:
         self.event = asyncio.Event()
         self.lock = asyncio.Lock()
 
-    async def wait_to_ready(self, timeout=3):
+    async def wait_to_ready(self):
         try:
-            await asyncio.wait_for(self.event.wait(), timeout=timeout)
+            await asyncio.wait_for(self.event.wait(), timeout=3)
         except asyncio.TimeoutError:
             pass
 
@@ -26,7 +26,7 @@ class AsyncQueue:
             self.event.set()
         return
 
-    async def wait_to_get_all_data(self, timeout=3):
-        await self.wait_to_ready(timeout=timeout)
+    async def wait_to_get_all_data(self):
+        await self.wait_to_ready()
         handle_list = await self.get_all_data()
         return handle_list

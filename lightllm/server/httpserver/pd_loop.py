@@ -40,11 +40,7 @@ async def _abort_pd_request(
     generation_tasks: Dict[int, asyncio.Task],
 ) -> bool:
     generation_task = generation_tasks.get(group_req_id)
-    if (
-        generation_task is not None
-        and not generation_task.done()
-        and not generation_task.cancelling()
-    ):
+    if generation_task is not None and not generation_task.done() and not generation_task.cancelling():
         # The request may still be waiting for a shared-memory slot and therefore
         # not yet be visible to HttpServerManager.abort(). Cancelling its owning
         # task makes the abort effective at every point in the admission path.
@@ -299,14 +295,10 @@ async def _pd_process_generate(
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
     except asyncio.CancelledError:
-        logger.info(
-            f"pd request task cancelled for group_request_id {sampling_params.group_request_id}"
-        )
+        logger.info(f"pd request task cancelled for group_request_id {sampling_params.group_request_id}")
         raise
     except BaseException:
-        logger.exception(
-            f"PD request generation failed for group_request_id {sampling_params.group_request_id}"
-        )
+        logger.exception(f"PD request generation failed for group_request_id {sampling_params.group_request_id}")
         raise
 
 

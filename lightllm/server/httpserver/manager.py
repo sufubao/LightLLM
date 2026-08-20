@@ -311,9 +311,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             assert False, "dead code path"
         return group_request_id
 
-    async def _alloc_req_objs(
-        self, group_request_id, prompt_ids, sampling_params
-    ) -> List[Req]:
+    async def _alloc_req_objs(self, group_request_id, prompt_ids, sampling_params) -> List[Req]:
         """Allocate and initialize request slots without leaking partial allocations."""
         alloced_req_indexes = []
         req_objs = []
@@ -330,9 +328,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 alloced_req_indexes.append(alloc_req_index)
 
             for i, req_index in enumerate(alloced_req_indexes):
-                req_obj = await self.shm_req_manager.async_get_req_obj_by_index(
-                    req_index
-                )
+                req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
                 req_objs.append(req_obj)
                 req_obj.init(
                     group_request_id + i,
@@ -452,9 +448,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             # 申请资源并存储
-            req_objs = await self._alloc_req_objs(
-                group_request_id, prompt_ids, sampling_params
-            )
+            req_objs = await self._alloc_req_objs(group_request_id, prompt_ids, sampling_params)
             self._log_stage_timing(
                 group_request_id,
                 start_time,

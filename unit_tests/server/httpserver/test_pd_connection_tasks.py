@@ -26,9 +26,7 @@ def test_background_failure_interrupts_blocked_pd_receive():
 
         websocket = BlockingWebsocket()
         failure = asyncio.get_running_loop().create_future()
-        receive_task = asyncio.create_task(
-            _recv_or_raise_on_background_failure(websocket, (failure,))
-        )
+        receive_task = asyncio.create_task(_recv_or_raise_on_background_failure(websocket, (failure,)))
         await recv_started.wait()
 
         failure.set_exception(RuntimeError("generation failed"))

@@ -57,9 +57,7 @@ def test_cancelled_slot_allocation_releases_partially_allocated_indexes():
 
         manager.shm_req_manager.async_alloc_req_index = alloc_req_index
         sampling_params = MagicMock(n=2)
-        allocation_task = asyncio.create_task(
-            manager._alloc_req_objs(123, [1, 2], sampling_params)
-        )
+        allocation_task = asyncio.create_task(manager._alloc_req_objs(123, [1, 2], sampling_params))
         await waiting_for_second_slot.wait()
         allocation_task.cancel()
 

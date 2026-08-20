@@ -1,10 +1,15 @@
 import threading
 import time
+import queue
+from types import SimpleNamespace
 
 import pytest
 
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDAgentMetadata
 from lightllm.server.router.model_infer.mode_backend.pd import nixl_kv_transporter
+from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_trans_process import (
+    _PrefillTransModule,
+)
 
 
 class _FakeBuffer:
@@ -247,3 +252,70 @@ def test_active_transfer_defers_removal_and_stale_generation_cannot_remove_recon
 
     assert transporter._peer_generations == {"decode": second_generation}
     assert "decode" in transporter.remote_agents
+
+
+def _status_module(transporter, task):
+    module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.transporter = transporter
+    module.waiting_dict_lock = threading.Lock()
+    module.waiting_dict = {task.get_key(): task}
+    module.success_queue = queue.Queue()
+    module.failed_queue = queue.Queue()
+    return module
+
+
+def _status_task():
+    return SimpleNamespace(
+        xfer_handle=object(),
+        error_info=None,
+        request_id=1,
+        start_kv_index=0,
+        end_kv_index=1,
+        src_page_index=0,
+        dst_page_index=0,
+        get_key=lambda: "task-1",
+        to_str=lambda: "task-1",
+        time_out=lambda: False,
+    )
+
+
+def test_status_query_failure_routes_task_to_failure_cleanup():
+    class FailingTransporter:
+        capture_telemetry = False
+
+        @staticmethod
+        def check_task_status(trans_task):
+            raise RuntimeError("native status failure")
+
+    task = _status_task()
+    module = _status_module(FailingTransporter(), task)
+
+    module._update_task_status_once()
+
+    assert module.waiting_dict == {}
+    assert module.failed_queue.get_nowait() is task
+    assert task.error_info == "check transfer status failed: native status failure"
+    assert module.success_queue.empty()
+
+
+def test_done_notification_failure_routes_task_to_failure_cleanup():
+    class FailingTransporter:
+        capture_telemetry = False
+
+        @staticmethod
+        def check_task_status(trans_task):
+            return "DONE"
+
+        @staticmethod
+        def send_write_done_task_to_decode_node(trans_task):
+            raise RuntimeError("notify failure")
+
+    task = _status_task()
+    module = _status_module(FailingTransporter(), task)
+
+    module._update_task_status_once()
+
+    assert module.waiting_dict == {}
+    assert module.failed_queue.get_nowait() is task
+    assert task.error_info == "send WRITE done nixl notify failed: notify failure"
+    assert module.success_queue.empty()

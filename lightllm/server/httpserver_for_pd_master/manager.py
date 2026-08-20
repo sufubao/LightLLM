@@ -76,11 +76,26 @@ class HttpServerManagerForPDMaster:
         return False
 
     async def register_pd(self, pd_info_json, websocket):
-        self.pd_manager.register_pd(pd_info_json, websocket)
+        replaced_node = self.pd_manager.register_pd(pd_info_json, websocket)
+        if replaced_node is not None:
+            await self._fail_requests_for_node(replaced_node, "PD node connection was replaced")
         return
 
-    async def remove_pd(self, pd_info_json):
-        self.pd_manager.remove_pd(pd_info_json)
+    async def remove_pd(self, pd_info_json, websocket):
+        removed_node = self.pd_manager.remove_pd(pd_info_json, websocket)
+        if removed_node is not None:
+            await self._fail_requests_for_node(removed_node, "PD node disconnected")
+        return
+
+    async def _fail_requests_for_node(self, node: PD_Client_Obj, reason: str):
+        error_message = f"{reason}: {node.mode} node {node.client_ip_port}"
+        affected_requests = [
+            req_status
+            for req_status in list(self.req_id_to_out_inf.values())
+            if req_status.p_node is node or req_status.d_node is node
+        ]
+        for req_status in affected_requests:
+            await req_status.fail(RuntimeError(error_message))
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -397,6 +412,7 @@ class HttpServerManagerForPDMaster:
                 group_request_id=group_request_id,
                 stage="prefill",
             )
+            req_status.raise_if_failed()
         except ServerBusyError:
             logger.warning(f"group_request_id: {group_request_id} wait prefill prompt ids time out")
             raise
@@ -417,6 +433,7 @@ class HttpServerManagerForPDMaster:
                 group_request_id=group_request_id,
                 stage="decode",
             )
+            req_status.raise_if_failed()
         except ServerBusyError:
             logger.warning(f"group_request_id: {group_request_id} wait decode stage time out err, server is busy now.")
             raise
@@ -439,6 +456,7 @@ class HttpServerManagerForPDMaster:
             if prefill_token_deadline is not None:
                 wait_timeout = min(wait_timeout, max(0, prefill_token_deadline - time.monotonic()))
             new_tokens = await req_status.out_tokens.wait_to_get_all_data(timeout=wait_timeout)
+            req_status.raise_if_failed()
             assert group_request_id in self.req_id_to_out_inf, f"error state req_id {group_request_id}"
             if await request.is_disconnected():
                 raise ClientDisconnected(
@@ -662,6 +680,21 @@ class ReqStatus:
         self.prefill_prompt_ids_event = asyncio.Event()
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
+        self.error: Optional[BaseException] = None
+
+    async def fail(self, error: BaseException):
+        async with self.out_tokens.lock:
+            if self.error is None:
+                self.error = error
+            self.out_tokens.event.set()
+        self.up_status_event.set()
+        self.prefill_prompt_ids_event.set()
+        return
+
+    def raise_if_failed(self):
+        if self.error is not None:
+            raise self.error
+        return
 
 
 class PDManager:
@@ -725,6 +758,7 @@ class PDManager:
 
     def register_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)
+        replaced_node = self.url_to_pd_nodes.get(pd_client.client_ip_port)
         client_max_req_total_len = pd_client.start_args["max_req_total_len"]
         if client_max_req_total_len != self.args.max_req_total_len:
             logger.error(
@@ -761,10 +795,16 @@ class PDManager:
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
-        return
+        if replaced_node is not None and replaced_node.websocket is not websocket:
+            return replaced_node
+        return None
 
-    def remove_pd(self, pd_info_json):
+    def remove_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)
+        registered_node = self.url_to_pd_nodes.get(pd_client.client_ip_port)
+        if registered_node is None or registered_node.websocket is not websocket:
+            logger.info(f"ignore stale disconnect for {pd_client.mode} node {pd_client.client_ip_port}")
+            return None
 
         self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
         self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
@@ -773,7 +813,7 @@ class PDManager:
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
-        return
+        return registered_node
 
     def update_node_load_info(self, load_info: Optional[dict]):
         """更新节点负载信息

@@ -6,7 +6,20 @@ import pytest
 from easydict import EasyDict
 
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager, ReqStatus
+
+
+def _prefill_pd_info(args, node_id=1, client_ip_port="10.0.0.1:8000"):
+    return {
+        "node_id": node_id,
+        "client_ip_port": client_ip_port,
+        "mode": "prefill",
+        "start_args": {
+            "max_req_total_len": args.max_req_total_len,
+            "max_image_pixels": args.max_image_pixels,
+            "disable_image_resize": args.disable_image_resize,
+        },
+    }
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
@@ -241,6 +254,61 @@ def test_prefill_reconnection_preserves_other_nodes_inflight_prompt_chars():
     assert [node.client_ip_port for node in manager.prefill_nodes] == ["10.0.0.1:8000", "10.0.0.2:8000"]
     assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 0]
     assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 0]
+
+
+def test_pd_reconnection_fails_old_requests_and_ignores_stale_disconnect():
+    async def run():
+        args = StartArgs()
+        pd_manager = PDManager(args)
+        http_manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        http_manager.pd_manager = pd_manager
+        http_manager.req_id_to_out_inf = {}
+        pd_info = _prefill_pd_info(args)
+        old_websocket = object()
+        new_websocket = object()
+
+        pd_manager.register_pd(pd_info, old_websocket)
+        old_node = pd_manager.prefill_nodes[0]
+        req_status = ReqStatus(8, old_node, object())
+        http_manager.req_id_to_out_inf[8] = req_status
+
+        await http_manager.register_pd(pd_info, new_websocket)
+
+        with pytest.raises(RuntimeError, match="connection was replaced"):
+            req_status.raise_if_failed()
+        assert req_status.prefill_prompt_ids_event.is_set()
+        assert req_status.up_status_event.is_set()
+        assert req_status.out_tokens.event.is_set()
+
+        await http_manager.remove_pd(pd_info, old_websocket)
+        assert pd_manager.url_to_pd_nodes[pd_info["client_ip_port"]].websocket is new_websocket
+
+    asyncio.run(run())
+
+
+def test_pd_disconnect_wakes_requests_owned_by_the_disconnected_node():
+    async def run():
+        args = StartArgs()
+        pd_manager = PDManager(args)
+        http_manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        http_manager.pd_manager = pd_manager
+        http_manager.req_id_to_out_inf = {}
+        pd_info = _prefill_pd_info(args)
+        websocket = object()
+
+        pd_manager.register_pd(pd_info, websocket)
+        node = pd_manager.prefill_nodes[0]
+        req_status = ReqStatus(9, node, object())
+        http_manager.req_id_to_out_inf[9] = req_status
+        token_waiter = asyncio.create_task(req_status.out_tokens.wait_to_get_all_data(timeout=10))
+
+        await http_manager.remove_pd(pd_info, websocket)
+        assert await asyncio.wait_for(token_waiter, timeout=1) == []
+        with pytest.raises(RuntimeError, match="PD node disconnected"):
+            req_status.raise_if_failed()
+        assert pd_info["client_ip_port"] not in pd_manager.url_to_pd_nodes
+
+    asyncio.run(run())
 
 
 def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):

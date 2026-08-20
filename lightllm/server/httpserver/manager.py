@@ -311,6 +311,44 @@ class HttpServerManager(HttpRlManagerHelper, object):
             assert False, "dead code path"
         return group_request_id
 
+    async def _alloc_req_objs(
+        self, group_request_id, prompt_ids, sampling_params
+    ) -> List[Req]:
+        """Allocate and initialize request slots without leaking partial allocations."""
+        alloced_req_indexes = []
+        req_objs = []
+        try:
+            while len(alloced_req_indexes) < sampling_params.n:
+                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                sleep_time = 0.1
+                while alloc_req_index is None:
+                    await asyncio.sleep(sleep_time)
+                    sleep_time *= 1.1
+                    sleep_time = min(1, sleep_time)
+
+                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                alloced_req_indexes.append(alloc_req_index)
+
+            for i, req_index in enumerate(alloced_req_indexes):
+                req_obj = await self.shm_req_manager.async_get_req_obj_by_index(
+                    req_index
+                )
+                req_objs.append(req_obj)
+                req_obj.init(
+                    group_request_id + i,
+                    prompt_ids,
+                    sampling_params,
+                    self.tokenizer,
+                    chunked_prefill_size=self.args.chunked_prefill_size,
+                )
+            return req_objs
+        except BaseException:
+            for req_obj in req_objs:
+                await self.shm_req_manager.async_put_back_req_obj(req_obj)
+            for req_index in alloced_req_indexes:
+                await self.shm_req_manager.async_release_req_index(req_index)
+            raise
+
     async def generate(
         self,
         prompt: Union[str, List[int]],
@@ -414,28 +452,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             # 申请资源并存储
-            alloced_req_indexes = []
-            while len(alloced_req_indexes) < sampling_params.n:
-                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                sleep_time = 0.1
-                while alloc_req_index is None:
-                    await asyncio.sleep(sleep_time)
-                    sleep_time *= 1.1
-                    sleep_time = min(1, sleep_time)
-
-                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                alloced_req_indexes.append(alloc_req_index)
-            req_objs: List[Req] = []
-            for i, req_index in enumerate(alloced_req_indexes):
-                req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
-                req_obj.init(
-                    group_request_id + i,
-                    prompt_ids,
-                    sampling_params,
-                    self.tokenizer,
-                    chunked_prefill_size=self.args.chunked_prefill_size,
-                )
-                req_objs.append(req_obj)
+            req_objs = await self._alloc_req_objs(
+                group_request_id, prompt_ids, sampling_params
+            )
             self._log_stage_timing(
                 group_request_id,
                 start_time,

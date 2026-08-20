@@ -34,6 +34,33 @@ async def timer_log(manager: HttpServerManager):
     return
 
 
+async def _recv_or_raise_on_background_failure(websocket, background_tasks):
+    recv_task = asyncio.create_task(websocket.recv())
+    try:
+        done, _ = await asyncio.wait(
+            [recv_task, *background_tasks],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in background_tasks:
+            if task not in done:
+                continue
+
+            recv_task.cancel()
+            await asyncio.gather(recv_task, return_exceptions=True)
+            if task.cancelled():
+                raise asyncio.CancelledError
+            error = task.exception()
+            if error is not None:
+                raise error
+            raise RuntimeError("PD connection background task exited unexpectedly")
+
+        return recv_task.result()
+    finally:
+        if not recv_task.done():
+            recv_task.cancel()
+            await asyncio.gather(recv_task, return_exceptions=True)
+
+
 async def pd_handle_loop(manager: HttpServerManager):
     if manager.args.host in ["127.0.0.1", "localhost"]:
         logger.error("pd mode must specify host ip, not use 127.0.0.1 or localhost")
@@ -84,6 +111,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     while True:
         forwarding_tokens_task = None
         heartbeat_task = None
+        connection_failure = None
+        generation_tasks: Dict[int, asyncio.Task] = {}
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
@@ -113,18 +142,22 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 转发任务
                 forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
                 heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket))
+                connection_failure = asyncio.get_running_loop().create_future()
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
-                    recv_bytes = await websocket.recv()
+                    recv_bytes = await _recv_or_raise_on_background_failure(
+                        websocket,
+                        (forwarding_tokens_task, heartbeat_task, connection_failure),
+                    )
                     obj = pickle.loads(recv_bytes)
                     if obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
-                        asyncio.create_task(
+                        generation_task = asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
                                 prompt=prompt,
@@ -135,6 +168,21 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 pd_event=pd_event,
                             )
                         )
+                        generation_tasks[group_req_id] = generation_task
+
+                        def report_generation_failure(
+                            done_task,
+                            request_id=group_req_id,
+                            failure_future=connection_failure,
+                        ):
+                            if generation_tasks.get(request_id) is done_task:
+                                generation_tasks.pop(request_id, None)
+                            if not done_task.cancelled():
+                                error = done_task.exception()
+                                if error is not None and not failure_future.done():
+                                    failure_future.set_exception(error)
+
+                        generation_task.add_done_callback(report_generation_failure)
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
@@ -169,7 +217,14 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.exception(str(e))
         finally:
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
+            child_tasks.extend(generation_tasks.values())
+            if connection_failure is not None:
+                child_tasks.append(connection_failure)
             for task in child_tasks:
+                if task.done():
+                    continue
+                if isinstance(task, asyncio.Task) and task.cancelling():
+                    continue
                 task.cancel()
             if child_tasks:
                 await asyncio.gather(*child_tasks, return_exceptions=True)
@@ -235,8 +290,12 @@ async def _pd_process_generate(
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
-    except BaseException as e:
-        logger.error(str(e))
+    except asyncio.CancelledError:
+        logger.info(f"pd request task cancelled for group_request_id {sampling_params.group_request_id}")
+        raise
+    except BaseException:
+        logger.exception(f"PD request generation failed for group_request_id {sampling_params.group_request_id}")
+        raise
 
 
 # 转发token的task

@@ -428,6 +428,15 @@ class HttpServerManagerForPDMaster:
         )
 
         first_token_gen = False
+        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        prompt_cache_len_from_prefill = await self._wait_for_prefill_token_if_needed(
+            req_status=req_status,
+            request=request,
+            group_request_id=group_request_id,
+            needs_prefill_first_token=needs_prefill_first_token,
+            ready_kv_len=decode_node_info.ready_kv_len,
+        )
+
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
@@ -447,13 +456,46 @@ class HttpServerManagerForPDMaster:
                             if node_run_mode == "prefill":
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
+                            metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                             yield sub_req_id, request_output, metadata, finish_status
                         else:
                             continue
                     else:
+                        metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                         yield sub_req_id, request_output, metadata, finish_status
 
         return
+
+    async def _wait_for_prefill_token_if_needed(
+        self,
+        req_status: "ReqStatus",
+        request: Request,
+        group_request_id: int,
+        needs_prefill_first_token: bool,
+        ready_kv_len: int,
+    ) -> int:
+        if not needs_prefill_first_token:
+            return ready_kv_len
+
+        new_tokens = []
+        while True:
+            await req_status.wait_to_ready()
+            if await request.is_disconnected():
+                raise ClientDisconnected(
+                    group_request_id=group_request_id,
+                    reason="fetch_pd_stream decode period check network disconnected",
+                )
+            if not await req_status.can_read(self.req_id_to_out_inf):
+                continue
+
+            new_tokens.extend(await req_status.pop_all_tokens())
+
+            for token in new_tokens:
+                metadata = token[2]
+                if metadata.get("node_mode") == "prefill":
+                    prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                    await req_status.put_tokens_to_front(new_tokens)
+                    return prompt_cache_len
 
     async def _wait_to_token_package(
         self,
@@ -657,6 +699,16 @@ class ReqStatus:
             ans = self.out_token_info_list.copy()
             self.out_token_info_list.clear()
         return ans
+
+    async def put_tokens_to_front(self, token_list: List[Tuple[int, str, dict, FinishStatus]]):
+        if not token_list:
+            return
+
+        async with self.lock:
+            merged_tokens = token_list + self.out_token_info_list
+            self.out_token_info_list.clear()
+            self.out_token_info_list.extend(merged_tokens)
+            self.event.set()
 
 
 class PDManager:

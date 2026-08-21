@@ -34,6 +34,21 @@ async def timer_log(manager: HttpServerManager):
     return
 
 
+async def _abort_pd_request(
+    manager: HttpServerManager,
+    group_req_id: int,
+    generation_tasks: Dict[int, asyncio.Task],
+) -> bool:
+    generation_task = generation_tasks.get(group_req_id)
+    if generation_task is not None and not generation_task.done() and not generation_task.cancelling():
+        # The request may still be waiting for a shared-memory slot and therefore
+        # not yet be visible to HttpServerManager.abort(). Cancelling its owning
+        # task makes the abort effective at every point in the admission path.
+        generation_task.cancel()
+
+    return (await manager.abort(group_req_id)) or generation_task is not None
+
+
 async def pd_handle_loop(manager: HttpServerManager):
     if manager.args.host in ["127.0.0.1", "localhost"]:
         logger.error("pd mode must specify host ip, not use 127.0.0.1 or localhost")
@@ -94,7 +109,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
                 ping_interval=None,
             ) as websocket:
-
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -146,18 +160,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
-                        generation_task = generation_tasks.get(group_req_id)
-                        if generation_task is not None and not generation_task.done():
-                            generation_task.cancel()
-                        if not (await manager.abort(group_req_id)):
-
-                            async def delayed_abort_task(group_req_id, retry_count):
-                                for _ in range(retry_count):
-                                    await asyncio.sleep(5.0)
-                                    if await manager.abort(group_req_id):
-                                        break
-
-                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
+                        group_req_id_to_event.pop(group_req_id, None)
+                        await _abort_pd_request(manager, group_req_id, generation_tasks)
 
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
@@ -182,7 +186,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
-                task.cancel()
+                if not task.done() and not task.cancelling():
+                    task.cancel()
             if child_tasks:
                 await asyncio.gather(*child_tasks, return_exceptions=True)
 
@@ -247,6 +252,9 @@ async def _pd_process_generate(
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
+    except asyncio.CancelledError:
+        logger.info(f"pd request task cancelled for group_request_id {sampling_params.group_request_id}")
+        raise
     except BaseException as e:
         logger.error(str(e))
 
@@ -270,7 +278,6 @@ async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
 
 # 获取节点负载信息
 def _get_load_info() -> dict:
-
     from lightllm.server.api_http import g_objs
 
     assert g_objs.shared_token_load is not None, "shared_token_load is not initialized"

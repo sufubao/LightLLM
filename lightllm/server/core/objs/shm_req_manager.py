@@ -140,6 +140,15 @@ class ShmReqManager:
             req.ref_count = req.ref_count - 1
         self.proc_private_get_state[req_index_in_mem] = 0
 
+        # Req slots are reused, but prompt/logprob shared-memory handles are
+        # request-scoped. Keeping a linked handle on the process-local ctypes
+        # wrapper leaks file descriptors every time the slot is reused.
+        for attr_name in ("shm_prompt_ids", "shm_logprobs"):
+            shm_array = getattr(req, attr_name, None)
+            if shm_array is not None:
+                shm_array.detach_shm()
+                delattr(req, attr_name)
+
     async def async_put_back_req_obj(self, req: Req):
         return self.put_back_req_obj(req)
 

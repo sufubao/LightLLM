@@ -140,6 +140,15 @@ class ShmReqManager:
             req.ref_count = req.ref_count - 1
         self.proc_private_get_state[req_index_in_mem] = 0
 
+        # 请求槽位会被复用，但 prompt/logprob 共享内存句柄仅属于当前请求。
+        # 如果将已连接的句柄保留在进程本地的 ctypes 包装对象上，
+        # 每次复用槽位时都会泄漏文件描述符。
+        for attr_name in ("shm_prompt_ids", "shm_logprobs"):
+            shm_array = getattr(req, attr_name, None)
+            if shm_array is not None:
+                shm_array.detach_shm()
+                delattr(req, attr_name)
+
     async def async_put_back_req_obj(self, req: Req):
         return self.put_back_req_obj(req)
 

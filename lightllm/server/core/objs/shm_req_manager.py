@@ -136,14 +136,7 @@ class ShmReqManager:
         req_index_in_mem = req.index_in_shm_mem
         assert req_index_in_mem < self.max_req_num
         assert self.proc_private_get_state[req_index_in_mem] == 1
-        # Req slots are reused, but prompt/logprob shared-memory handles are
-        # request-scoped. Keeping a linked handle on the process-local ctypes
-        # wrapper leaks file descriptors every time the slot is reused.
-        for attr_name in ("shm_prompt_ids", "shm_logprobs"):
-            shm_array = getattr(req, attr_name, None)
-            if shm_array is not None:
-                shm_array.detach_shm()
-                delattr(req, attr_name)
+        req.detach_shm_arrays()
 
         with self.get_req_lock_by_index(req_index_in_mem):
             req.ref_count = req.ref_count - 1

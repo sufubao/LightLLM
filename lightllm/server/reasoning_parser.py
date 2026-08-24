@@ -13,7 +13,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import Iterator, List, Tuple, Dict, Optional, Type
+from typing import Any, Iterator, List, Sequence, Tuple, Dict, Optional, Type
 
 
 @dataclass
@@ -592,11 +592,56 @@ class BaseReasoningFormatDetector:
     ):
         self.think_start_token = think_start_token
         self.think_end_token = think_end_token
+        self._initial_in_reasoning = force_reasoning
         self._in_reasoning = force_reasoning
         self.stream_reasoning = stream_reasoning
 
         self._buffer = ""
         self.stripped_think_start = False
+
+    @staticmethod
+    def _encode_marker(tokenizer: Any, marker: str) -> Tuple[int, ...]:
+        """Encode a reasoning delimiter without adding model special tokens."""
+        tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+        try:
+            token_ids = tokenizer.encode(marker, add_special_tokens=False)
+        except (AttributeError, TypeError, ValueError):
+            return ()
+
+        if hasattr(token_ids, "tolist"):
+            token_ids = token_ids.tolist()
+        if token_ids and isinstance(token_ids[0], list):
+            token_ids = token_ids[0]
+        return tuple(int(token_id) for token_id in token_ids)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int], tokenizer: Any) -> int:
+        """Count generated tokens inside reasoning delimiters.
+
+        Delimiters themselves are excluded. ``_initial_in_reasoning`` covers
+        chat templates that open the reasoning block before generation starts.
+        """
+        start_ids = self._encode_marker(tokenizer, self.think_start_token)
+        end_ids = self._encode_marker(tokenizer, self.think_end_token)
+        if not start_ids or not end_ids:
+            return 0
+
+        token_ids = tuple(int(token_id) for token_id in token_ids)
+        in_reasoning = self._initial_in_reasoning
+        reasoning_tokens = 0
+        index = 0
+        while index < len(token_ids):
+            if token_ids[index : index + len(start_ids)] == start_ids:
+                in_reasoning = True
+                index += len(start_ids)
+                continue
+            if token_ids[index : index + len(end_ids)] == end_ids:
+                in_reasoning = False
+                index += len(end_ids)
+                continue
+            if in_reasoning:
+                reasoning_tokens += 1
+            index += 1
+        return reasoning_tokens
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         """
@@ -845,6 +890,10 @@ class MiniMaxAppendThinkDetector(BaseReasoningFormatDetector):
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         return StreamingParseResult(normal_text=self.think_start_token + text)
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int], tokenizer: Any) -> int:
+        # This parser exposes the synthetic <think> prefix as normal content.
+        return 0
+
 
 class NanoV3Detector(BaseReasoningFormatDetector):
     """
@@ -958,3 +1007,7 @@ class ReasoningParser:
         """Flush remaining buffered content when generation ends prematurely."""
         ret = self.detector.flush()
         return ret.reasoning_text, ret.normal_text
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int], tokenizer: Any) -> int:
+        """Return the number of generated reasoning tokens, excluding delimiters."""
+        return self.detector.count_reasoning_tokens(token_ids, tokenizer)

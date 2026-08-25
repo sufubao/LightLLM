@@ -170,19 +170,21 @@ def _process_reasoning_stream(
     index: int,
     delta: str,
     reasoning_parser_dict: Dict[int, ReasoningParser],
-    content: Dict[str, Any],
+    metadata: Dict[str, Any],
     request: ChatCompletionRequest,
 ) -> tuple[Optional[str], str]:
-    """Process reasoning content in streaming response"""
+    """Process reasoning content and update its token usage."""
     if index not in reasoning_parser_dict:
-        request_enable_reasoning = _is_force_thinking_mode(request)
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
-            request_enable_reasoning,
+            _is_force_thinking_mode(request),
         )
-    reasoning_parser = reasoning_parser_dict[index]
-    return reasoning_parser.parse_stream_chunk(delta)
+    parser = reasoning_parser_dict[index]
+    token_id = metadata.get("id")
+    if token_id is not None:
+        parser.update_reasoning_token_count(int(token_id))
+    return parser.parse_stream_chunk(delta)
 
 
 def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest):
@@ -358,21 +360,33 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     # Non-streaming case
     if not request.stream:
+        reasoning_parser = get_env_start_args().reasoning_parser
+        request_enable_reasoning = _is_force_thinking_mode(request) if reasoning_parser else False
         final_output_dict = collections.defaultdict(list)
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
         prompt_tokens_dict = {}
         prompt_cache_len_dict = {}
-        output_token_ids_dict = collections.defaultdict(list)
         completion_tokens = 0
+        reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             from .req_id_generator import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             count_output_tokens_dict[sub_req_id] += 1
             final_output_dict[sub_req_id].append(request_output)
-            if metadata.get("id") is not None:
-                output_token_ids_dict[sub_req_id].append(int(metadata["id"]))
+            if reasoning_parser:
+                parser = reasoning_parser_dict.get(sub_req_id)
+                if parser is None:
+                    parser = ReasoningParser(
+                        reasoning_parser,
+                        stream_reasoning=False,
+                        force_reasoning=request_enable_reasoning,
+                    )
+                    reasoning_parser_dict[sub_req_id] = parser
+                token_id = metadata.get("id")
+                if token_id is not None:
+                    parser.update_reasoning_token_count(int(token_id))
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
@@ -382,8 +396,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         prompt_tokens = prompt_tokens_dict[sub_ids[0]]
         completion_tokens = sum(count_output_tokens_dict[sub_req_id] for sub_req_id in sub_ids)
         cached_tokens = prompt_cache_len_dict.get(sub_ids[0], 0)
-        reasoning_parser = get_env_start_args().reasoning_parser
-        reasoning_tokens = 0
+        reasoning_tokens = sum(reasoning_parser_dict[sub_req_id].reasoning_tokens for sub_req_id in sub_ids)
 
         for i in range(request.n):
             sub_req_id = sub_ids[i]
@@ -393,16 +406,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # Handle reasoning content
             reasoning_text = None
             if reasoning_parser:
-                request_enable_reasoning = _is_force_thinking_mode(request)
                 try:
-                    parser = ReasoningParser(
-                        model_type=reasoning_parser,
-                        stream_reasoning=False,
-                        force_reasoning=request_enable_reasoning,
-                    )
-                    reasoning_tokens += parser.count_reasoning_tokens(
-                        output_token_ids_dict[sub_req_id], g_objs.httpserver_manager.tokenizer
-                    )
+                    parser = reasoning_parser_dict[sub_req_id]
                     reasoning_text, text = parser.parse_non_stream(text)
                 except Exception as e:
                     logger.error(f"Reasoning parsing error: {e}")
@@ -493,15 +498,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
-        output_token_ids: Dict[int, List[int]] = collections.defaultdict(list)
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             prompt_tokens = metadata["prompt_tokens"]
             cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
-            if metadata.get("id") is not None:
-                output_token_ids[choice_index].append(int(metadata["id"]))
 
             delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
@@ -526,7 +528,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # Handle reasoning content
             if get_env_start_args().reasoning_parser:
                 reasoning_text, delta = _process_reasoning_stream(
-                    choice_index, delta, reasoning_parser_dict, request_output, request
+                    choice_index, delta, reasoning_parser_dict, metadata, request
                 )
                 if reasoning_text:
                     if request.separate_reasoning:
@@ -765,10 +767,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         reasoning_parser = get_env_start_args().reasoning_parser
         completion_tokens_details = None
         if reasoning_parser:
-            reasoning_tokens = sum(
-                parser.count_reasoning_tokens(output_token_ids[choice_index], g_objs.httpserver_manager.tokenizer)
-                for choice_index, parser in reasoning_parser_dict.items()
-            )
+            reasoning_tokens = sum(parser.reasoning_tokens for parser in reasoning_parser_dict.values())
             completion_tokens_details = CompletionTokensDetails(reasoning_tokens=reasoning_tokens)
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,

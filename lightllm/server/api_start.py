@@ -37,7 +37,9 @@ def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
     if args.mtp_mode is not None:
-        assert not args.disable_cudagraph, "--disable_cudagraph is not supported when --mtp_mode is enabled"
+        assert (
+            not args.disable_cudagraph or args.run_mode == "prefill"
+        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)

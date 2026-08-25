@@ -109,6 +109,7 @@ start_prefill() {
     python -m lightllm.server.api_server \
       "${P_COMMON_ARGS[@]}" \
       --run_mode prefill \
+      --disable_cudagraph \
       --enable_cpu_cache \
       --cpu_cache_storage_size "${CPU_CACHE_SIZE}" \
       --tp 4 \

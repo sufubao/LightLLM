@@ -36,7 +36,9 @@ def _set_envs_and_config(args: StartArgs):
 def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
-    if args.mtp_mode is not None:
+    # Prefill-only PD nodes never run the MTP decode planner and therefore do not
+    # require decode CUDA Graphs.
+    if args.mtp_mode is not None and args.run_mode != "prefill":
         assert not args.disable_cudagraph, "--disable_cudagraph is not supported when --mtp_mode is enabled"
 
     auto_set_max_req_total_len(args)

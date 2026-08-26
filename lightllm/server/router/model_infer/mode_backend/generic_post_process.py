@@ -3,12 +3,45 @@ from typing import List, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
+    is_vocab_parallel_greedy_enabled,
+    unpack_vocab_parallel_greedy,
+)
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
+def _can_use_unmodified_greedy_logits(reqs: List[InferReq]) -> bool:
+    """Whether sampling is exactly argmax over the incoming logits."""
+
+    for req_obj in reqs:
+        sample_param = req_obj.sampling_param
+        shm_param = sample_param.shm_param
+        if shm_param.top_k != 1 or shm_param.temperature != 1.0:
+            return False
+        if (
+            shm_param.presence_penalty != 0.0
+            or shm_param.frequency_penalty != 0.0
+            or shm_param.repetition_penalty != 1.0
+        ):
+            return False
+        if shm_param.exponential_decay_length_penalty.to_tuple()[1] != 1.0:
+            return False
+        out_token_len = req_obj.get_cur_total_len() - req_obj.shm_req.input_len
+        if out_token_len < shm_param.min_new_tokens - 1:
+            return False
+        if sample_param.invalid_token_ids:
+            return False
+    return True
+
+
 def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
+    if is_vocab_parallel_greedy_enabled():
+        if not _can_use_unmodified_greedy_logits(reqs):
+            raise RuntimeError("LIGHTLLM_VOCAB_PARALLEL_GREEDY only supports unmodified greedy requests")
+        return unpack_vocab_parallel_greedy(logits)
+
     (
         b_req_idx,
         b_temperatures,

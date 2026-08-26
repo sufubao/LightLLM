@@ -7,6 +7,10 @@ from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerW
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
+    is_vocab_parallel_greedy_enabled,
+    vocab_parallel_greedy,
+)
 from lightllm.distributed.communication_op import all_gather
 
 
@@ -80,7 +84,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if prompt_logics_hiddens is not None:
             prompt_token_num = prompt_logics_hiddens.shape[0]
             infer_state.prompt_logics = self._lm_head_and_gather(
-                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state
+                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state, force_full_logits=True
             )
 
         return ans_logics
@@ -91,6 +95,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         token_num: int,
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
+        force_full_logits: bool = False,
     ) -> torch.Tensor:
         normed = self._norm(hidden, infer_state, layer_weight)
         normed = normed.permute(1, 0).view(-1, token_num)
@@ -98,6 +103,15 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         normed = None
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
+        if is_vocab_parallel_greedy_enabled() and not force_full_logits:
+            return vocab_parallel_greedy(
+                logic_batch,
+                vocab_size=vocab_size,
+                tp_world_size=self.tp_world_size_,
+                group=infer_state.dist_group,
+                alloc_func=self.alloc_tensor,
+            )
+
         if self.tp_world_size_ == 1:
             gather_data = logic_batch
         else:

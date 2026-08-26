@@ -45,6 +45,10 @@ from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
+    is_vocab_parallel_greedy_enabled,
+    unpack_vocab_parallel_greedy,
+)
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
@@ -383,6 +387,13 @@ class ModeBackend:
         仅 ``--enable_rl`` 时做真实 rank；否则返回 GPU 常量 ``-1``，避免 O(batch * vocab) 比较。
         下游 async_copy 在同样条件下会忽略该返回值。
         """
+        if is_vocab_parallel_greedy_enabled():
+            return g_pin_mem_manager.get_const_gpu_tensor(
+                key="next_token_ranks",
+                shape=next_token_ids.shape,
+                fill_value=1 if self.args.enable_rl else -1,
+                dtype=torch.int32,
+            )
         if not self.args.enable_rl:
             return g_pin_mem_manager.get_const_gpu_tensor(
                 key="next_token_ranks",
@@ -840,10 +851,16 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
+        if is_vocab_parallel_greedy_enabled():
+            token_ids, _ = unpack_vocab_parallel_greedy(logits)
+            return token_ids
         return torch.argmax(logits, dim=-1)
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         logits = model_output.logits
+        if is_vocab_parallel_greedy_enabled():
+            token_ids, token_logprobs = unpack_vocab_parallel_greedy(logits)
+            return token_ids, torch.exp(token_logprobs)
         probs = torch.softmax(logits, dim=-1)
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
         return draft_next_token_ids_gpu, max_probs
@@ -860,6 +877,8 @@ class ModeBackend:
     ):
 
         if mask_func is not None:
+            if is_vocab_parallel_greedy_enabled():
+                raise RuntimeError("LIGHTLLM_VOCAB_PARALLEL_GREEDY does not support constrained logits")
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
 

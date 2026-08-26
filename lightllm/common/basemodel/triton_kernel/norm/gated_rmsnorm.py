@@ -128,9 +128,7 @@ def gated_rmsnorm_forward(
         stride_z_head = 0
     else:
         assert z.shape[-1] == N, f"z.shape[-1]={z.shape[-1]} must match N={N}"
-        assert z.shape[0] * z.shape[1] == M, (
-            f"z token/head rows={z.shape[0] * z.shape[1]} must match M={M}"
-        )
+        assert z.shape[0] * z.shape[1] == M, f"z token/head rows={z.shape[0] * z.shape[1]} must match M={M}"
         z_heads = z.shape[1]
         stride_z_token = z.stride(0)
         stride_z_head = z.stride(1)

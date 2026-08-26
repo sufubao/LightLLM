@@ -3,7 +3,8 @@ import torch
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_triton_autotune_level
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneLevel
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
@@ -37,6 +38,7 @@ class LinearAttBackend(BaseAttBackend, ABC):
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
         self.mtp_step = get_env_start_args().mtp_step
+        self._mtp_autotuned_shapes = set()
 
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
@@ -392,23 +394,40 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
         # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
         # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
-        core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            initial_state=ssm_states,
-            cu_seqlens=cu_seqlens_q,
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            ssm_state_write_indices=self.b_ssm_buffer_idx,
-            num_accepted_tokens=self.b_num_accepted_tokens,
-            A_log=layer_weight.linear_A_log.weight,
-            dt_bias=layer_weight.linear_dt_bias.weight,
-            a_raw=a,
-            b_raw=b,
-            fixed_seq_len=(
-                0
-                if backend.uses_dynamic_spec_verify_layout()
-                else backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model) + 1
-            ),
+        fixed_seq_len = (
+            0
+            if backend.uses_dynamic_spec_verify_layout()
+            else backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model) + 1
         )
+        tune_key = (query.shape[1], len(cu_seqlens_q) - 1, fixed_seq_len)
+        tune_now = (
+            get_triton_autotune_level() in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
+            and getattr(infer_state, "is_cuda_graph", False)
+            and not torch.cuda.is_current_stream_capturing()
+            and not Autotuner.is_autotune_warmup()
+            and tune_key not in backend._mtp_autotuned_shapes
+        )
+        if tune_now:
+            Autotuner.start_autotune_warmup()
+        try:
+            core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                initial_state=ssm_states,
+                cu_seqlens=cu_seqlens_q,
+                ssm_state_indices=self.b_ssm_buffer_idx,
+                ssm_state_write_indices=self.b_ssm_buffer_idx,
+                num_accepted_tokens=self.b_num_accepted_tokens,
+                A_log=layer_weight.linear_A_log.weight,
+                dt_bias=layer_weight.linear_dt_bias.weight,
+                a_raw=a,
+                b_raw=b,
+                fixed_seq_len=fixed_seq_len,
+            )
+        finally:
+            if tune_now:
+                Autotuner.end_autotune_warmup()
+        if tune_now:
+            backend._mtp_autotuned_shapes.add(tune_key)
         return core_attn_out

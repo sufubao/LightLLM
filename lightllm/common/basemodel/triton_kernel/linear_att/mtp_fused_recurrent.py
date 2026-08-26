@@ -15,6 +15,40 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import autotune
+
+
+_MTP_RECURRENT_BV_SIZES = (4, 8, 16, 32, 64)
+
+
+def _get_mtp_fused_recurrent_configs():
+    return [{"BV": bv, "num_stages": num_stages} for bv in _MTP_RECURRENT_BV_SIZES for num_stages in (1, 2, 3)]
+
+
+def _get_mtp_fused_recurrent_static_key(q, v, initial_state, fixed_seq_len):
+    return {
+        "H": q.shape[2],
+        "HV": v.shape[2],
+        "K": q.shape[3],
+        "V": v.shape[3],
+        "dtype": str(q.dtype),
+        "state_dtype": str(initial_state.dtype),
+        "fixed_seq_len": int(fixed_seq_len),
+    }
+
+
+def _get_mtp_fused_recurrent_run_key(q, cu_seqlens):
+    sequence_count = int(cu_seqlens.shape[0] - 1)
+    total_tokens = int(q.shape[1])
+    return sequence_count * 10 ** 9 + total_tokens
+
+
+def _default_mtp_fused_recurrent_config(V):
+    return {
+        "BV": min(triton.next_power_of_2(V), 8),
+        "num_stages": 3,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Triton kernel
@@ -140,6 +174,13 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
 # ---------------------------------------------------------------------------
 
 
+@autotune(
+    kernel_name="mtp_fused_recurrent_gated_delta_rule:v1",
+    configs_gen_func=_get_mtp_fused_recurrent_configs,
+    static_key_func=_get_mtp_fused_recurrent_static_key,
+    run_key_func=_get_mtp_fused_recurrent_run_key,
+    mutates_args=["initial_state"],
+)
 def mtp_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -153,7 +194,8 @@ def mtp_fused_recurrent_gated_delta_rule(
     dt_bias: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
-    fixed_seq_len: int = 0,
+    fixed_seq_len: int,
+    run_config: dict = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -203,20 +245,17 @@ def mtp_fused_recurrent_gated_delta_rule(
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw)
     BK = triton.next_power_of_2(K)
     assert K == BK, f"K={K} must be a power of 2"
-    # Qwen3.5 uses V=128. A 16-wide tile halves the program count versus the
-    # upstream 8-wide tile, while one warp is fastest for this small KxBV
-    # recurrent state on H100/H200 (and avoids the extra warp synchronization).
-    BV = min(triton.next_power_of_2(V), 16)
-    num_warps = 1
-    num_stages = 3
+    if run_config is None:
+        run_config = _default_mtp_fused_recurrent_config(V)
+    BV = run_config["BV"]
+    num_stages = run_config["num_stages"]
     NV = triton.cdiv(V, BV)
 
-    o = q.new_empty(v.shape)
+    output = q.new_empty(v.shape)
     final_state = initial_state
-
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
-    stride_o_tok = o.stride(1)
+    stride_o_tok = output.stride(1)
     assert stride_o_tok == HV * V, f"stride_o_tok={stride_o_tok} must be HV*V"
     stride_state_hv = K * V
 
@@ -231,7 +270,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         q=q,
         k=k,
         v=v,
-        o=o,
+        o=output,
         h0=initial_state,
         ht=final_state,
         cu_seqlens=cu_seqlens,
@@ -265,10 +304,10 @@ def mtp_fused_recurrent_gated_delta_rule(
         SOFTPLUS_BETA=1.0,
         SOFTPLUS_THRESHOLD=20.0,
         FIXED_SEQ_LEN=fixed_seq_len,
-        num_warps=num_warps,
+        num_warps=1,
         num_stages=num_stages,
     )
-    return o, final_state
+    return output, final_state
 
 
 # ---------------------------------------------------------------------------

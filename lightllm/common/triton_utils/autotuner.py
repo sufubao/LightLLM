@@ -116,6 +116,11 @@ class Autotuner:
         self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
+        self._arg_defaults = {
+            param.name: param.default
+            for param in inspect.signature(self.fn).parameters.values()
+            if param.default is not inspect.Parameter.empty
+        }
 
         self._static_key_func_param_names = [
             name for name, _ in inspect.signature(self.static_key_func).parameters.items()
@@ -406,6 +411,8 @@ class Autotuner:
             pos = self._argname_to_pos.get(name, None)
             if pos is not None and pos < len(args):
                 values.append(args[pos])
+            elif name in self._arg_defaults:
+                values.append(self._arg_defaults[name])
             else:
                 raise KeyError(f"Missing argument '{name}' required by key function")
         return tuple(values)

@@ -248,10 +248,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             dtype=torch.int32,
             device=self.infer_state.b_req_idx.device,
         )
-        # Keep a strided view instead of copying one request index per MTP
-        # group for every GDN layer.  The MTP conv kernel consumes the tensor's
-        # actual stride, and advanced indexing below accepts non-contiguous
-        # indices, so materializing this tiny vector only adds a GPU launch.
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0]
         self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
         self._init_mtp_ssm_buffer_idx(mtp_size)
@@ -398,9 +394,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             if backend.uses_dynamic_spec_verify_layout()
             else backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model) + 1
         )
-        # CUDA Graph runs one eager warmup per batch shape. Qwen3Next layer 0
-        # is the first GDN layer whenever linear attention is enabled, so it
-        # can tune once for the shape and all later layers reuse the cache.
         tune_now = (
             get_triton_autotune_level() in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
             and getattr(infer_state, "is_cuda_graph", False)

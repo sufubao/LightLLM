@@ -22,7 +22,12 @@ _MTP_RECURRENT_BV_SIZES = (4, 8, 16, 32, 64)
 
 
 def _get_mtp_fused_recurrent_configs():
-    return [{"BV": bv, "num_stages": num_stages} for bv in _MTP_RECURRENT_BV_SIZES for num_stages in (1, 2, 3)]
+    return [
+        {"BV": bv, "num_warps": num_warps, "num_stages": num_stages}
+        for bv in _MTP_RECURRENT_BV_SIZES
+        for num_warps in (1, 2, 4, 8)
+        for num_stages in (1, 2, 3)
+    ]
 
 
 def _get_mtp_fused_recurrent_static_key(q, v, initial_state, fixed_seq_len):
@@ -46,6 +51,7 @@ def _get_mtp_fused_recurrent_run_key(q, cu_seqlens):
 def _default_mtp_fused_recurrent_config(V):
     return {
         "BV": min(triton.next_power_of_2(V), 8),
+        "num_warps": 1,
         "num_stages": 3,
     }
 
@@ -248,6 +254,7 @@ def _mtp_fused_recurrent_gated_delta_rule_autotuned(
     if run_config is None:
         run_config = _default_mtp_fused_recurrent_config(V)
     BV = run_config["BV"]
+    num_warps = run_config.get("num_warps", 1)
     num_stages = run_config["num_stages"]
     NV = triton.cdiv(V, BV)
 
@@ -304,7 +311,7 @@ def _mtp_fused_recurrent_gated_delta_rule_autotuned(
         SOFTPLUS_BETA=1.0,
         SOFTPLUS_THRESHOLD=20.0,
         FIXED_SEQ_LEN=fixed_seq_len,
-        num_warps=1,
+        num_warps=num_warps,
         num_stages=num_stages,
     )
     return output, final_state

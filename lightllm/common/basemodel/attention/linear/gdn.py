@@ -295,7 +295,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 ssm_states,
                 a,
                 b,
-                layer_num,
                 self.infer_state,
                 layer_weight,
             )
@@ -367,7 +366,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         ssm_states: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
-        layer_num: int,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
@@ -407,7 +405,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             get_triton_autotune_level() in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
             and getattr(infer_state, "is_cuda_graph", False)
             and infer_state.microbatch_index == 0
-            and layer_num == 0
+            and layer_weight.layer_num_ == 0
             and not torch.cuda.is_current_stream_capturing()
             and not Autotuner.is_autotune_warmup()
         )

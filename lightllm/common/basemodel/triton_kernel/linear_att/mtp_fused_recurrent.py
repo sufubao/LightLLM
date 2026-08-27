@@ -170,7 +170,7 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Public API — directly launches the triton kernel (no autograd.Function)
+# Autotuned implementation — directly launches the Triton kernel
 # ---------------------------------------------------------------------------
 
 
@@ -181,7 +181,7 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     run_key_func=_get_mtp_fused_recurrent_run_key,
     mutates_args=["initial_state"],
 )
-def mtp_fused_recurrent_gated_delta_rule(
+def _mtp_fused_recurrent_gated_delta_rule_autotuned(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -194,7 +194,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     dt_bias: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
-    fixed_seq_len: int = 0,
+    fixed_seq_len: int,
     run_config: dict = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
@@ -308,6 +308,44 @@ def mtp_fused_recurrent_gated_delta_rule(
         num_stages=num_stages,
     )
     return output, final_state
+
+
+def mtp_fused_recurrent_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    ssm_state_write_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    a_raw: torch.Tensor,
+    b_raw: torch.Tensor,
+    fixed_seq_len: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the autotuned fused recurrent GDN kernel.
+
+    ``fixed_seq_len=0`` preserves the variable-length behavior of the original
+    public API. The private autotuned implementation always receives the value
+    explicitly so its cache key does not depend on generic default handling.
+    """
+    return _mtp_fused_recurrent_gated_delta_rule_autotuned(
+        q=q,
+        k=k,
+        v=v,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        ssm_state_write_indices=ssm_state_write_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        a_raw=a_raw,
+        b_raw=b_raw,
+        fixed_seq_len=fixed_seq_len,
+    )
 
 
 # ---------------------------------------------------------------------------

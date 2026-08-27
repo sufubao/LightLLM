@@ -55,6 +55,11 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # The router sets this only when the current target-model batch is exactly
+    # greedy and needs no logit mutation. Draft models enable the same path at
+    # the model level because proposal generation always consumes argmax.
+    use_vocab_parallel_greedy: bool = False
+
     def to_cuda(self):
         self.check_input()
 
@@ -241,5 +246,22 @@ class ModelOutput:
             ),
             logits_logsumexp=(
                 self.logits_logsumexp.index_select(0, index) if self.logits_logsumexp is not None else None
+            ),
+        )
+
+    @classmethod
+    def concat_logits_rows(cls, outputs: List["ModelOutput"]) -> "ModelOutput":
+        """Concatenate compatible dense or vocab-parallel logit rows."""
+
+        assert outputs
+        has_vocab_parallel_logits = outputs[0].has_vocab_parallel_logits
+        assert all(output.has_vocab_parallel_logits == has_vocab_parallel_logits for output in outputs)
+        return cls(
+            logits=torch.cat([output.logits for output in outputs], dim=0),
+            logits_token_ids=(
+                torch.cat([output.logits_token_ids for output in outputs], dim=0) if has_vocab_parallel_logits else None
+            ),
+            logits_logsumexp=(
+                torch.cat([output.logits_logsumexp for output in outputs], dim=0) if has_vocab_parallel_logits else None
             ),
         )

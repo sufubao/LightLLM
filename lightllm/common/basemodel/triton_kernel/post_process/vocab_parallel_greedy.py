@@ -11,6 +11,14 @@ from lightllm.common.basemodel.triton_kernel.transpose_convert import (
     transpose_convert_2d,
 )
 from lightllm.distributed.communication_op import all_gather_into_tensor
+from lightllm.utils.envs_utils import enable_env_vars
+
+
+VOCAB_PARALLEL_GREEDY_ENV = "LIGHTLLM_VOCAB_PARALLEL_GREEDY"
+
+
+def is_vocab_parallel_greedy_enabled() -> bool:
+    return enable_env_vars(VOCAB_PARALLEL_GREEDY_ENV)
 
 
 @triton.jit

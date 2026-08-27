@@ -7,7 +7,7 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 
 
-def test_vocab_parallel_metadata_follows_row_selection():
+def test_vocab_parallel_metadata_follows_row_operations():
     output = ModelOutput(
         logits=torch.tensor([[8.0], [7.0], [6.0]]),
         logits_token_ids=torch.tensor([[4], [9], [2]]),
@@ -15,10 +15,26 @@ def test_vocab_parallel_metadata_follows_row_selection():
     )
 
     selected = output.index_select_logits_rows(torch.tensor([2, 0]))
+    combined = ModelOutput.concat_logits_rows([selected, output.index_select_logits_rows(torch.tensor([1]))])
 
-    torch.testing.assert_close(selected.logits.view(-1), torch.tensor([6.0, 8.0]))
-    torch.testing.assert_close(selected.logits_token_ids.view(-1), torch.tensor([2, 4]))
-    torch.testing.assert_close(selected.logits_logsumexp, torch.tensor([6.75, 8.5]))
+    torch.testing.assert_close(combined.logits.view(-1), torch.tensor([6.0, 8.0, 7.0]))
+    torch.testing.assert_close(combined.logits_token_ids.view(-1), torch.tensor([2, 4, 9]))
+    torch.testing.assert_close(combined.logits_logsumexp, torch.tensor([6.75, 8.5, 7.25]))
+
+
+def test_cuda_graph_contract_falls_back_for_dense_target_batch(monkeypatch):
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.is_mtp_draft_model = False
+    sparse_input = SimpleNamespace(use_vocab_parallel_greedy=True)
+    dense_input = SimpleNamespace(use_vocab_parallel_greedy=False)
+
+    monkeypatch.setattr(basemodel, "is_vocab_parallel_greedy_enabled", lambda: True)
+    assert model._is_cuda_graph_output_compatible(sparse_input)
+    assert not model._is_cuda_graph_output_compatible(dense_input)
+    assert not model._is_cuda_graph_output_compatible(sparse_input, dense_input)
+
+    model.is_mtp_draft_model = True
+    assert model._is_cuda_graph_output_compatible(dense_input)
 
 
 def test_decode_unpad_slices_spec_output_with_logits():

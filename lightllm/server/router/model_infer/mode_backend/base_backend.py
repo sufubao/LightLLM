@@ -377,12 +377,20 @@ class ModeBackend:
             )
         return next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
-    def _get_next_token_ranks(self, logits: torch.Tensor, next_token_ids: torch.Tensor) -> torch.Tensor:
+    def _get_next_token_ranks(self, model_output: ModelOutput, next_token_ids: torch.Tensor) -> torch.Tensor:
         """计算（或占位）每个 next token 在 vocab 上的 1-based rank（GPU tensor）。
 
         仅 ``--enable_rl`` 时做真实 rank；否则返回 GPU 常量 ``-1``，避免 O(batch * vocab) 比较。
         下游 async_copy 在同样条件下会忽略该返回值。
         """
+        if model_output.has_vocab_parallel_logits:
+            assert model_output.logits.shape[1] == 1
+            return g_pin_mem_manager.get_const_gpu_tensor(
+                key="next_token_ranks",
+                shape=next_token_ids.shape,
+                fill_value=1 if self.args.enable_rl else -1,
+                dtype=torch.int32,
+            )
         if not self.args.enable_rl:
             return g_pin_mem_manager.get_const_gpu_tensor(
                 key="next_token_ranks",
@@ -390,8 +398,8 @@ class ModeBackend:
                 fill_value=-1,
                 dtype=torch.int32,
             )
-        selected_logits = logits.gather(1, next_token_ids.long().view(-1, 1))
-        return (logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
+        selected_logits = model_output.logits.gather(1, next_token_ids.long().view(-1, 1))
+        return (model_output.logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
 
     def _capture_prompt_logprobs_if_needed(
         self,
@@ -883,7 +891,7 @@ class ModeBackend:
 
     def _sample_and_scatter_token(
         self,
-        logits: torch.Tensor,
+        model_output: ModelOutput,
         b_req_idx: torch.Tensor,
         b_mtp_index: torch.Tensor,
         run_reqs: List[InferReq],
@@ -892,12 +900,15 @@ class ModeBackend:
         mask_func: Optional[Callable] = None,
     ):
 
+        logits = model_output.logits
+
         if mask_func is not None:
+            assert not model_output.has_vocab_parallel_logits, "constrained sampling requires dense logits"
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
 
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
-        next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
+        next_token_ids, next_token_logprobs = sample(model_output, run_reqs, self.eos_id)
+        next_token_ranks = self._get_next_token_ranks(model_output, next_token_ids)
         b_has_out = None
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(

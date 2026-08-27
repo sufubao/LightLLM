@@ -23,6 +23,9 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
+    is_vocab_parallel_greedy_enabled,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
@@ -382,6 +385,15 @@ class TpPartBaseModel:
         else:
             return self._decode(model_input)
 
+    def _is_cuda_graph_output_compatible(self, *model_inputs: ModelInput) -> bool:
+        """Whether inputs match the dense/sparse contract captured at startup."""
+
+        return (
+            self.is_mtp_draft_model
+            or not is_vocab_parallel_greedy_enabled()
+            or all(model_input.use_vocab_parallel_greedy for model_input in model_inputs)
+        )
+
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
@@ -389,7 +401,7 @@ class TpPartBaseModel:
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_token_healing = self.is_token_healing
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
-        infer_state.use_vocab_parallel_greedy = self.is_mtp_draft_model
+        infer_state.use_vocab_parallel_greedy = self.is_mtp_draft_model or model_input.use_vocab_parallel_greedy
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
@@ -655,9 +667,13 @@ class TpPartBaseModel:
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
         infer_max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        use_cuda_graph = self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size,
-            max_len_in_batch=infer_max_kv_seq_len,
+        use_cuda_graph = (
+            self._is_cuda_graph_output_compatible(model_input)
+            and self.graph is not None
+            and self.graph.can_run(
+                batch_size=infer_batch_size,
+                max_len_in_batch=infer_max_kv_seq_len,
+            )
         )
         need_capture = False
         if use_cuda_graph:
@@ -913,7 +929,11 @@ class TpPartBaseModel:
         infer_batch_size = max(1, origin_batch_size0, origin_batch_size1)
         infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
 
-        if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
+        if (
+            self._is_cuda_graph_output_compatible(model_input0, model_input1)
+            and self.graph is not None
+            and self.graph.can_run(infer_batch_size, max_len_in_batch)
+        ):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
             need_capture = self.graph.need_capture(infer_batch_size)
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)

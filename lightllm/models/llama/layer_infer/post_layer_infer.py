@@ -24,6 +24,10 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
         return layer_weight.final_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
+    def _apply_logit_postprocessing(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply model-specific transforms while the tensor still contains logits."""
+        return logits
+
     def _slice_get_last_input(self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo):
         embed_dim_ = input_embdings.shape[1]
         if infer_state.is_prefill and infer_state.is_token_healing:
@@ -103,6 +107,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
         if infer_state.use_vocab_parallel_greedy and not force_full_logits:
+            # Elementwise model transforms commute with vocabulary sharding and
+            # must run before the local reduction (for example Gemma4 softcap).
+            logic_batch = self._apply_logit_postprocessing(logic_batch)
             logits, token_ids, logsumexp = vocab_parallel_greedy(
                 logic_batch,
                 vocab_size=vocab_size,
@@ -130,7 +137,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
-        return ans_logics
+        return self._apply_logit_postprocessing(ans_logics)
 
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight

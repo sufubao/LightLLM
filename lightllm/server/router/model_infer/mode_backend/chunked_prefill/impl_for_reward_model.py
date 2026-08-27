@@ -17,6 +17,8 @@ class RewardModelBackend(ChunkedPrefillBackend):
 
         assert self.disable_chunked_prefill is True
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        # Reward heads return scalar scores rather than vocabulary logits.
+        model_input.use_vocab_parallel_greedy = False
 
         model_output = self.model.forward(model_input)
         scores: torch.Tensor = model_output.logits

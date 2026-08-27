@@ -38,7 +38,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
         self.mtp_step = get_env_start_args().mtp_step
-        self._mtp_autotuned_shapes = set()
 
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
@@ -296,6 +295,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 ssm_states,
                 a,
                 b,
+                layer_num,
                 self.infer_state,
                 layer_weight,
             )
@@ -367,6 +367,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         ssm_states: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
+        layer_num: int,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
@@ -399,13 +400,16 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             if backend.uses_dynamic_spec_verify_layout()
             else backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model) + 1
         )
-        tune_key = (query.shape[1], len(cu_seqlens_q) - 1, fixed_seq_len)
+        # CUDA Graph runs one eager warmup per batch shape. Qwen3Next layer 0
+        # is the first GDN layer whenever linear attention is enabled, so it
+        # can tune once for the shape and all later layers reuse the cache.
         tune_now = (
             get_triton_autotune_level() in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
             and getattr(infer_state, "is_cuda_graph", False)
+            and infer_state.microbatch_index == 0
+            and layer_num == 0
             and not torch.cuda.is_current_stream_capturing()
             and not Autotuner.is_autotune_warmup()
-            and tune_key not in backend._mtp_autotuned_shapes
         )
         if tune_now:
             Autotuner.start_autotune_warmup()
@@ -428,6 +432,4 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         finally:
             if tune_now:
                 Autotuner.end_autotune_warmup()
-        if tune_now:
-            backend._mtp_autotuned_shapes.add(tune_key)
         return core_attn_out

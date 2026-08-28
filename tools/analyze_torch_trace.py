@@ -45,17 +45,15 @@ def main() -> None:
     total_calls = int(sum(values[1] for values in totals.values()))
     print(f"CUDA total: {total_us / 1000:.3f} ms across {total_calls} kernels")
     print("Graph totals:")
-    for graph_id, (duration, count) in sorted(
-        graph_totals.items(), key=lambda item: item[1][0], reverse=True
-    ):
+    for graph_id, (duration, count) in sorted(graph_totals.items(), key=lambda item: item[1][0], reverse=True):
         print(
             f"  graph={graph_id:<5} total_ms={duration / 1000:10.3f} "
             f"share={duration / total_us:7.2%} calls={int(count)}"
         )
     print("Kernel totals:")
-    for name, (duration, count, maximum) in sorted(
-        totals.items(), key=lambda item: item[1][0], reverse=True
-    )[: args.top]:
+    for name, (duration, count, maximum) in sorted(totals.items(), key=lambda item: item[1][0], reverse=True)[
+        : args.top
+    ]:
         print(
             f"  total_ms={duration / 1000:10.3f} share={duration / total_us:7.2%} "
             f"calls={int(count):7d} avg_us={duration / count:9.3f} "

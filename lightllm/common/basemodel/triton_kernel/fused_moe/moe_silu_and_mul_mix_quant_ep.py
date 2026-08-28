@@ -134,9 +134,7 @@ def silu_and_mul_masked_post_quant_fwd(
     finfo = torch.finfo(torch.float8_e4m3fn)
     fp8_max = finfo.max
     fp8_min = -fp8_max
-    assert (limit is None and alpha is None) or (
-        limit is not None and alpha is not None
-    )
+    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
 
     _silu_and_mul_post_quant_kernel[grid](
         input,

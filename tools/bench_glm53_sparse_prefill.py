@@ -58,7 +58,7 @@ def measure_ms(
         "median_ms": statistics.median(samples),
         "min_ms": min(samples),
         "max_ms": max(samples),
-        "peak_delta_gib": peak_delta_bytes / 2**30,
+        "peak_delta_gib": peak_delta_bytes / 2 ** 30,
     }
 
 
@@ -94,7 +94,7 @@ def main() -> None:
         device="cuda",
     )
     indices = make_causal_indices(args.tokens, args.sequence_length, args.topk)
-    scale = args.head_dim**-0.5
+    scale = args.head_dim ** -0.5
 
     padded_q = q.new_zeros((args.tokens, args.required_heads, args.head_dim))
     padded_q[:, : args.local_heads].copy_(q)
@@ -111,13 +111,9 @@ def main() -> None:
     def flashmla_lightllm_path() -> torch.Tensor:
         q_input = q.new_zeros((args.tokens, args.required_heads, args.head_dim))
         q_input[:, : args.local_heads].copy_(q)
-        return flash_mla_sparse_fwd(
-            q_input,
-            kv,
-            indices,
-            scale,
-            d_v=args.head_dim,
-        )[0][:, : args.local_heads]
+        return flash_mla_sparse_fwd(q_input, kv, indices, scale, d_v=args.head_dim,)[
+            0
+        ][:, : args.local_heads]
 
     def tilelang_lightllm_path() -> torch.Tensor:
         output = tilelang_sparse_fwd(

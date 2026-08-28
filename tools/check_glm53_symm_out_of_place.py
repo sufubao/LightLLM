@@ -36,9 +36,7 @@ def _check(reducer: SymmMemAllreduce, *, inference: bool) -> None:
 def main() -> None:
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(
-        "nccl", device_id=torch.device("cuda", local_rank)
-    )
+    dist.init_process_group("nccl", device_id=torch.device("cuda", local_rank))
     reducer = SymmMemAllreduce(
         dist.group.WORLD,
         torch.cuda.current_device(),

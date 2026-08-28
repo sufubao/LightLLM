@@ -33,9 +33,7 @@ class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
         self.enable_cc_method = False
         self.is_mtp_layer = self.layer_num_ >= self.network_config_["num_hidden_layers"]
         self.is_linear_attention_layer = (
-            not self.is_mtp_layer
-            and self.network_config_["layer_types"][self.layer_num_]
-            == "linear_attention"
+            not self.is_mtp_layer and self.network_config_["layer_types"][self.layer_num_] == "linear_attention"
         )
         linear = self.network_config_["linear_attn_config"]
         self.linear_num_heads = linear["num_heads"]

@@ -134,8 +134,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
                     and all(isinstance(value, torch.Tensor) for value in attr_value.values())
                 ):
                     callback_tensor_dicts[attr_name] = {
-                        key: tensor_to_no_ref_tensor(value.contiguous())
-                        for key, value in attr_value.items()
+                        key: tensor_to_no_ref_tensor(value.contiguous()) for key, value in attr_value.items()
                     }
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
             pre_capture_graph.__exit__(None, None, None)

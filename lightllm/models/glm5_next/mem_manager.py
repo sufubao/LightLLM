@@ -15,9 +15,7 @@ class Glm5NextMemOperator(LinearAttMemOperator):
             destindex_copy_kv,
         )
 
-        output = self.mem_manager.kv_buffer[layer_index][
-            :, :, : self.mem_manager.mla_head_dim
-        ]
+        output = self.mem_manager.kv_buffer[layer_index][:, :, : self.mem_manager.mla_head_dim]
         destindex_copy_kv(kv, mem_index, output)
 
 

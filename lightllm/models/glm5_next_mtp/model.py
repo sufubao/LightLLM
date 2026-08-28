@@ -37,9 +37,7 @@ class Glm5NextMTPModel(Glm5NextTpPartModel):
 
     def __init__(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop(
-            "mtp_previous_draft_models"
-        )
+        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         super().__init__(kvargs)
 
     def _init_custom(self):
@@ -67,9 +65,7 @@ class Glm5NextMTPModel(Glm5NextTpPartModel):
             )
         ]
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
-        self.pre_post_weight.lm_head_weight_ = (
-            self.main_model.pre_post_weight.lm_head_weight_
-        )
+        self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
@@ -78,11 +74,7 @@ class Glm5NextMTPModel(Glm5NextTpPartModel):
         logical_layer = len(self.main_model.layers_infer) + sum(
             len(model.layers_infer) for model in self.mtp_previous_draft_models
         )
-        self.layers_infer = [
-            self.transformer_layer_infer_class(
-                logical_layer, network_config=self.config
-            )
-        ]
+        self.layers_infer = [self.transformer_layer_infer_class(logical_layer, network_config=self.config)]
 
     def _init_some_value(self):
         super()._init_some_value()

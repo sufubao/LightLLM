@@ -84,9 +84,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self.scoring_func = network_config.get("scoring_func", "softmax")
         self.swiglu_limit = network_config.get("swiglu_limit")
         self.swiglu_alpha = network_config.get("swiglu_alpha", 1.0)
-        self.swiglu_clamp_up_add_one = network_config.get(
-            "swiglu_clamp_up_add_one", True
-        )
+        self.swiglu_clamp_up_add_one = network_config.get("swiglu_clamp_up_add_one", True)
 
     def _init_redundancy_expert_params(self):
         self.redundancy_expert_num = get_redundancy_expert_num()
@@ -294,13 +292,10 @@ class FusedMoeWeight(BaseWeightTpl):
 
     def verify_load(self):
         if getattr(self, "_sm90_mega_moe_weights_prepared", False):
-            weight_load_ok = all(
-                all(_weight_pack.load_ok) for _weight_pack in self.w2_list
-            )
+            weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w2_list)
         else:
             weight_load_ok = all(
-                all(_weight_pack.load_ok)
-                for _weight_pack in self.w1_list + self.w2_list + self.w3_list
+                all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list
             )
         per_expert_scale_load_ok = (
             True if self.per_expert_scale is None else getattr(self.per_expert_scale, "load_ok", False)
@@ -309,9 +304,7 @@ class FusedMoeWeight(BaseWeightTpl):
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
         load_ok = weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
-        if load_ok and self.enable_ep_moe and not getattr(
-            self, "_sm90_mega_moe_weights_prepared", False
-        ):
+        if load_ok and self.enable_ep_moe and not getattr(self, "_sm90_mega_moe_weights_prepared", False):
             from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
                 prepare_sm90_mega_moe_weights,
                 use_sm90_mega_moe,

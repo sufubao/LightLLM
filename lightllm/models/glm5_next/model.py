@@ -18,6 +18,9 @@ from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import (
     Glm5NextTransformerLayerInfer,
 )
+from lightllm.models.glm5_next.layer_infer.pre_layer_infer import (
+    Glm5NextMultimodalPreLayerInfer,
+)
 from lightllm.models.glm5_next.layer_weights.pre_and_post_layer_weight import (
     Glm5NextPreAndPostLayerWeight,
 )
@@ -182,19 +185,22 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
         # GLM-5 sparse MLA is entirely NoPE.  Keep zero-width tables so the
         # generic infer-state position setup remains valid without allocating
         # a million-token rotary cache.
-        max_length = max(
-            self.config["max_position_embeddings"], self.max_seq_length or 0
-        )
-        self._cos_cached = torch.empty(
-            (max_length, 0), dtype=self.data_type, device="cuda"
-        )
+        max_length = max(self.config["max_position_embeddings"], self.max_seq_length or 0)
+        self._cos_cached = torch.empty((max_length, 0), dtype=self.data_type, device="cuda")
         self._sin_cached = torch.empty_like(self._cos_cached)
         dist_group_manager.new_deepep_group(
             n_routed_experts=self.config["n_routed_experts"],
             hidden_size=self.config["hidden_size"],
-            expert_quant_method_names=dist_group_manager.get_moe_quant_methods(
-                self.trans_layers_weight
-            ),
+            expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
             num_experts_per_tok=self.config["num_experts_per_tok"],
             moe_intermediate_size=self.config["moe_intermediate_size"],
         )
+
+
+@ModelRegistry(
+    "glm5_next",
+    is_multimodal=True,
+    condition=lambda model_cfg: model_cfg.get("vision_config") is not None,
+)
+class Glm5NextMultimodalTpPartModel(Glm5NextTpPartModel):
+    pre_layer_infer_class = Glm5NextMultimodalPreLayerInfer

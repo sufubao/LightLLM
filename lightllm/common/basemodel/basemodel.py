@@ -101,15 +101,9 @@ class TpPartBaseModel:
         )
         self.logical_graph_max_batch_size = self.graph_max_batch_size
         self.mtp_manager = MtpManager.get_instance()
-        self.decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(
-            self.is_mtp_draft_model
-        )
-        cuda_graph_batch_multiplier = self.mtp_manager.get_decode_cuda_graph_batch_multiplier(
-            self.is_mtp_draft_model
-        )
-        self.graph_max_batch_size = (
-            self.graph_max_batch_size * cuda_graph_batch_multiplier
-        )
+        self.decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        cuda_graph_batch_multiplier = self.mtp_manager.get_decode_cuda_graph_batch_multiplier(self.is_mtp_draft_model)
+        self.graph_max_batch_size = self.graph_max_batch_size * cuda_graph_batch_multiplier
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -297,9 +291,7 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
-        cuda_graph_batch_multiplier = self.mtp_manager.get_decode_cuda_graph_batch_multiplier(
-            self.is_mtp_draft_model
-        )
+        cuda_graph_batch_multiplier = self.mtp_manager.get_decode_cuda_graph_batch_multiplier(self.is_mtp_draft_model)
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
         extra_batch_sizes = None
         if self.mtp_manager.draft_model_needs_logical_batch_graphs(self.is_mtp_draft_model):
@@ -700,13 +692,8 @@ class TpPartBaseModel:
         # 向上对齐到 TP world size 的整数倍，保证后续切分得到合法 shape。
         infer_batch_size = max(1, origin_batch_size)
         if self.args.enable_tpsp_mix_mode:
-            decode_alignment = math.lcm(
-                self.tp_world_size_, self.decode_batch_multiplier
-            )
-            infer_batch_size = (
-                triton.cdiv(infer_batch_size, decode_alignment)
-                * decode_alignment
-            )
+            decode_alignment = math.lcm(self.tp_world_size_, self.decode_batch_multiplier)
+            infer_batch_size = triton.cdiv(infer_batch_size, decode_alignment) * decode_alignment
 
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
@@ -983,12 +970,8 @@ class TpPartBaseModel:
         origin_batch_size1 = model_input1.batch_size
         max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
         infer_batch_size = max(1, origin_batch_size0, origin_batch_size1)
-        decode_alignment = math.lcm(
-            self.tp_world_size_, self.decode_batch_multiplier
-        )
-        infer_batch_size = (
-            triton.cdiv(infer_batch_size, decode_alignment) * decode_alignment
-        )
+        decode_alignment = math.lcm(self.tp_world_size_, self.decode_batch_multiplier)
+        infer_batch_size = triton.cdiv(infer_batch_size, decode_alignment) * decode_alignment
 
         if (
             self._is_cuda_graph_output_compatible(model_input0, model_input1)

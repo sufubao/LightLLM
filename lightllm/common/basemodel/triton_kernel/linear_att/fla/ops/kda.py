@@ -46,12 +46,8 @@ def kda_safe_gate(
     head_count = a_log.numel()
     key_dim = gate_bias.numel() // head_count
     gate = raw_gate.float().view(*raw_gate.shape[:-1], head_count, key_dim)
-    amplitude = a_log.float().reshape(
-        *((1,) * (gate.ndim - 2)), head_count, 1
-    ).exp()
-    bias = gate_bias.float().reshape(
-        *((1,) * (gate.ndim - 2)), head_count, key_dim
-    )
+    amplitude = a_log.float().reshape(*((1,) * (gate.ndim - 2)), head_count, 1).exp()
+    bias = gate_bias.float().reshape(*((1,) * (gate.ndim - 2)), head_count, key_dim)
     return lower_bound * torch.sigmoid(amplitude * (gate + bias))
 
 
@@ -122,6 +118,8 @@ def fused_recurrent_kda(
         out=out,
         is_kda=True,
     )
+
+
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
@@ -179,29 +177,17 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
     A += (bos * H + i_h) * BT
     Aqk += (bos * H + i_h) * BT
 
-    p_b = tl.make_block_ptr(
-        beta + bos * H + i_h, (T,), (H,), (i_t * BT + i_i * BC,), (BC,), (0,)
-    )
+    p_b = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT + i_i * BC,), (BC,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,))
 
     b_A = tl.zeros([BC, BC], dtype=tl.float32)
     b_Aqk = tl.zeros([BC, BC], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(
-            q, (T, K), (H * K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0)
-        )
-        p_k = tl.make_block_ptr(
-            k, (T, K), (H * K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0)
-        )
-        p_g = tl.make_block_ptr(
-            g, (T, K), (H * K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0)
-        )
-        b_kt = tl.make_block_ptr(
-            k, (K, T), (1, H * K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1)
-        )
-        p_gk = tl.make_block_ptr(
-            g, (K, T), (1, H * K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1)
-        )
+        p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        p_g = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        b_kt = tl.make_block_ptr(k, (K, T), (1, H * K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
+        p_gk = tl.make_block_ptr(g, (K, T), (1, H * K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
 
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
@@ -223,13 +209,9 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
 
     b_A *= b_b[:, None]
 
-    p_A = tl.make_block_ptr(
-        A, (T, BT), (H * BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0)
-    )
+    p_A = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
     tl.store(p_A, b_A.to(A.dtype.element_ty), boundary_check=(0, 1))
-    p_Aqk = tl.make_block_ptr(
-        Aqk, (T, BT), (H * BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0)
-    )
+    p_Aqk = tl.make_block_ptr(Aqk, (T, BT), (H * BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
     tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -471,9 +453,7 @@ def recompute_w_u_fwd_kernel(
     p_b = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,))
 
-    p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
-    )
+    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_A = tl.load(p_A, boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
@@ -553,9 +533,7 @@ def recompute_w_u_fwd_kernel(
 
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
-            b_gn = tl.load(
-                gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.0
-            )
+            b_gn = tl.load(gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.0)
             b_kg = b_k * exp2(b_gn - b_gk)
 
             p_kg = tl.make_block_ptr(
@@ -726,9 +704,7 @@ def chunk_gla_fwd_kernel_o(
         (BT, BV),
         (1, 0),
     )
-    p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
-    )
+    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     # [BT, BV]
     b_v = tl.load(p_v, boundary_check=(0, 1))
     # [BT, BT]
@@ -786,11 +762,7 @@ def chunk_gla_fwd_o_gk(
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BD": BD}, num_warps=num_warps)
-        for BD in [32, 64]
-        for num_warps in [2, 4, 8]
-    ],
+    configs=[triton.Config({"BD": BD}, num_warps=num_warps) for BD in [32, 64] for num_warps in [2, 4, 8]],
     key=["H", "D", "BT", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
@@ -892,9 +864,7 @@ def fused_kda_gate_chunk_cumsum(
     lower_bound: float = -5.0,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
-        assert raw_g.shape[0] == 1, (
-            "Only batch size 1 is supported when cu_seqlens are provided"
-        )
+        assert raw_g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     B, T, H, D = raw_g.shape
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
@@ -1018,11 +988,7 @@ def chunk_kda_fwd(
     cu_seqlens: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     g = chunk_local_cumsum(
         g,
         chunk_size=chunk_size,

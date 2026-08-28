@@ -58,8 +58,7 @@ def use_sm100_mega_moe(quant_method: Any) -> bool:
 def use_sm90_mega_moe(quant_method: Any) -> bool:
     return (
         is_sm90_gpu()
-        and os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper()
-        in {"1", "ON", "TRUE"}
+        and os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper() in {"1", "ON", "TRUE"}
         and quant_method.method_name == "fp8w8a8-b128-deepgemm"
         and HAS_DEEPGEMM
         and hasattr(deep_gemm, "fp8_mega_moe")
@@ -162,15 +161,9 @@ def prepare_sm90_mega_moe_weights(w13: Any) -> None:
     granularity = 8
     half = n // 2
     assert half % granularity == 0
-    gate = weight[:, :half].reshape(
-        num_groups, half // granularity, granularity, *rest
-    )
-    up = weight[:, half:].reshape(
-        num_groups, half // granularity, granularity, *rest
-    )
-    w13.weight = torch.stack((gate, up), dim=2).reshape(
-        num_groups, n, *rest
-    )
+    gate = weight[:, :half].reshape(num_groups, half // granularity, granularity, *rest)
+    up = weight[:, half:].reshape(num_groups, half // granularity, granularity, *rest)
+    w13.weight = torch.stack((gate, up), dim=2).reshape(num_groups, n, *rest)
     w13.sm90_mega_moe_prepared = True
 
 
@@ -520,14 +513,7 @@ def fused_experts_impl(
                 async_finish=False,
                 allocate_on_comm_stream=False,
             )
-            (
-                recv_x,
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
-                handle,
-                _,
-            ) = buffer.dispatch(
+            (recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _,) = buffer.dispatch(
                 (qinput_tensor, input_scale),
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,

@@ -1,8 +1,8 @@
-# syntax=docker/dockerfile:1.7
-
-# This is the exact SGLang GLM-5.3 runtime used for the H100 measurements.
-ARG BASE_IMAGE=lmsysorg/sglang@sha256:e6f5482505e7502f791fe4615ad1fbec118cbbd6b44e98f2479b16b98b985ad6
+# This is the exact SGLang GLM-5.3 runtime used for the H200 validation.
+ARG BASE_IMAGE=lmsysorg/sglang@sha256:92afb4c878eef9cbb17ca9a2c1d15d5cda58585f90bbf5915a79f0f6284aad10
 FROM ${BASE_IMAGE} AS prepared
+
+ARG PIP_INDEX_URL
 
 WORKDIR /opt/lightllm
 
@@ -32,7 +32,7 @@ RUN python -m pip install --no-cache-dir --no-deps . && \
       /opt/sglang/lib/python3.12/site-packages/setuptools-*.dist-info \
       /opt/sglang/lib/python3.12/site-packages/wheel \
       /opt/sglang/lib/python3.12/site-packages/wheel-*.dist-info && \
-    python -c "import frozendict, hypercorn, importlib.metadata as metadata, importlib.util, lightllm.server.api_start, msgpack, rpyc, ujson; from sglang.srt.layers.moe.moe_runner.triton_utils import fused_moe; assert metadata.version('hypercorn') == '0.18.0'; assert msgpack.__version__ == '1.2.2'; assert rpyc.__version__ == '6.0.2'; assert importlib.util.find_spec('pip') is None; assert importlib.util.find_spec('setuptools') is None; print('Hardened LightLLM GLM-5.3 runtime import OK')" && \
+    python -c "import frozendict, hypercorn, importlib.metadata as metadata, importlib.util, lightllm.server.api_start, msgpack, redis, rpyc, ujson; from sglang.srt.layers.moe.moe_runner.triton_utils import fused_moe; assert metadata.version('hypercorn') == '0.18.0'; assert msgpack.__version__ == '1.2.2'; assert redis.__version__ == '7.3.0'; assert rpyc.__version__ == '6.0.2'; assert importlib.util.find_spec('pip') is None; assert importlib.util.find_spec('setuptools') is None; print('Hardened LightLLM GLM-5.3 runtime import OK')" && \
     test ! -e /etc/ssh/ssh_host_rsa_key && \
     test ! -e /sgl-workspace/sglang/python/sglang/multimodal_gen && \
     test ! -e /sgl-workspace/sglang/python/sglang/srt/disaggregation
@@ -47,7 +47,7 @@ ARG OCI_REVISION
 ARG OCI_SOURCE=https://github.com/sufubao/LightLLM
 ARG OCI_VERSION
 ARG BASE_NAME=lmsysorg/sglang:glm-5.3-flash
-ARG BASE_DIGEST=sha256:e6f5482505e7502f791fe4615ad1fbec118cbbd6b44e98f2479b16b98b985ad6
+ARG BASE_DIGEST=sha256:92afb4c878eef9cbb17ca9a2c1d15d5cda58585f90bbf5915a79f0f6284aad10
 
 COPY --from=prepared / /
 
@@ -55,13 +55,13 @@ LABEL org.opencontainers.image.created="${OCI_CREATED}" \
       org.opencontainers.image.revision="${OCI_REVISION}" \
       org.opencontainers.image.source="${OCI_SOURCE}" \
       org.opencontainers.image.version="${OCI_VERSION}" \
-      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100 TP8" \
+      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100/H200 TP8 multimodal" \
       org.opencontainers.image.base.name="${BASE_NAME}" \
       org.opencontainers.image.base.digest="${BASE_DIGEST}" \
       ai.lightllm.model="GLM-5.3-Flash" \
-      ai.lightllm.accelerator="NVIDIA H100 80GB" \
+      ai.lightllm.accelerator="NVIDIA H100/H200" \
       ai.lightllm.tensor-parallel-size="8" \
-      ai.lightllm.profile="throughput-c256" \
+      ai.lightllm.profile="multimodal-1m-c256" \
       ai.lightllm.security-profile="flattened-no-sglang-server-components"
 
 ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -94,7 +94,7 @@ ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sb
 WORKDIR /opt/lightllm
 
 RUN test "$(command -v python)" = /opt/sglang/bin/python && \
-    python -c "import hypercorn, importlib.metadata as metadata, lightllm.server.api_start, rpyc, torch; assert metadata.version('hypercorn') == '0.18.0'; assert rpyc.__version__ == '6.0.2'; print(torch.__version__)"
+    python -c "import hypercorn, importlib.metadata as metadata, lightllm.server.api_start, redis, rpyc, torch; assert metadata.version('hypercorn') == '0.18.0'; assert redis.__version__ == '7.3.0'; assert rpyc.__version__ == '6.0.2'; print(torch.__version__)"
 
 EXPOSE 8002
 STOPSIGNAL SIGTERM
@@ -103,6 +103,10 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
     CMD /opt/sglang/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/v1/models', timeout=3).read()" || exit 1
 
+# LightLLM reserves 36 tokens in its HTTP admission guard.  The token pool is
+# therefore request_limit + 36 so /v1/models advertises the full 1,048,576.
+# The 8,192-token DSA prefill chunk below is the H200-validated default; use
+# the conservative 1,024-token override documented for an 80 GB H100.
 CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--model_dir", "/model", \
      "--model_name", "glm-5.3-flash", \
@@ -111,16 +115,21 @@ CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--port", "8002", \
      "--httpserver_workers", "16", \
      "--mem_fraction", ".90", \
-     "--max_total_token_num", "335000", \
+     "--max_total_token_num", "1048612", \
      "--running_max_req_size", "256", \
-     "--max_req_total_len", "65500", \
+     "--max_req_total_len", "1048576", \
      "--batch_max_tokens", "65536", \
-     "--chunked_prefill_size", "65536", \
+     "--chunked_prefill_size", "8192", \
      "--linear_att_ssm_data_type", "bfloat16", \
-     "--graph_max_batch_size", "256", \
-     "--graph_split_batch_size", "4", \
-     "--graph_grow_step_size", "16", \
+     "--linear_att_cache_size", "256", \
+     "--disable_cudagraph", \
      "--enable_fused_shared_experts", \
+     "--max_image_pixels", "6272000", \
+     "--max_image_token_count", "8000", \
+     "--visual_tp", "1", \
+     "--visual_dp", "8", \
+     "--visual_infer_batch_size", "8", \
+     "--cache_capacity", "64", \
      "--schedule_time_interval", "0.001", \
      "--prefill_coalesce_interval", "0.5", \
      "--reasoning_parser", "glm45", \

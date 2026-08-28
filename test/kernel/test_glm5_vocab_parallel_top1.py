@@ -45,8 +45,10 @@ def test_vocab_parallel_top1_matches_full_vocab_softmax():
 
         local_start = rank * shard_size
         local_logits = full_logits[local_start : local_start + shard_size].contiguous()
+
         def alloc_func(shape, dtype, device):
             return torch.empty(shape, dtype=dtype, device=device)
+
         token_ids, token_probs = vocab_parallel_top1_and_prob(
             local_logits=local_logits,
             local_vocab_start_id=local_start,

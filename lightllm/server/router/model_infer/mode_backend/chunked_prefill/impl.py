@@ -32,9 +32,7 @@ class ChunkedPrefillBackend(ModeBackend):
         # Mega-MoE owns one symmetric communication workspace per rank.  Keep
         # the CPU pre/post pipeline enabled, but do not let its two host threads
         # enqueue a second model forward while that workspace is still live.
-        self._serialize_sm90_mega_moe_forwards = os.getenv(
-            "LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0"
-        ).upper() in {
+        self._serialize_sm90_mega_moe_forwards = os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper() in {
             "1",
             "ON",
             "TRUE",

@@ -123,22 +123,16 @@ def single_group_sigmoid_topk_kernel(
     ).to(tl.float32)
     old_scores = tl.sigmoid(hidden_states)
     if HAS_CORRECTION_BIAS:
-        scores = old_scores + tl.load(
-            correction_bias_ptr + offs_n, mask=valid, other=0.0
-        )
+        scores = old_scores + tl.load(correction_bias_ptr + offs_n, mask=valid, other=0.0)
     else:
         scores = old_scores
     scores = tl.where(valid, scores, -float("inf"))
 
     for topk_index in tl.static_range(0, TOPK_NUM):
         selected_index = tl.argmax(scores, axis=0)
-        selected_weight = tl.sum(
-            tl.where(offs_n == selected_index, old_scores, 0.0), axis=0
-        )
+        selected_weight = tl.sum(tl.where(offs_n == selected_index, old_scores, 0.0), axis=0)
         tl.store(
-            out_topk_weights
-            + token_index * out_topk_weights_stride_m
-            + topk_index,
+            out_topk_weights + token_index * out_topk_weights_stride_m + topk_index,
             selected_weight,
         )
         tl.store(
@@ -151,17 +145,13 @@ def single_group_sigmoid_topk_kernel(
         topk_offs = tl.arange(0, TOPK_BLOCK_SIZE)
         topk_mask = topk_offs < TOPK_NUM
         weights = tl.load(
-            out_topk_weights
-            + token_index * out_topk_weights_stride_m
-            + topk_offs,
+            out_topk_weights + token_index * out_topk_weights_stride_m + topk_offs,
             mask=topk_mask,
             other=0.0,
         )
         weight_sum = tl.sum(weights, axis=0)
         tl.store(
-            out_topk_weights
-            + token_index * out_topk_weights_stride_m
-            + topk_offs,
+            out_topk_weights + token_index * out_topk_weights_stride_m + topk_offs,
             weights / weight_sum,
             mask=topk_mask,
         )
@@ -201,13 +191,9 @@ def single_group_sigmoid_topk_bitonic_kernel(
     else:
         scores = old_scores
 
-    _, sorted_scores, sorted_indexes = argsort(
-        scores, old_scores, offs_n, descending=True
-    )
+    _, sorted_scores, sorted_indexes = argsort(scores, old_scores, offs_n, descending=True)
     if RENORMALIZE:
-        sum_scores = tl.sum(
-            tl.where(offs_n < TOPK_NUM, sorted_scores, 0.0)
-        )
+        sum_scores = tl.sum(tl.where(offs_n < TOPK_NUM, sorted_scores, 0.0))
         sorted_scores = sorted_scores / sum_scores
 
     tl.store(
@@ -355,18 +341,9 @@ def triton_grouped_topk(
 
     token_num, total_expert_num = gating_output.shape
 
-    if (
-        use_single_group_fast_path
-        and num_expert_group == 1
-        and topk_group == 1
-        and scoring_func == "sigmoid"
-    ):
-        out_topk_weights = torch.empty(
-            (token_num, topk), dtype=torch.float32, device="cuda"
-        )
-        out_topk_ids = torch.empty(
-            (token_num, topk), dtype=torch.long, device="cuda"
-        )
+    if use_single_group_fast_path and num_expert_group == 1 and topk_group == 1 and scoring_func == "sigmoid":
+        out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device="cuda")
+        out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device="cuda")
         single_group_sigmoid_topk_kernel[(token_num,)](
             gating_output,
             gating_output.stride(0),

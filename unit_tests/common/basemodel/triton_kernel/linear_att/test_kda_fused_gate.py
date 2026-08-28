@@ -33,13 +33,9 @@ def test_fused_kda_gate_matches_materialized_gate(sequence_length):
         device="cuda",
         dtype=torch.bfloat16,
     )
-    state_indices = torch.arange(token_count, device="cuda", dtype=torch.int32).view(
-        request_count, sequence_length
-    )
+    state_indices = torch.arange(token_count, device="cuda", dtype=torch.int32).view(request_count, sequence_length)
     cu_seqlens = torch.arange(request_count + 1, device="cuda", dtype=torch.int64) * sequence_length
-    accepted = torch.full(
-        (request_count,), sequence_length, device="cuda", dtype=torch.int32
-    )
+    accepted = torch.full((request_count,), sequence_length, device="cuda", dtype=torch.int32)
 
     reference_state = state.clone()
     reference, _ = fused_recurrent_gated_delta_rule(

@@ -41,20 +41,11 @@ def _hc_prepare_kernel(
 
     pre_raw = tl.load(mixes + token * mix_stride_m + stream_offsets)
     post_raw = tl.load(mixes + token * mix_stride_m + STREAMS + stream_offsets)
-    pre_values = tl.sigmoid(
-        pre_raw * tl.load(scale) + tl.load(base + stream_offsets)
-    ) + HC_EPS
-    post_values = POST_MULTIPLIER * tl.sigmoid(
-        post_raw * tl.load(scale + 1)
-        + tl.load(base + STREAMS + stream_offsets)
-    )
+    pre_values = tl.sigmoid(pre_raw * tl.load(scale) + tl.load(base + stream_offsets)) + HC_EPS
+    post_values = POST_MULTIPLIER * tl.sigmoid(post_raw * tl.load(scale + 1) + tl.load(base + STREAMS + stream_offsets))
 
-    logits = tl.load(
-        mixes + token * mix_stride_m + 2 * STREAMS + matrix_offsets
-    )
-    logits = logits * tl.load(scale + 2) + tl.load(
-        base + 2 * STREAMS + matrix_offsets
-    )
+    logits = tl.load(mixes + token * mix_stride_m + 2 * STREAMS + matrix_offsets)
+    logits = logits * tl.load(scale + 2) + tl.load(base + 2 * STREAMS + matrix_offsets)
     logits = tl.reshape(logits, (STREAMS, STREAMS))
     logits = logits - tl.max(logits, axis=1)[:, None]
     matrix = tl.exp(logits)
@@ -107,34 +98,20 @@ def _hc_prepare_prenorm_kernel(
     matrix_raw = tl.zeros((STREAMS * STREAMS,), dtype=tl.float32)
     sqrsum = 0.0
     for split in tl.static_range(N_SPLITS):
-        partial_base = (
-            gemm_partial + split * gemm_stride_s + token * gemm_stride_m
-        )
+        partial_base = gemm_partial + split * gemm_stride_s + token * gemm_stride_m
         pre_raw += tl.load(partial_base + stream_offsets)
         post_raw += tl.load(partial_base + STREAMS + stream_offsets)
         matrix_raw += tl.load(partial_base + 2 * STREAMS + matrix_offsets)
-        sqrsum += tl.load(
-            sqrsum_partial
-            + split * sqrsum_stride_s
-            + token * sqrsum_stride_m
-        )
+        sqrsum += tl.load(sqrsum_partial + split * sqrsum_stride_s + token * sqrsum_stride_m)
     inv_rms = tl.rsqrt(sqrsum / FLATTENED_HIDDEN + RMS_EPS)
     pre_raw *= inv_rms
     post_raw *= inv_rms
     matrix_raw *= inv_rms
 
-    pre_values = tl.sigmoid(
-        pre_raw * tl.load(scale) + tl.load(base + stream_offsets)
-    ) + HC_EPS
-    post_values = POST_MULTIPLIER * tl.sigmoid(
-        post_raw * tl.load(scale + 1)
-        + tl.load(base + STREAMS + stream_offsets)
-    )
+    pre_values = tl.sigmoid(pre_raw * tl.load(scale) + tl.load(base + stream_offsets)) + HC_EPS
+    post_values = POST_MULTIPLIER * tl.sigmoid(post_raw * tl.load(scale + 1) + tl.load(base + STREAMS + stream_offsets))
 
-    logits = (
-        matrix_raw * tl.load(scale + 2)
-        + tl.load(base + 2 * STREAMS + matrix_offsets)
-    )
+    logits = matrix_raw * tl.load(scale + 2) + tl.load(base + 2 * STREAMS + matrix_offsets)
     logits = tl.reshape(logits, (STREAMS, STREAMS))
     logits = logits - tl.max(logits, axis=1)[:, None]
     matrix = tl.exp(logits)
@@ -256,18 +233,10 @@ def _hc_post_4stream_kernel(
         other=0.0,
     ).to(tl.float32)
     residual_base = residual + token * residual_stride_m + hidden_offsets
-    residual_0 = tl.load(
-        residual_base, mask=hidden_mask, other=0.0
-    ).to(tl.float32)
-    residual_1 = tl.load(
-        residual_base + hidden, mask=hidden_mask, other=0.0
-    ).to(tl.float32)
-    residual_2 = tl.load(
-        residual_base + 2 * hidden, mask=hidden_mask, other=0.0
-    ).to(tl.float32)
-    residual_3 = tl.load(
-        residual_base + 3 * hidden, mask=hidden_mask, other=0.0
-    ).to(tl.float32)
+    residual_0 = tl.load(residual_base, mask=hidden_mask, other=0.0).to(tl.float32)
+    residual_1 = tl.load(residual_base + hidden, mask=hidden_mask, other=0.0).to(tl.float32)
+    residual_2 = tl.load(residual_base + 2 * hidden, mask=hidden_mask, other=0.0).to(tl.float32)
+    residual_3 = tl.load(residual_base + 3 * hidden, mask=hidden_mask, other=0.0).to(tl.float32)
 
     post_base = post_mix + token * post_stride_m
     mix_base = residual_mix + token * mix_stride_m
@@ -345,21 +314,13 @@ def hc_pre_reference(
     residual_raw = mixes[:, 2 * streams :].view(tokens, streams, streams)
 
     pre = torch.sigmoid(pre_raw * scale[0] + base[:streams]) + hc_eps
-    post = post_multiplier * torch.sigmoid(
-        post_raw * scale[1] + base[streams : 2 * streams]
-    )
-    residual_mix = (
-        residual_raw * scale[2] + base[2 * streams :].view(streams, streams)
-    ).softmax(dim=-1)
+    post = post_multiplier * torch.sigmoid(post_raw * scale[1] + base[streams : 2 * streams])
+    residual_mix = (residual_raw * scale[2] + base[2 * streams :].view(streams, streams)).softmax(dim=-1)
     residual_mix = residual_mix + hc_eps
     residual_mix = residual_mix / (residual_mix.sum(dim=-2, keepdim=True) + hc_eps)
     for _ in range(sinkhorn_iters - 1):
-        residual_mix = residual_mix / (
-            residual_mix.sum(dim=-1, keepdim=True) + hc_eps
-        )
-        residual_mix = residual_mix / (
-            residual_mix.sum(dim=-2, keepdim=True) + hc_eps
-        )
+        residual_mix = residual_mix / (residual_mix.sum(dim=-1, keepdim=True) + hc_eps)
+        residual_mix = residual_mix / (residual_mix.sum(dim=-2, keepdim=True) + hc_eps)
 
     layer_input = (pre.unsqueeze(-1) * residual.float()).sum(dim=1).to(x.dtype)
     return layer_input, residual_mix, post
@@ -376,9 +337,7 @@ def hc_post_reference(
 
     tokens, hidden = layer_output.shape
     residual_3d = residual.view(tokens, streams, hidden)
-    mixed_residual = (
-        residual_mix.unsqueeze(-1) * residual_3d.float().unsqueeze(2)
-    ).sum(dim=1)
+    mixed_residual = (residual_mix.unsqueeze(-1) * residual_3d.float().unsqueeze(2)).sum(dim=1)
     out = post_mix.unsqueeze(-1) * layer_output.float().unsqueeze(1) + mixed_residual
     return out.to(layer_output.dtype).reshape(tokens, streams * hidden)
 
@@ -408,9 +367,7 @@ def hc_pre(
 
     pre = torch.empty((tokens, streams), dtype=torch.float32, device=x.device)
     post = torch.empty_like(pre)
-    residual_mix = torch.empty(
-        (tokens, streams, streams), dtype=torch.float32, device=x.device
-    )
+    residual_mix = torch.empty((tokens, streams, streams), dtype=torch.float32, device=x.device)
     _hc_prepare_kernel[(tokens,)](
         mixes,
         scale,
@@ -428,9 +385,7 @@ def hc_pre(
         num_warps=1,
     )
 
-    layer_input = torch.empty(
-        (tokens, hidden), dtype=x.dtype, device=x.device
-    )
+    layer_input = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
     block_h = min(triton.next_power_of_2(hidden), 1024)
     _hc_pre_combine_kernel[(tokens, triton.cdiv(hidden, block_h))](
         x,
@@ -447,9 +402,7 @@ def hc_pre(
     return layer_input, residual_mix, post
 
 
-def _compute_prenorm_splits(
-    tokens: int, flattened_hidden: int, device: torch.device
-) -> int:
+def _compute_prenorm_splits(tokens: int, flattened_hidden: int, device: torch.device) -> int:
     grid_size = triton.cdiv(tokens, 64)
     k_blocks = triton.cdiv(flattened_hidden, 64)
     sms = torch.cuda.get_device_properties(device).multi_processor_count
@@ -503,26 +456,18 @@ def hc_pre_norm(
             sinkhorn_iters,
             post_multiplier,
         )
-        layer_input = rmsnorm_forward(
-            layer_input, weight=norm_weight, eps=norm_eps
-        )
+        layer_input = rmsnorm_forward(layer_input, weight=norm_weight, eps=norm_eps)
         return layer_input, residual_mix, post
 
     mix_size = (2 + streams) * streams
     n_splits = _compute_prenorm_splits(tokens, flattened_hidden, x.device)
-    gemm_partial = torch.empty(
-        (n_splits, tokens, mix_size), dtype=torch.float32, device=x.device
-    )
-    sqrsum_partial = torch.empty(
-        (n_splits, tokens), dtype=torch.float32, device=x.device
-    )
+    gemm_partial = torch.empty((n_splits, tokens, mix_size), dtype=torch.float32, device=x.device)
+    sqrsum_partial = torch.empty((n_splits, tokens), dtype=torch.float32, device=x.device)
     prenorm_gemm(x, fn, gemm_partial, sqrsum_partial, n_splits)
 
     pre = torch.empty((tokens, streams), dtype=torch.float32, device=x.device)
     post = torch.empty_like(pre)
-    residual_mix = torch.empty(
-        (tokens, streams, streams), dtype=torch.float32, device=x.device
-    )
+    residual_mix = torch.empty((tokens, streams, streams), dtype=torch.float32, device=x.device)
     _hc_prepare_prenorm_kernel[(tokens,)](
         gemm_partial,
         sqrsum_partial,
@@ -547,9 +492,7 @@ def hc_pre_norm(
         num_warps=1,
     )
 
-    layer_input = torch.empty(
-        (tokens, hidden), dtype=x.dtype, device=x.device
-    )
+    layer_input = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
     block_h = triton.next_power_of_2(hidden)
     _hc_pre_combine_norm_kernel[(tokens,)](
         x,

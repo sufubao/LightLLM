@@ -46,9 +46,9 @@ def _fwd_kernel_extract_indexer_ks(
         # Token slots can exceed INT32_MAX / stride_in_fp8_bs when the KV
         # cache packs multiple states into one row.  Promote before pointer
         # arithmetic so large cache offsets do not wrap around.
-        mem_index = tl.load(
-            req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n
-        ).to(tl.int64)
+        mem_index = tl.load(req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n).to(
+            tl.int64
+        )
 
         in_fp8_ptrs = in_fp8 + mem_index * stride_in_fp8_bs + 0 * stride_in_fp8_h + stride_in_fp8_d * offs_d
         kv_fp8 = tl.load(in_fp8_ptrs)
@@ -131,9 +131,9 @@ def _fwd_kernel_extract_indexer_ks_dynamic(
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
     for i in range(token_start_index, cur_seq_len, tl.num_programs(1)):
-        mem_index = tl.load(
-            req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n
-        ).to(tl.int64)
+        mem_index = tl.load(req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n).to(
+            tl.int64
+        )
 
         in_fp8_ptrs = in_fp8 + mem_index * stride_in_fp8_bs + stride_in_fp8_d * offs_d
         kv_fp8 = tl.load(in_fp8_ptrs)

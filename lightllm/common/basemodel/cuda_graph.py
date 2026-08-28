@@ -54,9 +54,7 @@ class CudaGraph:
             # block of ``batch_step_size_before_split`` rows. TP/SP padding
             # must preserve both that block and an even split across TP ranks.
             alignment = math.lcm(tp_world_size, batch_step_size_before_split)
-            batch_sizes = sorted(
-                {triton.cdiv(size, alignment) * alignment for size in batch_sizes}
-            )
+            batch_sizes = sorted({triton.cdiv(size, alignment) * alignment for size in batch_sizes})
         assert batch_sizes[-1] == max_batch_size
         return batch_sizes
 
@@ -92,11 +90,7 @@ class CudaGraph:
         if extra_batch_sizes is not None:
             self.cuda_graph_batch_sizes = sorted(
                 set(self.cuda_graph_batch_sizes)
-                | {
-                    int(batch_size)
-                    for batch_size in extra_batch_sizes
-                    if 0 < int(batch_size) <= self.max_batch_size
-                }
+                | {int(batch_size) for batch_size in extra_batch_sizes if 0 < int(batch_size) <= self.max_batch_size}
             )
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 

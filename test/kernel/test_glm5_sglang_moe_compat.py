@@ -25,9 +25,7 @@ from sglang.srt.layers.moe.moe_runner.triton_utils import override_config
 
 
 def _fp8_randn(shape, *, scale=0.02):
-    return (torch.randn(shape, device="cuda", dtype=torch.bfloat16) * scale).to(
-        torch.float8_e4m3fn
-    )
+    return (torch.randn(shape, device="cuda", dtype=torch.bfloat16) * scale).to(torch.float8_e4m3fn)
 
 
 def _graph_ms(fn, source, iterations):
@@ -89,9 +87,7 @@ def main():
     hidden_size = 4096
     tp_intermediate_size = 256
 
-    hidden_states = torch.randn(
-        (num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16
-    )
+    hidden_states = torch.randn((num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16)
     w13 = _fp8_randn((num_experts, 2 * tp_intermediate_size, hidden_size))
     w2 = _fp8_randn((num_experts, hidden_size, tp_intermediate_size))
     w13_scale = torch.ones(
@@ -104,12 +100,8 @@ def main():
         device="cuda",
         dtype=torch.float32,
     )
-    topk_ids = torch.randint(
-        0, num_experts, (num_tokens, topk), device="cuda", dtype=torch.int64
-    )
-    topk_weights = torch.rand(
-        (num_tokens, topk), device="cuda", dtype=torch.float32
-    )
+    topk_ids = torch.randint(0, num_experts, (num_tokens, topk), device="cuda", dtype=torch.int64)
+    topk_weights = torch.rand((num_tokens, topk), device="cuda", dtype=torch.float32)
     topk_weights.mul_(2.5 / topk_weights.sum(dim=-1, keepdim=True))
 
     def run_lightllm(output):
@@ -140,6 +132,7 @@ def main():
     )
     sglang_fused_moe.get_exec = lambda: standalone_exec
     sglang_fused_moe_config.get_exec = lambda: standalone_exec
+
     def run_sglang(output):
         sglang_fused_moe.fused_experts_impl(
             hidden_states=output,
@@ -184,10 +177,7 @@ def main():
     if args.benchmark:
         lightllm_ms = _graph_ms(run_lightllm, hidden_states, args.iterations)
         sglang_ms = _graph_ms(run_sglang, hidden_states, args.iterations)
-        print(
-            "graph_ms lightllm=%.6f sglang=%.6f speedup=%.3fx"
-            % (lightllm_ms, sglang_ms, lightllm_ms / sglang_ms)
-        )
+        print("graph_ms lightllm=%.6f sglang=%.6f speedup=%.3fx" % (lightllm_ms, sglang_ms, lightllm_ms / sglang_ms))
 
     if args.tune_configs or args.tune_tma_configs:
         # GLM-5 decode has few physical tokens (48 for the main model and 8
@@ -234,10 +224,7 @@ def main():
                 print("config_failed=%s error=%r" % (json.dumps(config, sort_keys=True), exc))
                 continue
             results.append((graph_ms, config))
-            print(
-                "config_ms=%.6f config=%s"
-                % (graph_ms, json.dumps(config, sort_keys=True))
-            )
+            print("config_ms=%.6f config=%s" % (graph_ms, json.dumps(config, sort_keys=True)))
 
         results.sort(key=lambda item: item[0])
         if not results:

@@ -79,11 +79,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-        fused_topk_ids = (
-            topk_ids
-            if use_sm90_mega_moe(self.quant_method)
-            else topk_ids.to(torch.long)
-        )
+        fused_topk_ids = topk_ids if use_sm90_mega_moe(self.quant_method) else topk_ids.to(torch.long)
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
@@ -187,14 +183,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 async_finish=False,
                 allocate_on_comm_stream=False,
             )
-            (
-                recv_x,
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
-                handle,
-                _,
-            ) = buffer.dispatch(
+            (recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _,) = buffer.dispatch(
                 qinput_tensor,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,

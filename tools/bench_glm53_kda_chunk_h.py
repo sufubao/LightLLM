@@ -43,9 +43,7 @@ def main() -> None:
     # The fused safe-gate+cumsum stage keeps cumulative decay in fp32; the
     # exp2 path in the state kernel expects that exact dtype.
     gk = torch.zeros(shape, device=device, dtype=torch.float32)
-    initial_state = torch.zeros(
-        (args.sequences, heads, key_dim, value_dim), device=device, dtype=dtype
-    )
+    initial_state = torch.zeros((args.sequences, heads, key_dim, value_dim), device=device, dtype=dtype)
     cu_seqlens = torch.arange(
         0,
         total_tokens + 1,
@@ -73,9 +71,7 @@ def main() -> None:
         del output
 
     results = []
-    for value_tile, num_warps, num_stages in itertools.product(
-        (32, 64), (2, 4), (2, 3, 4)
-    ):
+    for value_tile, num_warps, num_stages in itertools.product((32, 64), (2, 4), (2, 3, 4)):
         config = {
             "BV": value_tile,
             "num_warps": num_warps,

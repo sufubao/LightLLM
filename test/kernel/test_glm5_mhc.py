@@ -44,24 +44,16 @@ def main() -> None:
     streams = 4
     hidden = 4096
     for tokens in (1, 8, 48):
-        x = torch.randn(
-            (tokens, streams * hidden), device=device, dtype=torch.bfloat16
-        )
+        x = torch.randn((tokens, streams * hidden), device=device, dtype=torch.bfloat16)
         fn = 0.005 * torch.randn(
             ((2 + streams) * streams, streams * hidden),
             device=device,
             dtype=torch.float32,
         )
         scale = torch.randn((3,), device=device, dtype=torch.float32)
-        base = torch.randn(
-            ((2 + streams) * streams,), device=device, dtype=torch.float32
-        )
-        layer_output = torch.randn(
-            (tokens, hidden), device=device, dtype=torch.bfloat16
-        )
-        norm_weight = torch.randn(
-            (hidden,), device=device, dtype=torch.bfloat16
-        )
+        base = torch.randn(((2 + streams) * streams,), device=device, dtype=torch.float32)
+        layer_output = torch.randn((tokens, hidden), device=device, dtype=torch.bfloat16)
+        norm_weight = torch.randn((hidden,), device=device, dtype=torch.bfloat16)
         arguments = (x, fn, scale, base, streams, 1e-6, 1e-6, 20)
 
         expected_pre = hc_pre_reference(*arguments)
@@ -83,22 +75,15 @@ def main() -> None:
             20,
         )
         torch.cuda.synchronize()
-        pre_errors = tuple(
-            _max_error(actual, expected)
-            for actual, expected in zip(actual_pre, expected_pre)
-        )
+        pre_errors = tuple(_max_error(actual, expected) for actual, expected in zip(actual_pre, expected_pre))
         assert pre_errors[0] <= 0.03125, pre_errors
         # DeepGEMM intentionally uses TF32 and a split-K reduction, matching
         # the optimized serving path rather than torch.mm's accumulation order.
         assert pre_errors[1] <= 5e-4, pre_errors
         assert pre_errors[2] <= 5e-4, pre_errors
 
-        expected_post = hc_post_reference(
-            layer_output, x, expected_pre[1], expected_pre[2], streams
-        )
-        actual_post = hc_post(
-            layer_output, x, actual_pre[1], actual_pre[2], streams
-        )
+        expected_post = hc_post_reference(layer_output, x, expected_pre[1], expected_pre[2], streams)
+        actual_post = hc_post(layer_output, x, actual_pre[1], actual_pre[2], streams)
         torch.cuda.synchronize()
         post_error = _max_error(actual_post, expected_post)
         assert post_error <= 0.03125, post_error
@@ -106,9 +91,7 @@ def main() -> None:
         def reference_path():
             layer_input, residual_mix, post_mix = hc_pre_reference(*arguments)
             rmsnorm_forward(layer_input, weight=norm_weight, eps=1e-6)
-            return hc_post_reference(
-                layer_output, x, residual_mix, post_mix, streams
-            )
+            return hc_post_reference(layer_output, x, residual_mix, post_mix, streams)
 
         def fused_path():
             _, residual_mix, post_mix = hc_pre_norm(
@@ -123,9 +106,7 @@ def main() -> None:
                 1e-6,
                 20,
             )
-            return hc_post(
-                layer_output, x, residual_mix, post_mix, streams
-            )
+            return hc_post(layer_output, x, residual_mix, post_mix, streams)
 
         def fused_pre_path():
             return hc_pre_norm(
@@ -142,9 +123,7 @@ def main() -> None:
             )
 
         def fused_post_path():
-            return hc_post(
-                layer_output, x, actual_pre[1], actual_pre[2], streams
-            )
+            return hc_post(layer_output, x, actual_pre[1], actual_pre[2], streams)
 
         reference_ms = _time_ms(reference_path)
         fused_ms = _time_ms(fused_path)
@@ -162,25 +141,14 @@ def main() -> None:
         from sglang.kernels.ops.layernorm.mhc import mhc_post_tilelang
 
         tokens = 17152
-        residual = torch.randn(
-            (tokens, streams * hidden), device=device, dtype=torch.bfloat16
-        )
-        layer_output = torch.randn(
-            (tokens, hidden), device=device, dtype=torch.bfloat16
-        )
-        residual_mix = torch.randn(
-            (tokens, streams, streams), device=device, dtype=torch.float32
-        )
-        post_mix = torch.randn(
-            (tokens, streams), device=device, dtype=torch.float32
-        )
-        actual = hc_post(
-            layer_output, residual, residual_mix, post_mix, streams
-        )
+        residual = torch.randn((tokens, streams * hidden), device=device, dtype=torch.bfloat16)
+        layer_output = torch.randn((tokens, hidden), device=device, dtype=torch.bfloat16)
+        residual_mix = torch.randn((tokens, streams, streams), device=device, dtype=torch.float32)
+        post_mix = torch.randn((tokens, streams), device=device, dtype=torch.float32)
+        actual = hc_post(layer_output, residual, residual_mix, post_mix, streams)
+
         def sgl_mhc_post():
-            output = torch.empty_like(
-                residual.view(tokens, streams, hidden)
-            )
+            output = torch.empty_like(residual.view(tokens, streams, hidden))
             mhc_post_tilelang(
                 residual_mix,
                 residual.view(tokens, streams, hidden),
@@ -197,9 +165,7 @@ def main() -> None:
         cross_error = _max_error(actual, sglang_output)
         assert cross_error <= 0.0625, cross_error
         triton_ms = _time_ms(
-            lambda: hc_post(
-                layer_output, residual, residual_mix, post_mix, streams
-            ),
+            lambda: hc_post(layer_output, residual, residual_mix, post_mix, streams),
             args.iterations,
         )
         tilelang_ms = _time_ms(
@@ -220,21 +186,15 @@ def main() -> None:
 
         sgl_mhc.get_tp_group = lambda: None
         sgl_mhc.is_allocation_symmetric = lambda: False
-        sgl_mhc.use_symmetric_memory = (
-            lambda *_args, **_kwargs: contextlib.nullcontext()
-        )
+        sgl_mhc.use_symmetric_memory = lambda *_args, **_kwargs: contextlib.nullcontext()
         fn = 0.005 * torch.randn(
             ((2 + streams) * streams, streams * hidden),
             device=device,
             dtype=torch.float32,
         )
         scale = torch.randn((3,), device=device, dtype=torch.float32)
-        base = torch.randn(
-            ((2 + streams) * streams,), device=device, dtype=torch.float32
-        )
-        norm_weight = torch.randn(
-            (hidden,), device=device, dtype=torch.bfloat16
-        )
+        base = torch.randn(((2 + streams) * streams,), device=device, dtype=torch.float32)
+        norm_weight = torch.randn((hidden,), device=device, dtype=torch.bfloat16)
 
         def lightllm_pre():
             return hc_pre_norm(

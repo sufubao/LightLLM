@@ -48,10 +48,7 @@ class PrefillCudaGraph:
         self.exact_batch_size_by_token_num = {}
         if self.use_exact_token_nums:
             if configured_batch_sizes is None:
-                raise ValueError(
-                    "--prefill_cudagraph_batch_sizes is required with "
-                    "--prefill_cudagraph_token_nums"
-                )
+                raise ValueError("--prefill_cudagraph_batch_sizes is required with " "--prefill_cudagraph_token_nums")
             if len(configured_token_nums) != len(configured_batch_sizes):
                 raise ValueError(
                     "--prefill_cudagraph_token_nums and --prefill_cudagraph_batch_sizes "
@@ -86,9 +83,7 @@ class PrefillCudaGraph:
                 )
         else:
             if configured_batch_sizes is not None:
-                raise ValueError(
-                    "--prefill_cudagraph_batch_sizes requires --prefill_cudagraph_token_nums"
-                )
+                raise ValueError("--prefill_cudagraph_batch_sizes requires --prefill_cudagraph_token_nums")
             graph_handle_token_nums = (
                 list(range(4, 33, 4))
                 + list(range(48, 257, 16))
@@ -113,8 +108,7 @@ class PrefillCudaGraph:
         logger.info(f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
         if self.exact_batch_size_by_token_num:
             logger.info(
-                "prefill cuda graph exact layouts (token_num -> batch_size): "
-                f"{self.exact_batch_size_by_token_num}"
+                "prefill cuda graph exact layouts (token_num -> batch_size): " f"{self.exact_batch_size_by_token_num}"
             )
 
     def can_run(
@@ -130,11 +124,7 @@ class PrefillCudaGraph:
             if configured_batch_size is None or batch_size != configured_batch_size:
                 return False
             uniform_seq_len = handle_token_num // configured_batch_size
-            return (
-                max_q_seq_len == uniform_seq_len
-                and max_kv_seq_len == uniform_seq_len
-                and max_cache_len == 0
-            )
+            return max_q_seq_len == uniform_seq_len and max_kv_seq_len == uniform_seq_len and max_cache_len == 0
         return handle_token_num <= self.max_handle_token_num
 
     def need_capture(self, handle_token_num: int):
@@ -282,16 +272,12 @@ class PrefillCudaGraph:
             total_token_num = handle_token_num
             input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
             mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-            b_req_idx = torch.full(
-                (batch_size,), model.req_manager.HOLD_REQUEST_ID, dtype=torch.int32, device="cuda"
-            )
+            b_req_idx = torch.full((batch_size,), model.req_manager.HOLD_REQUEST_ID, dtype=torch.int32, device="cuda")
             b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
             b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
             b_is_decode_req = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
             b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-            b_prefill_start_loc = torch.arange(
-                0, total_token_num, seq_len, dtype=torch.int32, device="cuda"
-            )
+            b_prefill_start_loc = torch.arange(0, total_token_num, seq_len, dtype=torch.int32, device="cuda")
 
             model_input = ModelInput(
                 batch_size=batch_size,

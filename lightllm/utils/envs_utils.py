@@ -98,11 +98,7 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
         int(args.get("running_max_req_size", 0) or 0),
         1,
     )
-    verify_width = (
-        int(args.get("mtp_step", 0) or 0) + 1
-        if args.get("mtp_mode", None) is not None
-        else 1
-    )
+    verify_width = int(args.get("mtp_step", 0) or 0) + 1 if args.get("mtp_mode", None) is not None else 1
     required_tokens = logical_batch_size * verify_width
     # In TP/SP + EP mode each rank dispatches only its sequence-parallel slice
     # to DeepEP.  CUDA Graph batch sizes are TP-aligned, but use ceil here as a

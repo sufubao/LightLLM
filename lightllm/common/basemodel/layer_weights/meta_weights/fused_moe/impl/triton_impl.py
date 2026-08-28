@@ -259,13 +259,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
                     "LIGHTLLM_USE_SGLANG_TRITON_MOE currently requires "
                     "block-wise FP8 expert weights with block size 128"
                 )
-            if (
-                getattr(self, "swiglu_limit", None) is not None
-                and getattr(self, "swiglu_clamp_up_add_one", True)
-            ):
-                raise RuntimeError(
-                    "SGLang Triton MoE does not support clamp_up_add_one=True"
-                )
+            if getattr(self, "swiglu_limit", None) is not None and getattr(self, "swiglu_clamp_up_add_one", True):
+                raise RuntimeError("SGLang Triton MoE does not support clamp_up_add_one=True")
 
             sglang_fused_moe, override_config = _get_sglang_fused_experts_impl()
             tuned_configs = _get_sglang_triton_moe_configs(
@@ -316,11 +311,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             w1_scale=w13_scale,
             w2_scale=w2_scale,
             limit=getattr(self, "swiglu_limit", None),
-            alpha=(
-                getattr(self, "swiglu_alpha", 1.0)
-                if getattr(self, "swiglu_limit", None) is not None
-                else None
-            ),
+            alpha=(getattr(self, "swiglu_alpha", 1.0) if getattr(self, "swiglu_limit", None) is not None else None),
             clamp_up_add_one=getattr(self, "swiglu_clamp_up_add_one", True),
         )
         return input_tensor

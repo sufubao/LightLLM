@@ -88,7 +88,7 @@ def measure_ms(
         del result
 
     peak_delta_gib = global_max(
-        (torch.cuda.max_memory_allocated() - baseline_bytes) / 2**30,
+        (torch.cuda.max_memory_allocated() - baseline_bytes) / 2 ** 30,
         device,
     )
     return {
@@ -139,7 +139,7 @@ def main() -> None:
         device=device,
     )
     indices = make_causal_indices(args.tokens, args.sequence_length, args.topk)
-    scale = args.head_dim**-0.5
+    scale = args.head_dim ** -0.5
     token_start = rank * (args.tokens // world_size)
     token_end = token_start + args.tokens // world_size
     local_indices = indices[token_start:token_end]
@@ -153,13 +153,9 @@ def main() -> None:
     def padded_flashmla() -> torch.Tensor:
         q_input = q.new_zeros((args.tokens, global_heads, args.head_dim))
         q_input[:, : args.local_heads].copy_(q)
-        return flash_mla_sparse_fwd(
-            q_input,
-            kv,
-            indices,
-            scale,
-            d_v=args.head_dim,
-        )[0][:, : args.local_heads]
+        return flash_mla_sparse_fwd(q_input, kv, indices, scale, d_v=args.head_dim,)[
+            0
+        ][:, : args.local_heads]
 
     def transposed_flashmla() -> torch.Tensor:
         transposed_q = head_shards_to_token_shards(q, world_size)
@@ -193,12 +189,7 @@ def main() -> None:
             scale,
             d_v=args.head_dim,
         )[0]
-        comm_workspace.view(
-            world_size,
-            args.tokens // world_size,
-            args.local_heads,
-            args.head_dim,
-        ).copy_(
+        comm_workspace.view(world_size, args.tokens // world_size, args.local_heads, args.head_dim,).copy_(
             transposed_output.view(
                 args.tokens // world_size,
                 world_size,

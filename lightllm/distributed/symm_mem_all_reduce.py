@@ -100,13 +100,9 @@ class SymmMemAllreduce:
             output = self.buffer[:n]
             output.copy_(inp.view(-1))
             if self.use_multimem:
-                torch.ops.symm_mem.multimem_all_reduce_(
-                    output, "sum", self.group.group_name
-                )
+                torch.ops.symm_mem.multimem_all_reduce_(output, "sum", self.group.group_name)
             else:
-                torch.ops.symm_mem.two_shot_all_reduce_(
-                    output, "sum", self.group.group_name
-                )
+                torch.ops.symm_mem.two_shot_all_reduce_(output, "sum", self.group.group_name)
             return output.view_as(inp)
 
     def all_reduce(self, inp: torch.Tensor) -> None:

@@ -299,9 +299,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV * K if is_kda else HV)
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw, HV)
     BK = triton.next_power_of_2(K)
-    is_spec_verify = (
-        ENABLE_FAST_MTP_KDA and cu_seqlens is not None and num_accepted_tokens is not None
-    )
+    is_spec_verify = ENABLE_FAST_MTP_KDA and cu_seqlens is not None and num_accepted_tokens is not None
     if T == 1:
         # Decode path: use larger BV to reduce kernel instances (4 blocks instead of 16)
         # and more warps for better SM utilization at T=1 where there's no pipelining benefit

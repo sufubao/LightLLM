@@ -67,10 +67,7 @@ class KDAPrefillAttState(BasePrefillAttState):
     def init_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.mtp_step + 1)
-        self.seq_lens_cpu = (
-            self.infer_state.b1_cu_q_seq_len[1:]
-            - self.infer_state.b1_cu_q_seq_len[:-1]
-        ).tolist()
+        self.seq_lens_cpu = (self.infer_state.b1_cu_q_seq_len[1:] - self.infer_state.b1_cu_q_seq_len[:-1]).tolist()
         # prepare_chunk_indices performs a GPU-to-CPU shape sync.  Build it
         # before entering CUDA Graph capture and copy its fixed-size contents
         # through BasePrefillAttState on replay.
@@ -120,9 +117,7 @@ class KDAPrefillAttState(BasePrefillAttState):
             q=q,
             k=k,
             v=v,
-            raw_g=raw_gate.view(
-                1, -1, backend.tp_num_heads, backend.head_dim
-            ),
+            raw_g=raw_gate.view(1, -1, backend.tp_num_heads, backend.head_dim),
             beta=raw_beta.float().sigmoid(),
             A_log=layer_weight.linear_A_log.weight,
             g_bias=layer_weight.linear_dt_bias.weight,
@@ -134,9 +129,7 @@ class KDAPrefillAttState(BasePrefillAttState):
             safe_gate=True,
             lower_bound=backend.lower_bound,
         )
-        ssm_states[self.b_ssm_buffer_idx] = final_state.to(
-            ssm_states.dtype, copy=False
-        )
+        ssm_states[self.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype, copy=False)
         return output
 
 
@@ -148,9 +141,7 @@ class KDADecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(
-            self.backend.model.is_mtp_draft_model
-        )
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step == 0:
             self._init_normal_decode_state()
         elif self.backend.uses_dynamic_spec_verify_layout():
@@ -192,9 +183,7 @@ class KDADecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[
-            self.b_conv_buffer_idx
-        ] + 1
+        self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):

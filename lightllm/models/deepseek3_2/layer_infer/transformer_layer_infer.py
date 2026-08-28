@@ -222,19 +222,11 @@ class NsaInfer:
         if infer_state.is_prefill:
             mtp_step = 0
         else:
-            mtp_step = (
-                get_env_start_args().mtp_step
-                if self.decode_mtp_step is None
-                else self.decode_mtp_step
-            )
+            mtp_step = get_env_start_args().mtp_step if self.decode_mtp_step is None else self.decode_mtp_step
         # LightSpec compacts each request to a variable number of contiguous
         # verify rows. Its sparse-index K packing must follow request boundaries
         # instead of assuming the fixed process-wide MTP width.
-        use_dynamic_layout = (
-            not infer_state.is_prefill
-            and mtp_step > 0
-            and get_env_start_args().mtp_dynamic_verify
-        )
+        use_dynamic_layout = not infer_state.is_prefill and mtp_step > 0 and get_env_start_args().mtp_dynamic_verify
         if use_dynamic_layout:
             k_fp8_, k_scale_ = extract_indexer_ks_dynamic(
                 I_buffer=indexer_k_buffer,

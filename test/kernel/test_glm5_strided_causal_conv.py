@@ -13,16 +13,10 @@ from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
 
 def _inputs(seq_lens: list[int], dim: int, cache_lines: int):
     total_tokens = sum(seq_lens)
-    token_major = torch.randn(
-        (total_tokens, dim), device="cuda", dtype=torch.bfloat16
-    )
+    token_major = torch.randn((total_tokens, dim), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn((dim, 4), device="cuda", dtype=torch.bfloat16)
-    conv_states = torch.randn(
-        (cache_lines, dim, 3), device="cuda", dtype=torch.bfloat16
-    )
-    cache_indices = torch.arange(
-        len(seq_lens), device="cuda", dtype=torch.int32
-    )
+    conv_states = torch.randn((cache_lines, dim, 3), device="cuda", dtype=torch.bfloat16)
+    cache_indices = torch.arange(len(seq_lens), device="cuda", dtype=torch.int32)
     has_initial_state = torch.tensor(
         [(index % 2) == 1 for index in range(len(seq_lens))],
         device="cuda",
@@ -87,34 +81,23 @@ def main() -> None:
     torch.manual_seed(1234)
     seq_lens = [7, 1, 19, 5]
     inputs = _inputs(seq_lens, dim=64, cache_lines=8)
-    reference_inputs = tuple(
-        value.clone() if isinstance(value, torch.Tensor) else value
-        for value in inputs
-    )
+    reference_inputs = tuple(value.clone() if isinstance(value, torch.Tensor) else value for value in inputs)
     actual = _run(inputs, seq_lens, copy_free=True)
     expected = _run(reference_inputs, seq_lens, copy_free=False)
     torch.cuda.synchronize()
     output_error = (actual.float() - expected.float()).abs().max().item()
-    state_error = (
-        inputs[2].float() - reference_inputs[2].float()
-    ).abs().max().item()
+    state_error = (inputs[2].float() - reference_inputs[2].float()).abs().max().item()
     # The two kernels accumulate the four taps in a different order; one BF16
     # ULP at this random input scale is expected.
     assert output_error <= 0.0625, output_error
     assert state_error == 0.0, state_error
     assert actual.transpose(0, 1).is_contiguous()
-    print(
-        f"PASS correctness output_error={output_error:.8f} "
-        f"state_error={state_error:.8f}"
-    )
+    print(f"PASS correctness output_error={output_error:.8f} " f"state_error={state_error:.8f}")
 
     if args.benchmark:
         seq_lens = [268] * 64
         strided_inputs = _inputs(seq_lens, dim=3072, cache_lines=64)
-        copied_inputs = tuple(
-            value.clone() if isinstance(value, torch.Tensor) else value
-            for value in strided_inputs
-        )
+        copied_inputs = tuple(value.clone() if isinstance(value, torch.Tensor) else value for value in strided_inputs)
         strided_ms = _time_ms(
             lambda: _run(strided_inputs, seq_lens, copy_free=True),
             args.iterations,

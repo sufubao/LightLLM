@@ -91,9 +91,7 @@ def _ep_scatter_tokens(
                     destination_int32,
                 )
                 tl.store(
-                    output_tensor
-                    + destination * output_tensor_stride0
-                    + hidden_offsets * output_tensor_stride1,
+                    output_tensor + destination * output_tensor_stride0 + hidden_offsets * output_tensor_stride1,
                     token,
                     mask=hidden_mask,
                 )
@@ -197,18 +195,12 @@ def _ep_gather_kernel(
         accumulator = tl.zeros([block_hidden], dtype=tl.float32)
         for topk_offset_int32 in range(0, topk_num):
             topk_offset = topk_offset_int32.to(tl.int64)
-            expert_id = tl.load(
-                recv_topk_ids + token * recv_topk_ids_stride0 + topk_offset * recv_topk_ids_stride1
-            )
+            expert_id = tl.load(recv_topk_ids + token * recv_topk_ids_stride0 + topk_offset * recv_topk_ids_stride1)
             if expert_id >= 0:
-                source_int32 = tl.load(
-                    input_index + token * input_index_stride0 + topk_offset * input_index_stride1
-                )
+                source_int32 = tl.load(input_index + token * input_index_stride0 + topk_offset * input_index_stride1)
                 source = source_int32.to(tl.int64)
                 weight = tl.load(
-                    recv_topk_weights
-                    + token * recv_topk_weights_stride0
-                    + topk_offset * recv_topk_weights_stride1
+                    recv_topk_weights + token * recv_topk_weights_stride0 + topk_offset * recv_topk_weights_stride1
                 )
                 value = tl.load(
                     input_tensor

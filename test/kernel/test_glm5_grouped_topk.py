@@ -15,9 +15,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import (
 def torch_reference(gating_output, correction_bias, topk):
     scores = gating_output.float().sigmoid()
     choice_scores = scores + correction_bias
-    topk_ids = torch.topk(
-        choice_scores, k=topk, dim=-1, largest=True, sorted=True
-    ).indices
+    topk_ids = torch.topk(choice_scores, k=topk, dim=-1, largest=True, sorted=True).indices
     topk_weights = torch.gather(scores, 1, topk_ids)
     topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
@@ -87,27 +85,17 @@ def run_scratch_free_bitonic(gating_output, correction_bias):
 
 def assert_correct(tokens):
     generator = torch.Generator(device="cuda").manual_seed(20260828 + tokens)
-    gating_output = torch.randn(
-        (tokens, 288), generator=generator, dtype=torch.float32, device="cuda"
-    )
-    correction_bias = torch.randn(
-        (288,), generator=generator, dtype=torch.float32, device="cuda"
-    )
+    gating_output = torch.randn((tokens, 288), generator=generator, dtype=torch.float32, device="cuda")
+    correction_bias = torch.randn((288,), generator=generator, dtype=torch.float32, device="cuda")
 
     ref_weights, ref_ids = torch_reference(gating_output, correction_bias, 8)
-    fast_weights, fast_ids = run_topk(
-        gating_output, correction_bias, fast=True
-    )
-    generic_weights, generic_ids = run_topk(
-        gating_output, correction_bias, fast=False
-    )
+    fast_weights, fast_ids = run_topk(gating_output, correction_bias, fast=True)
+    generic_weights, generic_ids = run_topk(gating_output, correction_bias, fast=False)
 
     torch.testing.assert_close(fast_ids, ref_ids, rtol=0, atol=0)
     torch.testing.assert_close(generic_ids, ref_ids, rtol=0, atol=0)
     torch.testing.assert_close(fast_weights, ref_weights, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(
-        generic_weights, ref_weights, rtol=1e-5, atol=1e-6
-    )
+    torch.testing.assert_close(generic_weights, ref_weights, rtol=1e-5, atol=1e-6)
     weight_delta = (fast_weights - generic_weights).abs()
     print(
         f"tokens={tokens}: exact expert ids, weights match reference; "
@@ -143,15 +131,9 @@ def graph_ms(graph, iterations):
 
 def benchmark(tokens, iterations):
     gating_output, correction_bias = assert_correct(tokens)
-    fast_graph, fast_outputs = capture_graph(
-        lambda: run_topk(gating_output, correction_bias, fast=True)
-    )
-    generic_graph, generic_outputs = capture_graph(
-        lambda: run_topk(gating_output, correction_bias, fast=False)
-    )
-    bitonic_graph, bitonic_outputs = capture_graph(
-        lambda: run_scratch_free_bitonic(gating_output, correction_bias)
-    )
+    fast_graph, fast_outputs = capture_graph(lambda: run_topk(gating_output, correction_bias, fast=True))
+    generic_graph, generic_outputs = capture_graph(lambda: run_topk(gating_output, correction_bias, fast=False))
+    bitonic_graph, bitonic_outputs = capture_graph(lambda: run_scratch_free_bitonic(gating_output, correction_bias))
     fast_ms = graph_ms(fast_graph, iterations)
     generic_ms = graph_ms(generic_graph, iterations)
     bitonic_ms = graph_ms(bitonic_graph, iterations)
@@ -174,15 +156,11 @@ def tune_warps(tokens, iterations):
     results = []
     for num_warps in (1, 2, 4, 8, 16):
         graph, outputs = capture_graph(
-            lambda num_warps=num_warps: run_fast_with_warps(
-                gating_output, correction_bias, num_warps
-            )
+            lambda num_warps=num_warps: run_fast_with_warps(gating_output, correction_bias, num_warps)
         )
         graph.replay()
         torch.cuda.synchronize()
-        if not torch.equal(outputs[1], ref_ids) or not torch.allclose(
-            outputs[0], ref_weights, rtol=1e-5, atol=1e-6
-        ):
+        if not torch.equal(outputs[1], ref_ids) or not torch.allclose(outputs[0], ref_weights, rtol=1e-5, atol=1e-6):
             print(f"tokens={tokens}: num_warps={num_warps} INVALID")
             continue
         elapsed_ms = graph_ms(graph, iterations)
@@ -195,9 +173,7 @@ def tune_warps(tokens, iterations):
             f"max_delta={max_delta:.9g}"
         )
     best_ms, best_warps = min(results)
-    print(
-        f"tokens={tokens}: best num_warps={best_warps} graph={best_ms:.6f} ms"
-    )
+    print(f"tokens={tokens}: best num_warps={best_warps} graph={best_ms:.6f} ms")
 
 
 def test_glm5_single_group_topk():

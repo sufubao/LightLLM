@@ -77,12 +77,8 @@ def main() -> None:
     torch.testing.assert_close(nccl_input, torch.zeros_like(nccl_input), rtol=0, atol=0)
     nccl_input.copy_(source)
     torch.cuda.synchronize()
-    nccl_ms = elapsed_ms(
-        lambda: dist.all_reduce(nccl_input), args.warmup, args.iterations
-    )
-    nccl_graph_ms = graph_elapsed_ms(
-        lambda: dist.all_reduce(nccl_input), args.warmup, args.iterations
-    )
+    nccl_ms = elapsed_ms(lambda: dist.all_reduce(nccl_input), args.warmup, args.iterations)
+    nccl_graph_ms = graph_elapsed_ms(lambda: dist.all_reduce(nccl_input), args.warmup, args.iterations)
 
     buffer = symm_mem.empty(source.numel(), device="cuda", dtype=source.dtype)
     handle = symm_mem.rendezvous(buffer, group_name)
@@ -106,12 +102,8 @@ def main() -> None:
     torch.cuda.synchronize()
     symm_ms = elapsed_ms(symm_all_reduce, args.warmup, args.iterations)
     symm_graph_ms = graph_elapsed_ms(symm_all_reduce, args.warmup, args.iterations)
-    symm_out_ms = elapsed_ms(
-        symm_all_reduce_out_of_place, args.warmup, args.iterations
-    )
-    symm_out_graph_ms = graph_elapsed_ms(
-        symm_all_reduce_out_of_place, args.warmup, args.iterations
-    )
+    symm_out_ms = elapsed_ms(symm_all_reduce_out_of_place, args.warmup, args.iterations)
+    symm_out_graph_ms = graph_elapsed_ms(symm_all_reduce_out_of_place, args.warmup, args.iterations)
 
     nccl_max_ms = max_rank(nccl_ms)
     symm_max_ms = max_rank(symm_ms)
@@ -120,9 +112,7 @@ def main() -> None:
     symm_graph_max_ms = max_rank(symm_graph_ms)
     symm_out_graph_max_ms = max_rank(symm_out_graph_ms)
 
-    cpu_group = dist.new_group(
-        list(range(dist.get_world_size())), backend="gloo"
-    )
+    cpu_group = dist.new_group(list(range(dist.get_world_size())), backend="gloo")
     workspace = flashinfer_comm.create_allreduce_fusion_workspace(
         backend="trtllm",
         world_size=dist.get_world_size(),
@@ -150,16 +140,28 @@ def main() -> None:
 
     if rank == 0:
         nbytes = source.numel() * source.element_size()
+        eager_best = min(
+            (nccl_max_ms, "nccl"),
+            (symm_max_ms, "symm"),
+            (symm_out_max_ms, "symm_out"),
+            (fi_max_ms, "flashinfer"),
+        )[1]
+        graph_best = min(
+            (nccl_graph_max_ms, "nccl"),
+            (symm_graph_max_ms, "symm"),
+            (symm_out_graph_max_ms, "symm_out"),
+            (fi_graph_max_ms, "flashinfer"),
+        )[1]
         print(
             f"shape={shape} bytes={nbytes} nccl_ms={nccl_max_ms:.6f} "
             f"symm_multimem_ms={symm_max_ms:.6f} symm_out_ms={symm_out_max_ms:.6f} "
             f"flashinfer_ms={fi_max_ms:.6f} "
-            f"best={min((nccl_max_ms, 'nccl'), (symm_max_ms, 'symm'), (symm_out_max_ms, 'symm_out'), (fi_max_ms, 'flashinfer'))[1]} "
+            f"best={eager_best} "
             f"graph_nccl_ms={nccl_graph_max_ms:.6f} "
             f"graph_symm_ms={symm_graph_max_ms:.6f} "
             f"graph_symm_out_ms={symm_out_graph_max_ms:.6f} "
             f"graph_flashinfer_ms={fi_graph_max_ms:.6f} "
-            f"graph_best={min((nccl_graph_max_ms, 'nccl'), (symm_graph_max_ms, 'symm'), (symm_out_graph_max_ms, 'symm_out'), (fi_graph_max_ms, 'flashinfer'))[1]}"
+            f"graph_best={graph_best}"
         )
     workspace.destroy()
     dist.destroy_process_group()

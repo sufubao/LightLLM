@@ -132,20 +132,14 @@ def main():
     device = torch.device("cuda:0")
     experts, hidden, intermediate, topk = 289, 4096, 2048 // args.tp_size, 9
     x = torch.zeros((args.tokens, hidden), dtype=torch.bfloat16, device=device)
-    w1 = torch.zeros(
-        (experts, intermediate * 2, hidden), dtype=torch.float8_e4m3fn, device=device
-    )
-    w2 = torch.zeros(
-        (experts, hidden, intermediate), dtype=torch.float8_e4m3fn, device=device
-    )
+    w1 = torch.zeros((experts, intermediate * 2, hidden), dtype=torch.float8_e4m3fn, device=device)
+    w2 = torch.zeros((experts, hidden, intermediate), dtype=torch.float8_e4m3fn, device=device)
     w1_scale = torch.ones((experts, 4, 32), dtype=torch.float32, device=device)
     w2_scale = torch.ones((experts, 32, 2), dtype=torch.float32, device=device)
     rows = torch.arange(args.tokens, dtype=torch.int64, device=device)[:, None]
     cols = torch.arange(topk, dtype=torch.int64, device=device)[None, :]
     topk_ids = (rows * topk + cols) % experts
-    topk_weights = torch.full(
-        (args.tokens, topk), 1.0 / topk, dtype=torch.float32, device=device
-    )
+    topk_weights = torch.full((args.tokens, topk), 1.0 / topk, dtype=torch.float32, device=device)
 
     fixed_up_config = make_config(
         {
@@ -224,11 +218,7 @@ def main():
     if args.tune_down:
         # Both GEMMs share the same token alignment, so the down projection's
         # BLOCK_SIZE_M must match the fixed up projection.
-        selected_configs = [
-            values
-            for values in CONFIGS
-            if values[0] == fixed_up_config["BLOCK_SIZE_M"]
-        ]
+        selected_configs = [values for values in CONFIGS if values[0] == fixed_up_config["BLOCK_SIZE_M"]]
     for values in selected_configs[: args.max_configs]:
         config = make_config(values)
         try:

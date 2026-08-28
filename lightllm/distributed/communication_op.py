@@ -57,9 +57,7 @@ class CustomProcessGroup:
     def __init__(self):
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
-        self.symm_mem_out_of_place = os.getenv(
-            "LIGHTLLM_SYMM_MEM_OUT_OF_PLACE", "0"
-        ).upper() in {"1", "ON", "TRUE"}
+        self.symm_mem_out_of_place = os.getenv("LIGHTLLM_SYMM_MEM_OUT_OF_PLACE", "0").upper() in {"1", "ON", "TRUE"}
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
         if get_env_start_args().enable_dp_prefill_balance:
@@ -243,11 +241,11 @@ class DistributeGroupManager:
         mega_moe_quant_method = "fp4fp8-b32-deepgemm"
         sm90_mega_moe_quant_method = "fp8w8a8-b128-deepgemm"
         is_sm100 = is_sm100_gpu()
-        enable_sm90_mega_moe = (
-            is_sm90_gpu()
-            and os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper()
-            in {"1", "ON", "TRUE"}
-        )
+        enable_sm90_mega_moe = is_sm90_gpu() and os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper() in {
+            "1",
+            "ON",
+            "TRUE",
+        }
 
         # Buffer 选择规则：
         # 1. 非 SM100 不支持 Mega MoE，只初始化 legacy low-latency buffer；
@@ -266,8 +264,7 @@ class DistributeGroupManager:
         elif enable_sm90_mega_moe:
             has_mega_moe_layer = sm90_mega_moe_quant_method in expert_quant_method_names
             has_legacy_moe_layer = any(
-                method_name != sm90_mega_moe_quant_method
-                for method_name in expert_quant_method_names
+                method_name != sm90_mega_moe_quant_method for method_name in expert_quant_method_names
             )
             enable_mega_moe_buffer = has_mega_moe_layer
             enable_low_latency_buffer = has_legacy_moe_layer

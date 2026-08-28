@@ -24,9 +24,7 @@ def test_tp_moe_propagates_prefill_stage(is_prefill):
         def experts(*args, **kwargs):
             captured.update(kwargs)
 
-    layer = Deepseek2TransformerLayerInfer.__new__(
-        Deepseek2TransformerLayerInfer
-    )
+    layer = Deepseek2TransformerLayerInfer.__new__(Deepseek2TransformerLayerInfer)
     layer.embed_dim_ = 4
     layer.n_shared_experts = None
     layer.num_experts_per_tok = 2

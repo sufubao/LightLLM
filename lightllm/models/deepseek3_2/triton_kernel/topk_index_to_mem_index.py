@@ -9,6 +9,7 @@ def _trans_topk_index_to_mem_index(
     topk_index,
     topk_index_stride_b,
     topk_index_stride_k,
+    ragged_start_index,
     ragged_mem_index,
     topk_mem_index,
     topk_mem_index_stride_b,
@@ -19,6 +20,9 @@ def _trans_topk_index_to_mem_index(
     offs_d = tl.arange(0, BLOCK_DMODEL)
     topk_index_ptrs = topk_index + cur_index * topk_index_stride_b + offs_d * topk_index_stride_k
     topk_indices = tl.load(topk_index_ptrs)
+    ragged_start = tl.load(ragged_start_index + cur_index)
+    topk_indices = tl.where(topk_indices != -1, topk_indices + ragged_start, -1)
+    tl.store(topk_index_ptrs, topk_indices)
 
     dest_mem_index = ragged_mem_index + topk_indices
     mem_index = tl.load(dest_mem_index, mask=topk_indices != -1, other=-1)
@@ -26,8 +30,13 @@ def _trans_topk_index_to_mem_index(
 
 
 @torch.no_grad()
-def trans_topk_index_to_mem_index(topk_index: torch.Tensor, ragged_mem_index: torch.Tensor):
+def trans_topk_index_to_mem_index(
+    topk_index: torch.Tensor,
+    ragged_start_index: torch.Tensor,
+    ragged_mem_index: torch.Tensor,
+):
     assert topk_index.shape[1] == 2048, f"Expected topk_index shape[1]=2048, got {topk_index.shape[1]}"
+    assert ragged_start_index.shape == (topk_index.shape[0],)
 
     grid = (topk_index.shape[0],)
 
@@ -37,6 +46,7 @@ def trans_topk_index_to_mem_index(topk_index: torch.Tensor, ragged_mem_index: to
         topk_index=topk_index,
         topk_index_stride_b=topk_index.stride(0),
         topk_index_stride_k=topk_index.stride(1),
+        ragged_start_index=ragged_start_index,
         ragged_mem_index=ragged_mem_index,
         topk_mem_index=topk_mem_index,
         topk_mem_index_stride_b=topk_mem_index.stride(0),

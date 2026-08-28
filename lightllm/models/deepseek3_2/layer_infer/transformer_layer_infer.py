@@ -8,7 +8,10 @@ from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
-from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
+from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import (
+    extract_indexer_ks,
+    extract_indexer_ks_dynamic,
+)
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
 
@@ -167,6 +170,11 @@ class NsaInfer:
         self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
+        # Most NSA models only instantiate the target model, so their decode
+        # layout follows the process-wide MTP setting.  A model that reuses an
+        # NSA layer as a recurrent drafter can override this with its own
+        # physical decode width (normally zero extra rows).
+        self.decode_mtp_step = None
 
     def _get_indices(
         self,
@@ -181,7 +189,7 @@ class NsaInfer:
 
         if self.tp_world_size_ > 1:
             q_merge = torch.empty(
-                size=(self.tp_world_size_ * q.numel()),
+                size=(self.tp_world_size_ * q.numel(),),
                 dtype=q.dtype,
                 device=q.device,
             )
@@ -196,11 +204,12 @@ class NsaInfer:
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
+        indexer_k_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_)
         destindex_copy_indexer_ks(
             K_fp8=k_fp8,
             K_scale=k_scale,
             DestLoc=infer_state.mem_index,
-            O_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
+            O_buffer=indexer_k_buffer,
         )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
@@ -213,17 +222,39 @@ class NsaInfer:
         if infer_state.is_prefill:
             mtp_step = 0
         else:
-            mtp_step = get_env_start_args().mtp_step
-        # Use efficient Triton kernel to extract FP8 keys and scales from buffer
-        k_fp8_, k_scale_ = extract_indexer_ks(
-            I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
-            b_seq_len=infer_state.b_seq_len,
-            b_req_idx=infer_state.b_req_idx,
-            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-            out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
-            max_kv_seq_len=infer_state.max_kv_seq_len,
-            mtp_step=mtp_step,
+            mtp_step = (
+                get_env_start_args().mtp_step
+                if self.decode_mtp_step is None
+                else self.decode_mtp_step
+            )
+        # LightSpec compacts each request to a variable number of contiguous
+        # verify rows. Its sparse-index K packing must follow request boundaries
+        # instead of assuming the fixed process-wide MTP width.
+        use_dynamic_layout = (
+            not infer_state.is_prefill
+            and mtp_step > 0
+            and get_env_start_args().mtp_dynamic_verify
         )
+        if use_dynamic_layout:
+            k_fp8_, k_scale_ = extract_indexer_ks_dynamic(
+                I_buffer=indexer_k_buffer,
+                b_seq_len=infer_state.b_seq_len,
+                b_req_idx=infer_state.b_req_idx,
+                b_mtp_index=infer_state.b_mtp_index,
+                req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+                max_kv_seq_len=infer_state.max_kv_seq_len,
+                max_request_num=infer_state.req_manager.max_request_num,
+            )
+        else:
+            k_fp8_, k_scale_ = extract_indexer_ks(
+                I_buffer=indexer_k_buffer,
+                b_seq_len=infer_state.b_seq_len,
+                b_req_idx=infer_state.b_req_idx,
+                req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+                out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
+                max_kv_seq_len=infer_state.max_kv_seq_len,
+                mtp_step=mtp_step,
+            )
 
         import deep_gemm
 
@@ -244,12 +275,16 @@ class NsaInfer:
             lengths=lengths,
             topk=self.index_topk,
         )
-        b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
+        # The long-prefill score matrix can be tens of GiB.  fast_topk_v2 has
+        # already consumed it, so release its storage before materializing the
+        # 2048-wide global and memory-index tables below.
+        del logits
         # 将 topk index 转化为 mem index
         from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
 
         b_topk_mem_index = trans_topk_index_to_mem_index(
             topk_index=b_topk_index,
+            ragged_start_index=ks,
             ragged_mem_index=att_state.ragged_mem_index,
         )
 

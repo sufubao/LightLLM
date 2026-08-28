@@ -1,4 +1,5 @@
 import os
+import math
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import gc
@@ -23,6 +24,9 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
+    is_vocab_parallel_greedy_enabled,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
@@ -58,6 +62,7 @@ torch.backends.cudnn.enabled = True
 
 class TpPartBaseModel:
     is_mtp_draft_model = False
+    replicated_attention_ep = False
 
     # weight class
     pre_and_post_weight_class = None
@@ -94,9 +99,16 @@ class TpPartBaseModel:
             if get_env_start_args().enable_decode_microbatch_overlap
             else self.graph_max_batch_size
         )
+        self.logical_graph_max_batch_size = self.graph_max_batch_size
         self.mtp_manager = MtpManager.get_instance()
-        self.graph_max_batch_size = self.graph_max_batch_size * self.mtp_manager.get_decode_batch_multiplier(
+        self.decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(
             self.is_mtp_draft_model
+        )
+        cuda_graph_batch_multiplier = self.mtp_manager.get_decode_cuda_graph_batch_multiplier(
+            self.is_mtp_draft_model
+        )
+        self.graph_max_batch_size = (
+            self.graph_max_batch_size * cuda_graph_batch_multiplier
         )
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
@@ -107,6 +119,12 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
+        self.use_replicated_attention_ep = (
+            self.replicated_attention_ep
+            and self.enable_tpsp_mix_mode
+            and self.args.enable_ep_moe
+            and not self.is_mtp_draft_model
+        )
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -279,19 +297,35 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
-        decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        cuda_graph_batch_multiplier = self.mtp_manager.get_decode_cuda_graph_batch_multiplier(
+            self.is_mtp_draft_model
+        )
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
+        extra_batch_sizes = None
+        if self.mtp_manager.draft_model_needs_logical_batch_graphs(self.is_mtp_draft_model):
+            # Recurrent EAGLE alternates between a full-width verify-layout
+            # extend and one-row-per-request recursive draft forwards.  Keep
+            # the ordinary logical schedule in addition to the widened one so
+            # neither phase falls back to eager execution or excessive padding.
+            extra_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
+                batch_step_size_before_split=1,
+                split_batch_size=self.args.graph_split_batch_size,
+                batch_step_size_after_split=self.args.graph_grow_step_size,
+                max_batch_size=self.logical_graph_max_batch_size,
+                tp_world_size=self.tp_world_size_,
+            )
         self.graph = (
             None
             if self.disable_cudagraph
             else CudaGraph(
                 batch_step_size_before_split=cuda_graph_grow_step_size,
-                split_batch_size=self.args.graph_split_batch_size * decode_batch_multiplier,
+                split_batch_size=self.args.graph_split_batch_size * cuda_graph_batch_multiplier,
                 batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
                 capture_infer_cost=self.args.mtp_dynamic_verify,
+                extra_batch_sizes=extra_batch_sizes,
             )
         )
         if self.graph is not None:
@@ -382,13 +416,24 @@ class TpPartBaseModel:
         else:
             return self._decode(model_input)
 
+    def _is_cuda_graph_output_compatible(self, *model_inputs: ModelInput) -> bool:
+        """Whether inputs match the dense/sparse output captured at startup."""
+
+        return (
+            self.is_mtp_draft_model
+            or not is_vocab_parallel_greedy_enabled()
+            or all(model_input.use_vocab_parallel_greedy for model_input in model_inputs)
+        )
+
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
+        infer_state.use_replicated_attention_ep = self.use_replicated_attention_ep
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_token_healing = self.is_token_healing
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
+        infer_state.use_vocab_parallel_greedy = self.is_mtp_draft_model or model_input.use_vocab_parallel_greedy
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
@@ -539,6 +584,9 @@ class TpPartBaseModel:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[0:origin_batch_size]
+            new_model_output.logits_logsumexp = new_model_output.logits_logsumexp[0:origin_batch_size]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -551,6 +599,9 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[0:origin_batch_size]
+            new_model_output.logits_logsumexp = new_model_output.logits_logsumexp[0:origin_batch_size]
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
@@ -584,7 +635,13 @@ class TpPartBaseModel:
         if self.args.enable_tpsp_mix_mode:
             infer_handle_token_num = triton.cdiv(infer_handle_token_num, self.tp_world_size_) * self.tp_world_size_
 
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=infer_handle_token_num):
+        if self.prefill_graph is not None and self.prefill_graph.can_run(
+            handle_token_num=infer_handle_token_num,
+            batch_size=model_input.batch_size,
+            max_q_seq_len=model_input.max_q_seq_len,
+            max_kv_seq_len=model_input.max_kv_seq_len,
+            max_cache_len=model_input.max_cache_len,
+        ):
             infer_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
                 handle_token_num=infer_handle_token_num
             )
@@ -643,14 +700,24 @@ class TpPartBaseModel:
         # 向上对齐到 TP world size 的整数倍，保证后续切分得到合法 shape。
         infer_batch_size = max(1, origin_batch_size)
         if self.args.enable_tpsp_mix_mode:
-            infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
+            decode_alignment = math.lcm(
+                self.tp_world_size_, self.decode_batch_multiplier
+            )
+            infer_batch_size = (
+                triton.cdiv(infer_batch_size, decode_alignment)
+                * decode_alignment
+            )
 
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
         infer_max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        use_cuda_graph = self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size,
-            max_len_in_batch=infer_max_kv_seq_len,
+        use_cuda_graph = (
+            self._is_cuda_graph_output_compatible(model_input)
+            and self.graph is not None
+            and self.graph.can_run(
+                batch_size=infer_batch_size,
+                max_len_in_batch=infer_max_kv_seq_len,
+            )
         )
         need_capture = False
         if use_cuda_graph:
@@ -690,7 +757,8 @@ class TpPartBaseModel:
             infer_state.prepare_prefill_dp_balance()
             input_embs = infer_state._all_to_all_balance_get(data=input_embs)
 
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+        if not self.use_replicated_attention_ep:
+            input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_tensors = [input_embs]
         if Autotuner.is_autotune_warmup():
             infer_state.hidden_collector = NoopHiddenCollector()
@@ -710,7 +778,13 @@ class TpPartBaseModel:
 
         handle_token_num = infer_state.input_ids.shape[0]
 
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
+        if self.prefill_graph is not None and self.prefill_graph.can_run(
+            handle_token_num=handle_token_num,
+            batch_size=infer_state.batch_size,
+            max_q_seq_len=infer_state.max_q_seq_len,
+            max_kv_seq_len=infer_state.max_kv_seq_len,
+            max_cache_len=infer_state.max_cache_len,
+        ):
             finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
                 handle_token_num=handle_token_num
             )
@@ -733,7 +807,9 @@ class TpPartBaseModel:
 
         input_embs = output_tensors[0]
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        last_input_embs = input_embs
+        if not self.use_replicated_attention_ep:
+            last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         if infer_state.need_dp_prefill_balance:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
@@ -742,6 +818,8 @@ class TpPartBaseModel:
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
+            logits_logsumexp=infer_state.logits_logsumexp,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
@@ -756,14 +834,17 @@ class TpPartBaseModel:
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+        if not self.use_replicated_attention_ep:
+            input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
             hidden_collector.add(layer_index=i, hidden=input_embs)
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        last_input_embs = input_embs
+        if not self.use_replicated_attention_ep:
+            last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         predict_logits: torch.Tensor = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
@@ -771,6 +852,8 @@ class TpPartBaseModel:
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
+            logits_logsumexp=infer_state.logits_logsumexp,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
         )
 
@@ -900,9 +983,18 @@ class TpPartBaseModel:
         origin_batch_size1 = model_input1.batch_size
         max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
         infer_batch_size = max(1, origin_batch_size0, origin_batch_size1)
-        infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
+        decode_alignment = math.lcm(
+            self.tp_world_size_, self.decode_batch_multiplier
+        )
+        infer_batch_size = (
+            triton.cdiv(infer_batch_size, decode_alignment) * decode_alignment
+        )
 
-        if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
+        if (
+            self._is_cuda_graph_output_compatible(model_input0, model_input1)
+            and self.graph is not None
+            and self.graph.can_run(infer_batch_size, max_len_in_batch)
+        ):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
             need_capture = self.graph.need_capture(infer_batch_size)
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
@@ -1025,11 +1117,15 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
+            logits_logsumexp=infer_state.logits_logsumexp,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
+            logits_token_ids=infer_state1.logits_token_ids,
+            logits_logsumexp=infer_state1.logits_logsumexp,
             mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
             prompt_logics=infer_state1.prompt_logics,
         )
@@ -1074,10 +1170,14 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
+            logits_logsumexp=infer_state.logits_logsumexp,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
+            logits_token_ids=infer_state1.logits_token_ids,
+            logits_logsumexp=infer_state1.logits_logsumexp,
             mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
         )
 

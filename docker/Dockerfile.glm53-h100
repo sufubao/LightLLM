@@ -1,0 +1,80 @@
+# syntax=docker/dockerfile:1.7
+
+# This is the exact SGLang GLM-5.3 runtime used for the H100 measurements.
+ARG BASE_IMAGE=lmsysorg/sglang@sha256:e6f5482505e7502f791fe4615ad1fbec118cbbd6b44e98f2479b16b98b985ad6
+FROM ${BASE_IMAGE}
+
+ARG OCI_CREATED
+ARG OCI_REVISION
+ARG OCI_SOURCE=https://github.com/sufubao/LightLLM
+ARG OCI_VERSION
+ARG BASE_NAME=lmsysorg/sglang:glm-5.3-flash
+ARG BASE_DIGEST=sha256:e6f5482505e7502f791fe4615ad1fbec118cbbd6b44e98f2479b16b98b985ad6
+
+LABEL org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.version="${OCI_VERSION}" \
+      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100 TP8" \
+      org.opencontainers.image.base.name="${BASE_NAME}" \
+      org.opencontainers.image.base.digest="${BASE_DIGEST}" \
+      ai.lightllm.model="GLM-5.3-Flash" \
+      ai.lightllm.accelerator="NVIDIA H100 80GB" \
+      ai.lightllm.tensor-parallel-size="8" \
+      ai.lightllm.profile="throughput-c256"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LOADWORKER=18 \
+    LIGHTLLM_USE_SGLANG_TRITON_MOE=1 \
+    LIGHTLLM_SGLANG_FUSED_MOE_SUM=1 \
+    LIGHTLLM_VOCAB_PARALLEL_GREEDY=1 \
+    LIGHTLLM_SYMM_MEM_OUT_OF_PLACE=1 \
+    LIGHTLLM_LOG_LEVEL=warning \
+    LIGHTLLM_ENABLE_FAST_MTP_KDA=1 \
+    NCCL_CUMEM_ENABLE=1 \
+    NCCL_NVLS_ENABLE=1 \
+    CUDA_DEVICE_MAX_CONNECTIONS=8 \
+    TRTLLM_ENABLE_PDL=1 \
+    NCCL_GRAPH_MIXING_SUPPORT=0
+
+WORKDIR /opt/lightllm
+
+COPY docker/requirements-glm53-runtime.txt /tmp/requirements-glm53-runtime.txt
+RUN python -m pip install --no-cache-dir --no-deps --require-hashes \
+      -r /tmp/requirements-glm53-runtime.txt && \
+    rm /tmp/requirements-glm53-runtime.txt
+
+COPY setup.py LICENSE README.md ./
+COPY lightllm ./lightllm
+RUN python -m pip install --no-cache-dir --no-deps . && \
+    python -c "import lightllm.server.api_server; print('LightLLM GLM-5.3 runtime import OK')"
+
+EXPOSE 8002
+STOPSIGNAL SIGTERM
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/v1/models', timeout=3).read()" || exit 1
+
+CMD ["python", "-m", "lightllm.server.api_server", \
+     "--model_dir", "/model", \
+     "--model_name", "glm-5.3-flash", \
+     "--tp", "8", \
+     "--host", "0.0.0.0", \
+     "--port", "8002", \
+     "--httpserver_workers", "16", \
+     "--mem_fraction", ".90", \
+     "--max_total_token_num", "335000", \
+     "--running_max_req_size", "256", \
+     "--max_req_total_len", "65500", \
+     "--batch_max_tokens", "65536", \
+     "--chunked_prefill_size", "65536", \
+     "--linear_att_ssm_data_type", "bfloat16", \
+     "--graph_max_batch_size", "256", \
+     "--graph_split_batch_size", "4", \
+     "--graph_grow_step_size", "16", \
+     "--enable_fused_shared_experts", \
+     "--schedule_time_interval", "0.001", \
+     "--prefill_coalesce_interval", "0.5", \
+     "--reasoning_parser", "glm45", \
+     "--tool_call_parser", "glm47"]

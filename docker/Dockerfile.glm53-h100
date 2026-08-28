@@ -22,8 +22,17 @@ RUN python -m pip install --no-cache-dir --no-deps . && \
       /root/.cargo/registry \
       /sgl-workspace/sglang/python/sglang/multimodal_gen \
       /sgl-workspace/sglang/python/sglang/srt/disaggregation \
-      /sgl-workspace/sglang/scripts/playground/replay_request_dump.py && \
-    python -c "import lightllm.server.api_server; from sglang.srt.layers.moe.moe_runner.triton_utils import fused_moe; print('Hardened LightLLM GLM-5.3 runtime import OK')" && \
+      /sgl-workspace/sglang/scripts/playground/replay_request_dump.py \
+      /opt/sglang/bin/pip \
+      /opt/sglang/bin/pip3 \
+      /opt/sglang/bin/pip3.12 \
+      /opt/sglang/lib/python3.12/site-packages/pip \
+      /opt/sglang/lib/python3.12/site-packages/pip-*.dist-info \
+      /opt/sglang/lib/python3.12/site-packages/setuptools \
+      /opt/sglang/lib/python3.12/site-packages/setuptools-*.dist-info \
+      /opt/sglang/lib/python3.12/site-packages/wheel \
+      /opt/sglang/lib/python3.12/site-packages/wheel-*.dist-info && \
+    python -c "import importlib.util, lightllm.server.api_server, msgpack; from sglang.srt.layers.moe.moe_runner.triton_utils import fused_moe; assert msgpack.__version__ == '1.2.2'; assert importlib.util.find_spec('pip') is None; assert importlib.util.find_spec('setuptools') is None; print('Hardened LightLLM GLM-5.3 runtime import OK')" && \
     test ! -e /etc/ssh/ssh_host_rsa_key && \
     test ! -e /sgl-workspace/sglang/python/sglang/multimodal_gen && \
     test ! -e /sgl-workspace/sglang/python/sglang/srt/disaggregation

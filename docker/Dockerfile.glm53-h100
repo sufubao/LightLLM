@@ -32,7 +32,7 @@ RUN python -m pip install --no-cache-dir --no-deps . && \
       /opt/sglang/lib/python3.12/site-packages/setuptools-*.dist-info \
       /opt/sglang/lib/python3.12/site-packages/wheel \
       /opt/sglang/lib/python3.12/site-packages/wheel-*.dist-info && \
-    python -c "import importlib.util, lightllm.server.api_server, msgpack; from sglang.srt.layers.moe.moe_runner.triton_utils import fused_moe; assert msgpack.__version__ == '1.2.2'; assert importlib.util.find_spec('pip') is None; assert importlib.util.find_spec('setuptools') is None; print('Hardened LightLLM GLM-5.3 runtime import OK')" && \
+    python -c "import frozendict, hypercorn, importlib.metadata as metadata, importlib.util, lightllm.server.api_start, msgpack, rpyc, ujson; from sglang.srt.layers.moe.moe_runner.triton_utils import fused_moe; assert metadata.version('hypercorn') == '0.18.0'; assert msgpack.__version__ == '1.2.2'; assert rpyc.__version__ == '6.0.2'; assert importlib.util.find_spec('pip') is None; assert importlib.util.find_spec('setuptools') is None; print('Hardened LightLLM GLM-5.3 runtime import OK')" && \
     test ! -e /etc/ssh/ssh_host_rsa_key && \
     test ! -e /sgl-workspace/sglang/python/sglang/multimodal_gen && \
     test ! -e /sgl-workspace/sglang/python/sglang/srt/disaggregation
@@ -94,7 +94,7 @@ ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sb
 WORKDIR /opt/lightllm
 
 RUN test "$(command -v python)" = /opt/sglang/bin/python && \
-    python -c "import lightllm.server.api_server, torch; print(torch.__version__)"
+    python -c "import hypercorn, importlib.metadata as metadata, lightllm.server.api_start, rpyc, torch; assert metadata.version('hypercorn') == '0.18.0'; assert rpyc.__version__ == '6.0.2'; print(torch.__version__)"
 
 EXPOSE 8002
 STOPSIGNAL SIGTERM

@@ -45,6 +45,7 @@ def _run_both(
         dt_bias=dt_bias,
         a_raw=a_raw,
         b_raw=b_raw,
+        fixed_seq_len=0,
     )
 
     o_new, fs_new = mtp_fused_recurrent_gated_delta_rule(

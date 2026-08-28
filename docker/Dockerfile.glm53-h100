@@ -64,7 +64,19 @@ LABEL org.opencontainers.image.created="${OCI_CREATED}" \
       ai.lightllm.profile="throughput-c256" \
       ai.lightllm.security-profile="flattened-no-sglang-server-components"
 
-ENV PYTHONUNBUFFERED=1 \
+ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64 \
+    LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
+    CUDA_HOME=/usr/local/cuda \
+    CUDA_VERSION=13.0.3 \
+    NVARCH=x86_64 \
+    NVIDIA_REQUIRE_CUDA="cuda>=13.0" \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8 \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     LOADWORKER=18 \
     LIGHTLLM_USE_SGLANG_TRITON_MOE=1 \
@@ -81,14 +93,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /opt/lightllm
 
+RUN test "$(command -v python)" = /opt/sglang/bin/python && \
+    python -c "import lightllm.server.api_server, torch; print(torch.__version__)"
+
 EXPOSE 8002
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/v1/models', timeout=3).read()" || exit 1
+    CMD /opt/sglang/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/v1/models', timeout=3).read()" || exit 1
 
-CMD ["python", "-m", "lightllm.server.api_server", \
+CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--model_dir", "/model", \
      "--model_name", "glm-5.3-flash", \
      "--tp", "8", \

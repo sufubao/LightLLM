@@ -39,7 +39,14 @@ RUN python -m pip install --no-cache-dir --no-deps . && \
 
 # Flatten the prepared root filesystem so deleted base-image host keys and
 # developer-only vulnerable components are absent from the published layers,
-# rather than merely hidden by an OCI whiteout in a later layer.
+# rather than merely hidden by an OCI whiteout in a later layer. Keep the
+# Python NVIDIA runtime in a separate clean layer so private registries do not
+# have to accept a single compressed blob larger than their upload gateway
+# limit; the combined filesystem is identical to the prepared stage.
+FROM prepared AS prepared_without_python_nvidia
+
+RUN rm -rf /opt/sglang/lib/python3.12/site-packages/nvidia
+
 FROM scratch AS runtime
 
 ARG OCI_CREATED
@@ -49,7 +56,9 @@ ARG OCI_VERSION
 ARG BASE_NAME=lmsysorg/sglang:glm-5.3-flash
 ARG BASE_DIGEST=sha256:92afb4c878eef9cbb17ca9a2c1d15d5cda58585f90bbf5915a79f0f6284aad10
 
-COPY --from=prepared / /
+COPY --from=prepared_without_python_nvidia / /
+COPY --from=prepared /opt/sglang/lib/python3.12/site-packages/nvidia \
+     /opt/sglang/lib/python3.12/site-packages/nvidia
 
 LABEL org.opencontainers.image.created="${OCI_CREATED}" \
       org.opencontainers.image.revision="${OCI_REVISION}" \

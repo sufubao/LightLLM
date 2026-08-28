@@ -8,6 +8,7 @@ on:
       - .github/workflows/glm53-h100-image.yml
       - .dockerignore
       - docker/Dockerfile.glm53-h100
+      - docker/glm53-h100.openvex.json
       - docker/requirements-glm53-runtime.txt
       - lightllm/**
       - setup.py
@@ -88,11 +89,25 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE%@*}@${DIGEST}"
 
+      - name: Attach security VEX
+        env:
+          IMAGE: ${{ steps.identity.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign attest --yes \
+            --predicate docker/glm53-h100.openvex.json \
+            --type openvex \
+            "${IMAGE%@*}@${DIGEST}"
+
       - name: Verify signature
         env:
           IMAGE: ${{ steps.identity.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           cosign verify "${IMAGE%@*}@${DIGEST}" \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/glm53-h100-image.yml@refs/heads/support-glm-5-3-flash$" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          cosign verify-attestation "${IMAGE%@*}@${DIGEST}" \
+            --type openvex \
             --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/glm53-h100-image.yml@refs/heads/support-glm-5-3-flash$" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"

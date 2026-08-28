@@ -21,7 +21,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-publish-sign:
@@ -46,11 +45,12 @@ jobs:
         id: identity
         shell: bash
         run: |
+          repository="${GITHUB_REPOSITORY,,}"
           version="v1.2.0-h100-tp8-${GITHUB_SHA}"
           created="$(git show -s --format=%cI HEAD)"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "created=${created}" >> "${GITHUB_OUTPUT}"
-          echo "image=${REGISTRY}/${IMAGE_NAME}:${version}" >> "${GITHUB_OUTPUT}"
+          echo "image=${REGISTRY}/${repository}:${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435

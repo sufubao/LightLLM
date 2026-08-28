@@ -210,8 +210,10 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
-    # Sparse vocabulary output. Each logit column maps to the corresponding
-    # global token id; logsumexp still covers the complete vocabulary.
+    # Vocab-parallel outputs keep logits as logits while mapping each sparse
+    # column back to its global token id. logits_logsumexp is computed over the
+    # complete vocabulary, so sparse argmax probabilities remain exact.
+    # Both fields are None for historical dense logits.
     logits_token_ids: Optional[torch.Tensor] = None
     logits_logsumexp: Optional[torch.Tensor] = None
 
@@ -240,7 +242,7 @@ class ModelOutput:
         return self.logits_token_ids is not None
 
     def index_select_logits_rows(self, index: torch.Tensor) -> "ModelOutput":
-        """Select logit rows without dropping sparse-vocabulary metadata."""
+        """Select logit rows without dropping their vocabulary metadata."""
 
         return ModelOutput(
             logits=self.logits.index_select(0, index),

@@ -51,7 +51,6 @@ class InferStateInfo:
 
         self.mem_index: torch.Tensor = None
 
-        self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False
         self.use_vocab_parallel_greedy: bool = False
         self.logits_token_ids: Optional[torch.Tensor] = None

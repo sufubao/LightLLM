@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import stat
 from pathlib import Path
 from typing import NamedTuple
@@ -83,6 +85,68 @@ def restore_directory_metadata(destination: Path, source: Path, directory_stats:
     )
 
 
+def copy_path(
+    source: Path,
+    destination: Path,
+    copied_inodes: dict[tuple[int, int], Path],
+) -> None:
+    metadata = source.lstat()
+    inode = (metadata.st_dev, metadata.st_ino)
+
+    if stat.S_ISLNK(metadata.st_mode):
+        destination.symlink_to(os.readlink(source))
+        os.lchown(destination, metadata.st_uid, metadata.st_gid)
+        shutil.copystat(source, destination, follow_symlinks=False)
+        return
+
+    if stat.S_ISDIR(metadata.st_mode):
+        destination.mkdir(mode=stat.S_IMODE(metadata.st_mode))
+        for entry in sorted(os.scandir(source), key=lambda item: item.name):
+            copy_path(Path(entry.path), destination / entry.name, copied_inodes)
+        os.chown(destination, metadata.st_uid, metadata.st_gid)
+        shutil.copystat(source, destination, follow_symlinks=False)
+        return
+
+    if stat.S_ISREG(metadata.st_mode):
+        previous = copied_inodes.get(inode)
+        if metadata.st_nlink > 1 and previous is not None:
+            destination.hardlink_to(previous)
+        else:
+            shutil.copyfile(source, destination, follow_symlinks=False)
+            copied_inodes[inode] = destination
+        os.chown(destination, metadata.st_uid, metadata.st_gid)
+        shutil.copystat(source, destination, follow_symlinks=False)
+        return
+
+    if stat.S_ISFIFO(metadata.st_mode):
+        os.mkfifo(destination, stat.S_IMODE(metadata.st_mode))
+    elif stat.S_ISCHR(metadata.st_mode) or stat.S_ISBLK(metadata.st_mode):
+        os.mknod(destination, metadata.st_mode, metadata.st_rdev)
+    else:
+        raise RuntimeError(f"unsupported file type while copying {source}")
+    os.chown(destination, metadata.st_uid, metadata.st_gid)
+    shutil.copystat(source, destination, follow_symlinks=False)
+
+
+def move_path(
+    source: Path,
+    destination: Path,
+    copied_inodes: dict[tuple[int, int], Path],
+) -> None:
+    try:
+        source.rename(destination)
+        return
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+
+    copy_path(source, destination, copied_inodes)
+    if source.is_dir() and not source.is_symlink():
+        shutil.rmtree(source)
+    else:
+        source.unlink()
+
+
 def main() -> None:
     Path(__file__).unlink()
     LAYER_ROOT.mkdir(mode=0o755)
@@ -114,10 +178,11 @@ def main() -> None:
     for index in range(BUCKET_COUNT):
         (LAYER_ROOT / f"{index:02d}").mkdir(mode=0o755)
 
+    copied_inodes: dict[tuple[int, int], Path] = {}
     for source, bucket in sorted(assignments, key=lambda item: str(item[0])):
         destination = LAYER_ROOT / f"{bucket:02d}" / source.relative_to("/")
         make_parent_directories(source, destination, directory_stats, created_directories)
-        source.rename(destination)
+        move_path(source, destination, copied_inodes)
 
     for destination, source in sorted(created_directories.items(), key=lambda item: len(item[0].parts), reverse=True):
         restore_directory_metadata(destination, source, directory_stats)

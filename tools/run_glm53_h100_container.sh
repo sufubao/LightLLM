@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-image="${LIGHTLLM_GLM53_IMAGE:-lightllm-glm53:vl-1m-tp8}"
-name="${LIGHTLLM_GLM53_CONTAINER:-glm53-lightllm-vl-1m}"
+image="${LIGHTLLM_GLM53_IMAGE:-lightllm-glm53:vl-1m-c100-ep8}"
+name="${LIGHTLLM_GLM53_CONTAINER:-glm53-lightllm-vl-1m-c100-ep8}"
 model_dir="${LIGHTLLM_GLM53_MODEL_DIR:-/home/devsft/models/GLM-5.3-Flash}"
 cache_dir="${LIGHTLLM_GLM53_CACHE_DIR:-/home/devsft/cache-glm53-lightllm}"
 triton_cache_dir="${LIGHTLLM_GLM53_TRITON_CACHE_DIR:-/home/devsft/cache-glm53-triton}"

@@ -2,39 +2,38 @@
 
 This branch packages LightLLM text and vision inference for GLM-5.3-Flash on
 one eight-GPU H100 or H200 node. The release profile keeps the 1,048,576-token
-request limit and multimodal workers while optimizing 100-way concurrency with
-EP8, TP/SP mixing, prefill microbatch overlap, and CUDA graphs.
+request limit and uses pure TP8, CUDA graphs through batch 256, a 16,384-token
+batch budget, fused shared experts, and no dynamic prompt cache.
 
 ## Release image
 
 The image is published only to the requested private registry:
 
 ```text
-registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm:v1.3.0-glm53-vl-1m-c100-ep8-cc6319a4350c70e062218d85a1cbf1e8d6890cd5
+registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm:v1.3.0-glm53-vl-1m-tp8-c256-62b8a9da25f7519822657c8126017fbc2793a08a
 ```
 
 Immutable manifest:
 
 ```text
-registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:f456207d3869996c9cfaa17df73058296e8de3720ef3d7eda4d56abb4719ff14
+registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:3d07b3e9964cae15001e8136f1d19bd0b655df58488546e32f1dd15ffc9dbab7
 ```
 
-The corresponding local image is
-`lightllm-glm53:vl-1m-c100-ep8` (image ID
-`sha256:f5b1c4282af30f656275d9726637e8d86e7a2dd7b5a103069fb81c6bea92831d`).
-The image embeds source revision `cc6319a4350c70e062218d85a1cbf1e8d6890cd5`,
-the validated H100 autotune records, and the complete server command.
+The corresponding local image is `lightllm-glm53:vl-1m-tp8-c256` (image ID
+`sha256:34939d00288e2e52ccecd3a241185648e2929a2a6f48bec1173592d337969dff`).
+The image embeds source revision
+`62b8a9da25f7519822657c8126017fbc2793a08a` and the complete server command.
 
 ## Deploy on the H100 node
 
 No command override or autotune-config mount is required:
 
 ```bash
-IMAGE="registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:f456207d3869996c9cfaa17df73058296e8de3720ef3d7eda4d56abb4719ff14"
+IMAGE="registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:3d07b3e9964cae15001e8136f1d19bd0b655df58488546e32f1dd15ffc9dbab7"
 
 sudo docker pull "$IMAGE"
 sudo docker run -d \
-  --name glm53-lightllm-vl-1m-c100-ep8 \
+  --name glm53-lightllm-vl-1m-tp8-c256 \
   --restart unless-stopped \
   --network host \
   --ipc host \
@@ -53,14 +52,14 @@ The endpoint is `http://127.0.0.1:8002/v1`. Startup takes several minutes on
 the tested host. Check it with:
 
 ```bash
-sudo docker ps --filter name=glm53-lightllm-vl-1m-c100-ep8
+sudo docker ps --filter name=glm53-lightllm-vl-1m-tp8-c256
 curl --fail --show-error http://127.0.0.1:8002/v1/models
 ```
 
 ## Run the local image on H200
 
 ```bash
-LIGHTLLM_GLM53_IMAGE=lightllm-glm53:vl-1m-c100-ep8 \
+LIGHTLLM_GLM53_IMAGE=lightllm-glm53:vl-1m-tp8-c256 \
 LIGHTLLM_GLM53_MODEL_DIR=/nvme/sufubao/models/GLM-5.3-Flash \
 LIGHTLLM_GLM53_CACHE_DIR=/nvme/sufubao/m39-home/cache/glm53-lightllm-h200 \
 LIGHTLLM_GLM53_TRITON_CACHE_DIR=/nvme/sufubao/m39-home/cache/glm53-triton-h200 \
@@ -68,77 +67,50 @@ LIGHTLLM_GLM53_DEEP_GEMM_CACHE_DIR=/nvme/sufubao/m39-home/cache/glm53-deep-gemm-
 tools/run_glm53_h100_container.sh
 ```
 
-## Same-host c100 comparison
+## Same-host concurrency comparison
 
-LightLLM, vLLM, and SGLang were run sequentially on the same otherwise-idle
-8xH100 80 GB host on 2026-08-30. All used the same local FP8 checkpoint, TP8,
-BF16 KV cache, declared 1,048,576-token context, and no speculative decoding.
-The common SGLang `bench_serving` client used seed 42, temperature 0,
-streaming, ignored EOS, infinite request rate, one excluded warmup request,
-and random input/output lengths of 1--1,000 tokens. The fixed 1,000-request
-sample contained 504,929 input and 494,908 generated tokens. Every engine
-completed 1,000/1,000 requests.
+LightLLM, vLLM, and SGLang ran sequentially on the same otherwise-idle 8xH100
+80 GB node with the same local FP8 checkpoint, TP8, BF16 KV cache, declared
+1,048,576-token context, no speculative decoding, and prompt/prefix caching
+disabled. The unchanged SGLang `bench_serving` client used seed 42,
+temperature 0, streaming, ignored EOS, infinite request rate, one excluded
+warmup request, and random 1--1,000-token inputs and outputs.
 
-| Engine | Duration | Request/s | Input tok/s | Output tok/s | Total tok/s | LightLLM lead |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **LightLLM** | **233.37 s** | **4.285** | **2,163.67** | **2,120.73** | **4,284.40** | -- |
-| vLLM | 270.74 s | 3.694 | 1,864.99 | 1,827.97 | 3,692.96 | **+16.02%** |
-| SGLang | 328.59 s | 3.043 | 1,536.66 | 1,506.16 | 3,042.82 | **+40.80%** |
+The request counts for c1/c8/c16/c64/c128/c256 were
+10/80/160/640/1,000/1,000. Every request completed. Each engine cell is
+`output tok/s / total tok/s`; the percentage is LightLLM's lead over the
+faster competing engine.
 
-The compared server builds and material settings were:
+| Concurrency | LightLLM | SGLang | vLLM | Lead |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | **106.03 / 200.86** | 45.75 / 86.66 | 72.91 / 138.11 | **+45.44%** |
+| 8 | **556.56 / 1,097.02** | 300.77 / 592.83 | 483.78 / 953.56 | **+15.04%** |
+| 16 | **917.99 / 1,734.29** | 850.45 / 1,606.69 | 812.67 / 1,535.31 | **+7.94%** |
+| 64 | **2,296.01 / 4,696.03** | 1,680.11 / 3,436.32 | 1,943.30 / 3,974.64 | **+18.15%** |
+| 128 | **3,615.77 / 7,304.76** | 2,298.01 / 4,642.55 | 2,980.61 / 6,021.57 | **+21.31%** |
+| 256 | **5,032.38 / 10,166.66** | 2,939.85 / 5,939.23 | 4,109.91 / 8,303.03 | **+22.45%** |
 
-- LightLLM: this release profile; EP8, TP/SP mixing, prefill microbatch
-  overlap, 1,024-token chunks, graph batches through 104, and FlashInfer
-  all-reduce disabled.
-- vLLM: `vllm/vllm-openai:glm53-flash-x86_64-cu130@sha256:2e771fa615452282cc331eb418b3ef21636fce355bea0491fca89e6d362ab703`
-  (`0.1.dev20051+g487ecf187`); TP8, 256 sequences, chunked prefill, prefix
-  caching, and `gpu-memory-utilization=0.90`.
-- SGLang: `lmsysorg/sglang@sha256:0836f0160fa785e424e68d13ef88ddd548f87e6e11ad9f0e4de982e4f9188aaf`
-  (`0.0.0.dev1+gf609d677b`); TP8/EP8, DeepGEMM,
-  `mem-fraction-static=0.80`, and 1,024-token chunks.
-
-Cross-engine TTFT/ITL and client-retokenized text are intentionally omitted:
-the engines expose reasoning text under different streaming fields. The API
-usage token totals, successful-request count, wall time, and aggregate
-throughput above are directly comparable.
-
-Result files:
-
-- LightLLM: `/nvme/sufubao/m39-home/results/glm53_h100_optimization/lightllm_ep8_tpsp_prefill_overlap_graph_c104_b4096_wait64_tuned_random_1k_c100_full1000.jsonl`
-- vLLM: `/nvme/sufubao/m39-home/results/glm53_h100_engine_compare/vllm_h100_random_1k_c100.jsonl`
-- SGLang: `/nvme/sufubao/m39-home/results/glm53_h100_engine_compare/sglang_h100_random_1k_c100.jsonl`
-
-The LightLLM run is archived by `exp` under
-`~/experiments/runs/260830-025933-usr-bin-timeout-2400-docker-run-rm-network-host-`.
+The lowest-margin c16 point was repeated at 1,757.52 total tok/s. Result files
+are under
+`/nvme/sufubao/m39-home/results/glm53_h100_optimization_round3/`; the original
+SGLang and vLLM comparison is in
+`/nvme/sufubao/m39-home/results/glm53_h100_engine_concurrency_sweep/`.
 
 ## Accuracy and capability checks
 
-The final optimized execution path was evaluated before publication. Every
-evaluation was recorded with `exp`.
+Every evaluation was recorded with `exp`.
 
 | Check | Result | Experiment |
 | --- | --- | --- |
-| GSM8K, fixed first 100, 5-shot, greedy | **99/100**, 100/100 completed, no 2,048-token truncation | `260830-030435-bin-bash-lc-export-OPENAI-API-KEY-EMPTY-PYTHONPA` |
-| MMMU, fixed 100, full multimodal, greedy | **63/100**, 100/100 completed; 34 answers reached the 2,048-token cap | `260830-030533-bin-bash-lc-export-OPENAI-API-KEY-EMPTY-PYTHONPA` |
+| GSM8K, fixed first 100, 5-shot, greedy | **99/100**, 100/100 completed, no 2,048-token truncation | `260830-162659-bin-bash-lc-export-OPENAI-API-KEY-EMPTY-PYTHONPA` |
+| MMMU, fixed 100, full multimodal, greedy | **64/100**, 100/100 completed; 36 answers reached the 2,048-token cap | `260830-163016-bin-bash-lc-export-OPENAI-API-KEY-EMPTY-HF-DATAS` |
 | Exact 1M-context needle | API and tokenizer both counted 1,000,000 prompt tokens; recovered `ZEBRA-4821` | `260829-211036` |
-| Text smoke | Arithmetic answer `579` | `260829-210839` |
 | Synthetic vision smoke | Correctly identified the red square | `260829-210908` |
-
-The previous conservative profile scored 64/100 on the same MMMU slice; the
-optimized profile's one-answer difference is within this 100-example sample,
-while it reduced capped answers from 39 to 34. The multimodal and 1M-context
-features remain enabled in the published command.
-
-References: [SGLang GLM-5 benchmark recipe](https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/autoregressive/GLM/GLM-5.mdx),
-[SGLang serving benchmark](https://github.com/sgl-project/sglang/blob/main/docs/cookbook/base/benchmarks/autoregressive_model_benchmark.mdx),
-[vLLM GLM-5.3-Flash recipe](https://recipes.vllm.ai/zai-org/GLM-5.3-Flash),
-and [vLLM GLM-5.3 support PR](https://github.com/vllm-project/vllm/pull/53906).
 
 ## Rebuild note
 
 `docker/Dockerfile.glm53-h100` is the complete reproducible build. The release
 was produced with `docker/Dockerfile.glm53-h100-overlay` from the previous
-immutable, flattened private image because Docker Hub base-metadata requests
-timed out during release. The overlay replaces the complete LightLLM source,
-checks the three new autotune records and import path, and pins both its source
-revision and base digest in OCI labels.
+immutable private release because its runtime layers were already available.
+The overlay replaces the complete LightLLM source and pins the source revision
+and base digest in OCI labels.

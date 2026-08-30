@@ -114,7 +114,7 @@ LABEL org.opencontainers.image.created="${OCI_CREATED}" \
       ai.lightllm.model="GLM-5.3-Flash" \
       ai.lightllm.accelerator="NVIDIA H100/H200" \
       ai.lightllm.tensor-parallel-size="8" \
-      ai.lightllm.profile="multimodal-1m-c100-ep8-tpsp-prefill-overlap" \
+      ai.lightllm.profile="multimodal-1m-tp8-c256-no-prompt-cache" \
       ai.lightllm.security-profile="flattened-no-sglang-server-components"
 
 ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -158,8 +158,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
 
 # LightLLM reserves 36 tokens in its HTTP admission guard. The token pool is
 # therefore request_limit + 36 so /v1/models advertises the full 1,048,576.
-# This EP8 + TP/SP profile is the exact full-multimodal configuration validated
-# at 100-way concurrency on an eight-H100 80 GB node.
+# This pure-TP8 profile is the exact full-multimodal configuration validated
+# from 1 through 256 concurrent requests on an eight-H100 80 GB node.
 CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--model_dir", "/model", \
      "--model_name", "glm-5.3-flash", \
@@ -169,20 +169,19 @@ CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--httpserver_workers", "16", \
      "--mem_fraction", ".90", \
      "--max_total_token_num", "1048612", \
-     "--running_max_req_size", "104", \
+     "--running_max_req_size", "256", \
      "--max_req_total_len", "1048576", \
-     "--batch_max_tokens", "4096", \
+     "--batch_max_tokens", "16384", \
      "--chunked_prefill_size", "1024", \
      "--linear_att_ssm_data_type", "bfloat16", \
-     "--linear_att_cache_size", "104", \
-     "--graph_max_batch_size", "104", \
+     "--linear_att_cache_size", "256", \
+     "--graph_max_batch_size", "256", \
      "--graph_split_batch_size", "8", \
      "--graph_grow_step_size", "16", \
      "--graph_max_len_in_batch", "2048", \
      "--disable_flashinfer_allreduce", \
-     "--enable_ep_moe", \
-     "--enable_tpsp_mix_mode", \
-     "--enable_prefill_microbatch_overlap", \
+     "--enable_fused_shared_experts", \
+     "--disable_dynamic_prompt_cache", \
      "--disable_aggressive_schedule", \
      "--router_max_wait_tokens", "64", \
      "--max_image_pixels", "6272000", \

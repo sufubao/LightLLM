@@ -7,7 +7,11 @@ import torch
 
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
+import lightllm.common.basemodel.attention.linear.flashinfer as flashinfer_linear
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
+from lightllm.common.basemodel.attention.linear.flashinfer import (
+    FlashInferLinearAttBackend,
+)
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
@@ -29,6 +33,14 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
         activation="silu",
         ssm_state_dtype=cache_dtype,
         _rearrange_mixed_qkv=lambda mixed: (q, q, q),
+        prepare_prefill_inputs=lambda mixed, a, b, layer_weight: (
+            q,
+            q,
+            q,
+            a.unsqueeze(0),
+            b.unsqueeze(0),
+            True,
+        ),
         prefill_kernel=lambda *args, **kwargs: (None, final_state),
     )
     state = gdn.LinearAttPrefillAttState(
@@ -60,7 +72,9 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     assert torch.equal(ssm_states, final_state.to(cache_dtype))
 
 
-def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
+def _create_decode_state(
+    *, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None
+):
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
@@ -70,7 +84,9 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         b_req_idx=b_req_idx,
         b_mtp_index=torch.zeros_like(b_req_idx),
         req_manager=SimpleNamespace(
-            HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
+            HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1
+            if req_to_mtp_state_index is not None
+            else -1,
             req_to_mtp_state_index=req_to_mtp_state_index,
         ),
     )
@@ -85,7 +101,9 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
 
 def test_decode_state_initializes_normal_layout():
     b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
-    state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
+    state = _create_decode_state(
+        draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx
+    )
 
     state.init_state()
 
@@ -107,9 +125,15 @@ def test_decode_state_initializes_fixed_mtp_layout():
 
     state.init_state()
 
-    torch.testing.assert_close(state.b1_mtp_cu_q_seq_len, torch.tensor([0, 3, 6], dtype=torch.int32))
-    torch.testing.assert_close(state.b_conv_buffer_idx, torch.tensor([2, 4], dtype=torch.int32))
-    torch.testing.assert_close(state.b_num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
+    torch.testing.assert_close(
+        state.b1_mtp_cu_q_seq_len, torch.tensor([0, 3, 6], dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        state.b_conv_buffer_idx, torch.tensor([2, 4], dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        state.b_num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32)
+    )
     torch.testing.assert_close(
         state.b_ssm_buffer_idx,
         torch.tensor([[6, 7, 8], [12, 13, 14]], dtype=torch.int32),
@@ -126,7 +150,11 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
 
     def build_params(**kwargs):
         build_calls.append(kwargs)
-        return expected_cu_q_seq_len, expected_conv_buffer_idx, expected_num_accepted_tokens
+        return (
+            expected_cu_q_seq_len,
+            expected_conv_buffer_idx,
+            expected_num_accepted_tokens,
+        )
 
     monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build_params)
     state = _create_decode_state(
@@ -173,23 +201,130 @@ def auto_linear_backend_args(monkeypatch):
     )
 
 
-def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear_backend_args):
+def test_missing_linear_backend_arg_uses_auto_selection(
+    monkeypatch, auto_linear_backend_args
+):
     validate_calls = []
-    flashqla = ModuleType("flash_qla")
-    flashqla.chunk_gated_delta_rule = lambda **kwargs: ("flashqla", kwargs)
-    monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
     monkeypatch.setattr(
         linear_create_utils,
         "validate",
         lambda name: validate_calls.append(name) or True,
     )
 
-    backend_class = linear_create_utils.get_qwen35_linear_prefill_att_backend_class(index=1)
+    backend_class = linear_create_utils.get_qwen35_linear_prefill_att_backend_class(
+        index=1
+    )
+
+    assert backend_class is FlashInferLinearAttBackend
+    assert validate_calls == ["flashinfer_gdn"]
+
+
+def test_auto_linear_prefill_falls_back_to_flashqla(
+    monkeypatch, auto_linear_backend_args
+):
+    validate_calls = []
+    monkeypatch.setattr(
+        linear_create_utils,
+        "validate",
+        lambda name: validate_calls.append(name) or name == "flashqla",
+    )
+
+    backend_class = linear_create_utils.get_qwen35_linear_prefill_att_backend_class(
+        index=1
+    )
 
     assert backend_class is FlashQlaLinearAttBackend
-    backend = object.__new__(backend_class)
-    assert backend.get_prefill_kernel()(q="q")[0] == "flashqla"
-    assert validate_calls == ["flashqla"]
+    assert validate_calls == ["flashinfer_gdn", "flashqla"]
+
+
+def test_flashinfer_backend_uses_fused_prefill_preparation(monkeypatch):
+    tensors = [torch.zeros((2, 3, 4)) for _ in range(3)] + [
+        torch.zeros((2, 3)) for _ in range(2)
+    ]
+    calls = []
+
+    def prepare(**kwargs):
+        calls.append(kwargs)
+        return tensors
+
+    monkeypatch.setattr(flashinfer_linear, "fused_gdn_prefill_post_conv", prepare)
+    backend = object.__new__(FlashInferLinearAttBackend)
+    backend.tp_num_k_heads = 1
+    backend.head_k_dim = 4
+    backend.head_v_dim = 4
+    layer_weight = SimpleNamespace(
+        linear_A_log=SimpleNamespace(weight="A_log"),
+        linear_dt_bias=SimpleNamespace(weight="dt_bias"),
+    )
+
+    result = backend.prepare_prefill_inputs("mixed_qkv", "a", "b", layer_weight)
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "conv_output": "mixed_qkv",
+        "a": "a",
+        "b": "b",
+        "A_log": "A_log",
+        "dt_bias": "dt_bias",
+        "num_k_heads": 1,
+        "head_k_dim": 4,
+        "head_v_dim": 4,
+        "apply_l2norm": True,
+        "output_g_exp": False,
+    }
+    assert [tuple(tensor.shape) for tensor in result[:5]] == [
+        (1, 2, 3, 4),
+        (1, 2, 3, 4),
+        (1, 2, 3, 4),
+        (1, 2, 3),
+        (1, 2, 3),
+    ]
+    assert result[5] is False
+
+
+def test_flashinfer_kernel_transposes_recurrent_state_layout(monkeypatch):
+    received = {}
+    gdn_prefill = ModuleType("flashinfer.gdn_prefill")
+
+    def chunk_gated_delta_rule(**kwargs):
+        received.update(kwargs)
+        output = torch.zeros((2, 1, 3), dtype=torch.bfloat16)
+        # FlashInfer state layout: [B, HV, V, K].
+        final_state = torch.arange(24, dtype=torch.float32).view(1, 1, 4, 6)
+        return output, final_state
+
+    gdn_prefill.chunk_gated_delta_rule = chunk_gated_delta_rule
+    flashinfer = ModuleType("flashinfer")
+    flashinfer.gdn_prefill = gdn_prefill
+    monkeypatch.setitem(sys.modules, "flashinfer", flashinfer)
+    monkeypatch.setitem(sys.modules, "flashinfer.gdn_prefill", gdn_prefill)
+
+    # LightLLM state layout: [B, HV, K, V]. Use K != V so a missing
+    # transpose cannot pass by shape coincidence.
+    initial_state = torch.arange(24, dtype=torch.bfloat16).view(1, 1, 6, 4)
+    output, final_state = flashinfer_linear.flashinfer_chunk_gated_delta_rule(
+        q=torch.zeros((1, 2, 1, 6), dtype=torch.bfloat16),
+        k=torch.zeros((1, 2, 1, 6), dtype=torch.bfloat16),
+        v=torch.zeros((1, 2, 1, 4), dtype=torch.bfloat16),
+        g=torch.zeros((1, 2, 1), dtype=torch.float32),
+        beta=torch.ones((1, 2, 1), dtype=torch.float32),
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=torch.tensor([0, 2], dtype=torch.int32),
+        use_qk_l2norm_in_kernel=False,
+    )
+
+    assert output.shape == (1, 2, 1, 3)
+    assert received["initial_state"].shape == (1, 1, 4, 6)
+    torch.testing.assert_close(
+        received["initial_state"],
+        initial_state.transpose(-1, -2).float(),
+    )
+    assert final_state.shape == (1, 1, 6, 4)
+    torch.testing.assert_close(
+        final_state,
+        torch.arange(24, dtype=torch.float32).view(1, 1, 4, 6).transpose(-1, -2),
+    )
 
 
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
@@ -265,11 +400,17 @@ def test_explicit_linear_backend_arg_skips_auto_selection(monkeypatch):
     monkeypatch.setattr(
         linear_create_utils,
         "validate",
-        lambda *args: pytest.fail("an explicit linear backend must not be auto-validated"),
+        lambda *args: pytest.fail(
+            "an explicit linear backend must not be auto-validated"
+        ),
     )
 
-    prefill_backend_class = linear_create_utils.get_qwen35_linear_prefill_att_backend_class(index=1)
-    decode_backend_class = linear_create_utils.get_qwen35_linear_decode_att_backend_class(index=1)
+    prefill_backend_class = (
+        linear_create_utils.get_qwen35_linear_prefill_att_backend_class(index=1)
+    )
+    decode_backend_class = (
+        linear_create_utils.get_qwen35_linear_decode_att_backend_class(index=1)
+    )
 
     assert prefill_backend_class is TritonLinearAttBackend
     assert decode_backend_class is TritonLinearAttBackend
@@ -298,13 +439,17 @@ def test_cli_accepts_linear_backend_at_index_one():
         linear_create_utils.get_qwen35_linear_decode_att_backend_class,
     ],
 )
-def test_linear_backend_rejects_non_linear_index(auto_linear_backend_args, get_backend_class):
+def test_linear_backend_rejects_non_linear_index(
+    auto_linear_backend_args, get_backend_class
+):
     with pytest.raises(AssertionError, match="index must be 1"):
         get_backend_class(index=0)
 
 
 def test_missing_linear_decode_backend_arg_defaults_to_triton(auto_linear_backend_args):
-    backend_class = linear_create_utils.get_qwen35_linear_decode_att_backend_class(index=1)
+    backend_class = linear_create_utils.get_qwen35_linear_decode_att_backend_class(
+        index=1
+    )
 
     assert backend_class is TritonLinearAttBackend
 
@@ -331,15 +476,21 @@ def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_
     assert validate_calls == ["optimized"]
 
 
-def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypatch, auto_linear_backend_args):
+def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(
+    monkeypatch, auto_linear_backend_args
+):
     monkeypatch.setattr(linear_create_utils, "validate", lambda *args: False)
 
-    backend_class = linear_create_utils.get_qwen35_linear_prefill_att_backend_class(index=1)
+    backend_class = linear_create_utils.get_qwen35_linear_prefill_att_backend_class(
+        index=1
+    )
 
     assert backend_class is TritonLinearAttBackend
 
 
-def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_backend_args):
+def test_gdn_prefill_backend_tries_candidates_in_order(
+    monkeypatch, auto_linear_backend_args
+):
     validate_calls = []
     flashqla2_backend = type("FlashQla2LinearAttBackend", (), {})
     flashqla3_backend = type("FlashQla3LinearAttBackend", (), {})

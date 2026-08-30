@@ -400,6 +400,7 @@ class TpPartBaseModel:
         infer_state.b_mtp_index = model_input.b_mtp_index
         infer_state.b_position_delta = model_input.b_position_delta
         if model_input.is_prefill:
+            infer_state.prefill_q_seq_lens = tuple(model_input.b_q_seq_len_cpu)
             if model_input.b_ready_cache_len is not None:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
             else:
@@ -518,6 +519,14 @@ class TpPartBaseModel:
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
         new_model_input.b_prefill_has_output_cpu = [e for e in new_model_input.b_prefill_has_output_cpu] + [False]
+        query_lens = new_model_input.b_q_seq_len_cpu
+        if query_lens is None:
+            query_lens = (
+                model_input.b_seq_len - model_input.b_ready_cache_len
+            ).tolist()
+        new_model_input.b_q_seq_len_cpu = [e for e in query_lens] + [
+            padded_token_num
+        ]
 
         new_model_input.multimodal_params = [e for e in new_model_input.multimodal_params] + [
             {"images": [], "audios": []}
@@ -583,11 +592,6 @@ class TpPartBaseModel:
         infer_handle_token_num = max(1, origin_handle_token_num)
         if self.args.enable_tpsp_mix_mode:
             infer_handle_token_num = triton.cdiv(infer_handle_token_num, self.tp_world_size_) * self.tp_world_size_
-
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=infer_handle_token_num):
-            infer_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=infer_handle_token_num
-            )
 
         model_input = self._create_padded_prefill_model_input(
             model_input=model_input, new_handle_token_num=infer_handle_token_num
@@ -710,12 +714,16 @@ class TpPartBaseModel:
 
         handle_token_num = infer_state.input_ids.shape[0]
 
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
-            finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=handle_token_num
-            )
-            assert finded_handle_token_num == handle_token_num
-            if self.prefill_graph.need_capture(handle_token_num=finded_handle_token_num):
+        if self.prefill_graph is not None and self.prefill_graph.can_run(
+            handle_token_num=handle_token_num,
+            batch_size=infer_state.batch_size,
+            max_q_seq_len=infer_state.max_q_seq_len,
+        ):
+            if self.prefill_graph.need_capture(
+                handle_token_num=handle_token_num,
+                batch_size=infer_state.batch_size,
+                max_q_seq_len=infer_state.max_q_seq_len,
+            ):
                 output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
                     prefill_func=prefill_func,
                     input_tensors=input_tensors,

@@ -73,6 +73,10 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
 
 
 class GatedRMSNormWeight(RMSNormWeight):
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, gate_activation: str = "silu"):
+        self.gate_activation = gate_activation
+        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
+
     def _triton_forward(
         self,
         input: torch.Tensor,
@@ -86,7 +90,26 @@ class GatedRMSNormWeight(RMSNormWeight):
         ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
-        return gated_rmsnorm_forward(x=input, weight=self.weight, bias=None, eps=eps, z=gate_value, out=out)
+        run_config = None
+        if self.gate_activation == "sigmoid":
+            # Qwen4 uses sigmoid-gated RMSNorm. Its result must not depend on
+            # the packed batch row count, so use the same reduction layout as
+            # the vLLM reference instead of an M-dependent autotuned config.
+            block_n = 1 << (self.dim - 1).bit_length()
+            run_config = {
+                "BLOCK_N": block_n,
+                "num_warps": min(max(block_n // 256, 1), 8),
+            }
+        return gated_rmsnorm_forward(
+            x=input,
+            weight=self.weight,
+            bias=None,
+            eps=eps,
+            z=gate_value,
+            out=out,
+            gate_activation=self.gate_activation,
+            run_config=run_config,
+        )
 
     def _cuda_forward(
         self,

@@ -383,10 +383,14 @@ class SamplingParams(ctypes.Structure):
         self.allowed_token_ids = AllowedTokenIds()
         self.allowed_token_ids.initialize(allowed_token_ids)
 
-        # Initialize invalid_token_ids
-        invalid_token_ids = map(int, kwargs.get("logit_bias", {}).keys())
+        # Initialize invalid_token_ids. Native LightLLM requests pass this field
+        # directly, while OpenAI-compatible requests encode the same filter in
+        # logit_bias. Preserve both sources and remove duplicates in input order.
+        invalid_token_ids = list(map(int, kwargs.get("invalid_token_ids") or []))
+        invalid_token_ids.extend(map(int, kwargs.get("logit_bias", {}).keys()))
+        invalid_token_ids = list(dict.fromkeys(invalid_token_ids))
         self.invalid_token_ids = InvalidTokenIds()
-        self.invalid_token_ids.initialize(list[int](invalid_token_ids))
+        self.invalid_token_ids.initialize(invalid_token_ids)
 
         if self.do_sample is False:
             self.temperature = 1.0

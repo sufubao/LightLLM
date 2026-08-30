@@ -411,7 +411,7 @@ def has_vision_module(model_path: str) -> bool:
         ):
             # Qwen3OmniMoeVisionTransformerPretrainedModel
             return True
-        elif model_type in ["qwen3_5", "qwen3_5_moe"]:
+        elif model_type in ["qwen3_5", "qwen3_5_moe", "qwen4_exp"]:
             return True
         else:
             raise Exception("unknown vision model type")

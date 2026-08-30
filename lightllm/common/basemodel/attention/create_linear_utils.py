@@ -1,3 +1,6 @@
+from lightllm.common.basemodel.attention.linear.flashinfer import (
+    FlashInferLinearAttBackend,
+)
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.utils.backend_validator import validate
@@ -7,6 +10,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 linear_prefill_att_backend_classes = {
+    "flashinfer": FlashInferLinearAttBackend,
     "flashqla": FlashQlaLinearAttBackend,
     "triton": TritonLinearAttBackend,
 }
@@ -16,7 +20,9 @@ linear_decode_att_backend_classes = {
 }
 
 
-def get_qwen35_linear_prefill_att_backend_class(index=1, priority_list=("flashqla", "triton")):
+def get_qwen35_linear_prefill_att_backend_class(
+    index=1, priority_list=("flashinfer", "flashqla", "triton")
+):
     args = get_env_start_args()
     backend_str = _get_backend_str(args.llm_prefill_att_backend, index)
     if backend_str != "auto":
@@ -27,11 +33,18 @@ def get_qwen35_linear_prefill_att_backend_class(index=1, priority_list=("flashql
         if backend_name == "triton":
             logger.info("Linear prefill attention backend: triton.")
             return backend_class
-        if validate(backend_name):
-            logger.info(f"Linear prefill attention backend: {backend_name} (validated).")
+        validator_name = (
+            "flashinfer_gdn" if backend_name == "flashinfer" else backend_name
+        )
+        if validate(validator_name):
+            logger.info(
+                f"Linear prefill attention backend: {backend_name} (validated)."
+            )
             return backend_class
 
-    logger.warning("No linear prefill attention backend validation succeeded, falling back to Triton.")
+    logger.warning(
+        "No linear prefill attention backend validation succeeded, falling back to Triton."
+    )
     return TritonLinearAttBackend
 
 
@@ -50,7 +63,9 @@ def get_qwen35_linear_decode_att_backend_class(index=1, priority_list=("triton",
             logger.info(f"Linear decode attention backend: {backend_name} (validated).")
             return backend_class
 
-    logger.warning("No linear decode attention backend validation succeeded, falling back to Triton.")
+    logger.warning(
+        "No linear decode attention backend validation succeeded, falling back to Triton."
+    )
     return TritonLinearAttBackend
 
 

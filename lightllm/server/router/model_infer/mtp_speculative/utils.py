@@ -58,6 +58,18 @@ def verify_mtp_tokens(
             accepted_index=accepted_index,
             verify_width=backend.max_draft_step + 1,
         )
+        ple_state_index = getattr(
+            backend.model.req_manager, "req_to_ple_state_index", None
+        )
+        if ple_state_index is not None:
+            linear_att_mtp_state_index_update(
+                req_to_mtp_state_index=ple_state_index,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                b_req_idx=b_req_idx,
+                b_mtp_index=b_mtp_index,
+                accepted_index=accepted_index,
+                verify_width=backend.max_draft_step + 1,
+            )
     return accept_lengths, accepted_index
 
 

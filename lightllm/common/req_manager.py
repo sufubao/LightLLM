@@ -143,7 +143,11 @@ class ReqSamplingParamsManager:
 
     def init_req_sampling_params(self, req: "InferReq"):
         shm_param = req.sampling_param.shm_param
-        self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
+        # Request slots are reused. Clear stale speculative draft positions
+        # before seeding column zero with the new request's current token.
+        next_token_row = self.req_to_next_token_ids[req.req_idx]
+        next_token_row.fill_(0)
+        next_token_row[0:1].fill_(req.get_last_gen_token())
         if self.req_to_next_token_scores is not None:
             self.req_to_next_token_scores[req.req_idx].fill_(0.0)
             self.req_to_next_token_scores[req.req_idx][0:1].fill_(1.0)

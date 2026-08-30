@@ -104,6 +104,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             use_fp8_w8a8=use_fp8_w8a8,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            use_direct_assignment=is_prefill is False,
         )
         return input_tensor
 

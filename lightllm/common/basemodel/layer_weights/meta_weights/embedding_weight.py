@@ -136,6 +136,22 @@ class LMHeadWeight(EmbeddingWeight):
             return out
         return result
 
+    def batch_major_forward(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        """Project ``[token, hidden]`` inputs directly to ``[token, vocab]``."""
+
+        assert input.ndim == 2
+        assert input.shape[1] == self.weight.shape[1]
+        if out is None:
+            out = alloc_func(
+                (input.shape[0], self.weight.shape[0]),
+                dtype=input.dtype,
+                device=input.device,
+            )
+        torch.mm(input, self.weight.t(), out=out)
+        return out
+
     def _cuda_forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:

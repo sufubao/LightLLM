@@ -52,6 +52,8 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.node_rank = args.node_rank
         self.dp_size = args.dp
         self.schedule_time_interval = args.schedule_time_interval  # 默认30ms 的调度周期
+        self.idle_batch_coalesce_quiet_time = max(0.0, args.idle_batch_coalesce_quiet_time)
+        self.idle_batch_coalesce_max_wait = max(0.0, args.idle_batch_coalesce_max_wait)
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
         self.dp_world_size = self.world_size // self.dp_size
@@ -285,6 +287,10 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         """
         事件处理循环
         """
+        # Refresh the running batch before deciding whether the server is idle.
+        # Otherwise, requests arriving just after the previous response can see a
+        # stale, already-finished batch and bypass idle request coalescing.
+        self._filter_reqs_from_running_batch()
         # 接受新请求，并尝试调度
         await self._recv_new_reqs_and_schedule()
         await self._write_profiler_cmds()
@@ -297,7 +303,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             self._add_new_batch_to_running_batch(new_batch=new_batch)
             await self._add_batch(new_batch)
 
-        self._filter_reqs_from_running_batch()
         # 多机 TP：abort 阶段2（从 running_batch 提取）；阶段1 在调度 new_batch 时完成
         if self.is_multinode_tp:
             aborted_reqs = self.get_aborted_reqs_from_running_batch_multinode_tp()
@@ -445,25 +450,54 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
         return
 
-    async def _recv_new_reqs_and_schedule(self):
+    def _drain_new_requests(self):
         if not hasattr(self, "recv_max_count"):
             self.recv_max_count = 64
 
-        try:
-            # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
-            for _ in range(self.recv_max_count):
+        received_count = 0
+        # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
+        for _ in range(self.recv_max_count):
+            try:
                 recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                if isinstance(recv_req, GroupReqIndexes):
-                    self._add_req(recv_req)
-                else:
-                    raise ValueError(f"Unknown request type: {type(recv_req)}")
+            except zmq.ZMQError:
+                break
+            if not isinstance(recv_req, GroupReqIndexes):
+                raise ValueError(f"Unknown request type: {type(recv_req)}")
+            self._add_req(recv_req)
+            received_count += 1
 
+        if received_count == self.recv_max_count:
             # 当队列中存在较多的请求时，将一次接受的数量上调
             self.recv_max_count = min(int(self.recv_max_count * 1.3), 256)
-
-        except zmq.ZMQError:
+        else:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
+        return received_count
+
+    async def _recv_new_reqs_and_schedule(self):
+        received_count = self._drain_new_requests()
+        if (
+            received_count > 0
+            and self.running_batch is None
+            and self.schedule_new_batch is None
+            and self.idle_batch_coalesce_quiet_time > 0
+            and self.idle_batch_coalesce_max_wait > 0
+        ):
+            deadline = time.monotonic() + self.idle_batch_coalesce_max_wait
+            target_batch_size = self.args.running_max_req_size
+            total_received_count = received_count
+            while total_received_count < target_batch_size:
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    break
+                await asyncio.sleep(min(self.idle_batch_coalesce_quiet_time, remaining_time))
+                newly_received_count = self._drain_new_requests()
+                total_received_count += newly_received_count
+                # A lone request should only pay one quiet-window delay. Once a
+                # concurrent burst is visible, keep admitting its slower HTTP
+                # siblings until the model batch is full or max_wait expires.
+                if newly_received_count == 0 and total_received_count == 1:
+                    break
 
         if self.args.enable_rl:
             await self.process_rl_ops()

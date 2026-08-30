@@ -38,7 +38,10 @@ class ShmReqManager:
 
     def get_max_req_num(self):
         args: StartArgs = get_env_start_args()
-        return args.running_max_req_size
+        shm_req_max_size = getattr(args, "shm_req_max_size", None)
+        if shm_req_max_size is None:
+            return args.running_max_req_size
+        return max(args.running_max_req_size, shm_req_max_size)
 
     def init_reqs_shm(self):
         self._init_reqs_shm()

@@ -25,6 +25,7 @@ def gated_rmsnorm_forward_kernel(
     BLOCK_N: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
+    GATE_ACTIVATION: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
@@ -40,7 +41,10 @@ def gated_rmsnorm_forward_kernel(
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if not NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=cols < N).to(tl.float32)
-        x *= z * tl.sigmoid(z)
+        if GATE_ACTIVATION == "sigmoid":
+            x *= tl.sigmoid(z)
+        else:
+            x *= z * tl.sigmoid(z)
     # RMS norm: compute variance directly without mean subtraction
     xbar = tl.where(cols < N, x, 0.0)
     var = tl.sum(xbar * xbar, axis=0) / N
@@ -55,7 +59,10 @@ def gated_rmsnorm_forward_kernel(
     y = x_hat * w + b if HAS_BIAS else x_hat * w
     if NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=mask).to(tl.float32)
-        y *= z * tl.sigmoid(z)
+        if GATE_ACTIVATION == "sigmoid":
+            y *= tl.sigmoid(z)
+        else:
+            y *= z * tl.sigmoid(z)
     # Write output
     tl.store(Y + cols, y, mask=mask)
 
@@ -76,7 +83,9 @@ def _get_gated_rmsnorm_configs():
     return configs
 
 
-def _get_gated_rmsnorm_static_key(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor):
+def _get_gated_rmsnorm_static_key(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, gate_activation: str = "silu"
+):
     """Generate static key for caching autotuned configurations."""
     M, N = x.shape
     return {
@@ -84,6 +93,7 @@ def _get_gated_rmsnorm_static_key(x: torch.Tensor, weight: torch.Tensor, bias: t
         "weight_dtype": str(weight.dtype),
         "N": N,
         "has_bias": bias is not None,
+        "gate_activation": gate_activation,
     }
 
 
@@ -102,8 +112,10 @@ def gated_rmsnorm_forward(
     out: torch.Tensor = None,
     group_size: int = None,
     norm_before_gate: bool = True,
+    gate_activation: str = "silu",
     run_config: dict = None,
 ):
+    assert gate_activation in ("silu", "sigmoid")
     M, N = x.shape
     if group_size is None:
         group_size = N
@@ -162,6 +174,7 @@ def gated_rmsnorm_forward(
         eps,
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
+        GATE_ACTIVATION=gate_activation,
         num_warps=num_warps,
     )
     return out

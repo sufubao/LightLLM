@@ -75,6 +75,7 @@ class InferStateInfo:
         # b1 开头的tensor变量其shape为[batch_size + 1,]
         self.b_q_seq_len: torch.Tensor = None
         self.b1_cu_q_seq_len: torch.Tensor = None
+        self.prefill_q_seq_lens: Tuple[int, ...] = ()
         self.b_kv_seq_len: torch.Tensor = None
         self.b1_cu_kv_seq_len: torch.Tensor = None
         self.position_ids: torch.Tensor = None

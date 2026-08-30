@@ -91,9 +91,15 @@ class CustomProcessGroup:
             self.flashinfer_reduce = fi
             logger.info("Enable FlashInfer ALLReduce.")
 
-    def all_reduce(self, input_: torch.Tensor) -> None:
+    def all_reduce(
+        self, input_: torch.Tensor, use_flashinfer: bool = True
+    ) -> None:
         # Dispatch chain: FlashInfer -> SymmMem -> NCCL.
-        if self.flashinfer_reduce is not None and self.flashinfer_reduce.should_use(input_):
+        if (
+            use_flashinfer
+            and self.flashinfer_reduce is not None
+            and self.flashinfer_reduce.should_use(input_)
+        ):
             input_.data = self.flashinfer_reduce.all_reduce(input_)
             return
         if self.symm_mem_reduce is not None and self.symm_mem_reduce.should_use(input_):
@@ -344,12 +350,13 @@ def all_reduce(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     op: ReduceOp = ReduceOp.SUM,
     async_op: bool = False,
+    use_flashinfer: bool = True,
 ) -> None:
     if _is_single_group(group=group):
         return
     if isinstance(group, CustomProcessGroup):
         if op == ReduceOp.SUM:
-            return group.all_reduce(input_)
+            return group.all_reduce(input_, use_flashinfer=use_flashinfer)
         return dist.all_reduce(input_, op, group.device_group, async_op)
     return dist.all_reduce(input_, op, group, async_op)
 

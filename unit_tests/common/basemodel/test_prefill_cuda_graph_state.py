@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
@@ -7,10 +8,35 @@ from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 
 
+def test_prefill_graph_capture_shapes_are_exact():
+    graph = PrefillCudaGraph.__new__(PrefillCudaGraph)
+    graph.graph_shapes = ((32, 1, 32), (256, 8, 32))
+    graph.graph = {(32, 1, 32): object()}
+
+    assert PrefillCudaGraph.parse_capture_shapes(["32:1:32", "256:8:32"]) == [
+        (32, 1, 32),
+        (256, 8, 32),
+    ]
+    assert graph.can_run(32, 1, 32)
+    assert graph.can_run(256, 8, 32)
+    assert not graph.can_run(32, 2, 16)
+    assert not graph.can_run(31, 1, 31)
+    assert not graph.need_capture(32, 1, 32)
+    assert graph.need_capture(256, 8, 32)
+
+
+@pytest.mark.parametrize("shape", ["32", "32:1", "32:1:16", "31:2:32", "0:1:1"])
+def test_prefill_graph_rejects_invalid_capture_shape(shape):
+    with pytest.raises(ValueError):
+        PrefillCudaGraph.parse_capture_shapes([shape])
+
+
 class _GraphInferState:
     def __init__(self, hidden_collector):
         self.hidden_collector = hidden_collector
         self.input_ids = torch.empty(4, dtype=torch.int64)
+        self.batch_size = 1
+        self.max_q_seq_len = 4
         self.copied_from = None
         self.replayed_with = None
 
@@ -50,11 +76,13 @@ def test_replay_restores_captured_hidden_state_into_request_collector(monkeypatc
     graph_infer_state = _GraphInferState(hidden_collector=graph_collector)
     request_infer_state = SimpleNamespace(
         input_ids=torch.empty(4, dtype=torch.int64),
+        batch_size=1,
+        max_q_seq_len=4,
         hidden_collector=request_collector,
     )
     graph_output = torch.randn(2, 3)
     prefill_graph = PrefillCudaGraph.__new__(PrefillCudaGraph)
-    prefill_graph.graph = {4: (graph_infer_state, [], [graph_output], graph_collector)}
+    prefill_graph.graph = {(4, 1, 4): (graph_infer_state, [], [graph_output], graph_collector)}
 
     outputs = prefill_graph._replay(input_tensors=[], infer_state=request_infer_state)
 
@@ -73,7 +101,7 @@ def test_first_replay_replaces_capture_collector_with_runtime_instance(monkeypat
     graph_infer_state = _GraphInferState(hidden_collector=graph_collector)
     graph_output = torch.randn(2, 3)
     prefill_graph = PrefillCudaGraph.__new__(PrefillCudaGraph)
-    prefill_graph.graph = {4: (graph_infer_state, [], [graph_output], graph_collector)}
+    prefill_graph.graph = {(4, 1, 4): (graph_infer_state, [], [graph_output], graph_collector)}
 
     prefill_graph._replay(input_tensors=[], infer_state=graph_infer_state)
 

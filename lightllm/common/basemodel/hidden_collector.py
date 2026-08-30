@@ -161,6 +161,8 @@ class FinalHiddenCollector(HiddenCollector):
 
     def __init__(self) -> None:
         self.final_hidden: Optional[torch.Tensor] = None
+        self.draft_token_ids: Optional[torch.Tensor] = None
+        self.confidence_logits: Optional[torch.Tensor] = None
 
     def new_instance(self) -> HiddenCollector:
         return FinalHiddenCollector()
@@ -168,11 +170,26 @@ class FinalHiddenCollector(HiddenCollector):
     def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
         self.final_hidden = final_hidden
 
+    def add_mtp_outputs(
+        self,
+        draft_token_ids: Optional[torch.Tensor],
+        confidence_logits: Optional[torch.Tensor],
+    ) -> None:
+        self.draft_token_ids = draft_token_ids
+        self.confidence_logits = confidence_logits
+
     def finish_output(self, infer_state) -> ModelMtpOutputCollector:
         assert self.final_hidden is not None
         final_hidden = self.final_hidden
         self.final_hidden = None
-        return ModelMtpOutputCollector(spec_hidden=final_hidden.contiguous())
+        output = ModelMtpOutputCollector(
+            spec_hidden=final_hidden.contiguous(),
+            draft_token_ids=self.draft_token_ids,
+            confidence_logits=self.confidence_logits,
+        )
+        self.draft_token_ids = None
+        self.confidence_logits = None
+        return output
 
 
 class LayerHiddenCollector(HiddenCollector):

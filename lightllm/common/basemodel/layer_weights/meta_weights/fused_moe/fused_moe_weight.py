@@ -139,6 +139,8 @@ class FusedMoeWeight(BaseWeightTpl):
         shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Captures MoE topk expert ids for routed-experts metadata when enabled.
+        if is_prefill is None and infer_state is not None:
+            is_prefill = infer_state.is_prefill
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         return self.fuse_moe_impl(
             input_tensor=input_tensor,

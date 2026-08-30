@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import time
 import pytest
 import triton
@@ -27,7 +28,9 @@ def test_moe_align():
     expert_num = 5
     token_num = 3
     topk = 3
-    topk_ids = torch.tensor([[0, 1, 2], [0, 3, 1], [3, 1, 4]], dtype=torch.int32, device="cuda")
+    topk_ids = torch.tensor(
+        [[0, 1, 2], [0, 3, 1], [3, 1, 4]], dtype=torch.int32, device="cuda"
+    )
     out = torch.zeros((expert_num, token_num * topk), dtype=torch.int32, device="cuda")
     out.fill_(0)
     moe_align(topk_ids, out)
@@ -51,15 +54,23 @@ def test_moe_align1():
         dtype=torch.int32,
         device="cuda",
     )
-    topk_weights = torch.tensor([[0.3, 0.7], [0.2, 0.8]], dtype=torch.float32, device="cuda")
+    topk_weights = torch.tensor(
+        [[0.3, 0.7], [0.2, 0.8]], dtype=torch.float32, device="cuda"
+    )
     experts_token_num = torch.zeros((4,), dtype=torch.int32, device="cuda")
-    experts_weights = torch.zeros(experts_info.shape, dtype=torch.float32, device="cuda")
+    experts_weights = torch.zeros(
+        experts_info.shape, dtype=torch.float32, device="cuda"
+    )
 
     moe_align1(experts_info, topk_weights, experts_weights, experts_token_num, 2)
 
-    true_experts_token_num = torch.tensor([1, 2, 1, 0], device="cuda", dtype=torch.int32)
+    true_experts_token_num = torch.tensor(
+        [1, 2, 1, 0], device="cuda", dtype=torch.int32
+    )
     true_experts_info = torch.tensor(
-        [[0, 0, 0, 0], [1, 2, 1, 0], [3, 0, 0, 1], [0, 0, 0, 0]], device="cuda:0", dtype=torch.int32
+        [[0, 0, 0, 0], [1, 2, 1, 0], [3, 0, 0, 1], [0, 0, 0, 0]],
+        device="cuda:0",
+        dtype=torch.int32,
     )
     true_experts_weights = torch.tensor(
         [
@@ -78,8 +89,12 @@ def test_moe_align1():
 
 
 def _check_moe_align_fused(topk_ids, topk_weights, expert_num, ordered=True):
-    expert_to_token_index = torch.empty((expert_num, topk_ids.numel()), dtype=torch.int32, device="cuda")
-    expert_to_weight = torch.empty((expert_num, topk_ids.numel()), dtype=torch.float32, device="cuda")
+    expert_to_token_index = torch.empty(
+        (expert_num, topk_ids.numel()), dtype=torch.int32, device="cuda"
+    )
+    expert_to_weight = torch.empty(
+        (expert_num, topk_ids.numel()), dtype=torch.float32, device="cuda"
+    )
     expert_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
 
     moe_align_fused(
@@ -93,11 +108,15 @@ def _check_moe_align_fused(topk_ids, topk_weights, expert_num, ordered=True):
 
     flat_topk_ids = topk_ids.flatten()
     flat_topk_weights = topk_weights.flatten()
-    expected_token_num = torch.bincount(flat_topk_ids, minlength=expert_num).to(torch.int32)
+    expected_token_num = torch.bincount(flat_topk_ids, minlength=expert_num).to(
+        torch.int32
+    )
     assert torch.equal(expert_token_num, expected_token_num)
 
     for expert_id, token_num in enumerate(expected_token_num.tolist()):
-        expected_index = torch.nonzero(flat_topk_ids == expert_id, as_tuple=False).flatten()
+        expected_index = torch.nonzero(
+            flat_topk_ids == expert_id, as_tuple=False
+        ).flatten()
         expected_weight = flat_topk_weights[expected_index]
         expected_index = expected_index.to(torch.int32)
         token_index = expert_to_token_index[expert_id, :token_num]
@@ -114,63 +133,106 @@ def _check_moe_align_fused(topk_ids, topk_weights, expert_num, ordered=True):
 
 def test_moe_align_fused_small_token():
     expert_num = 5
-    small_topk_ids = torch.tensor([[0, 1, 2], [0, 3, 1], [3, 1, 4]], dtype=torch.int32, device="cuda")
+    small_topk_ids = torch.tensor(
+        [[0, 1, 2], [0, 3, 1], [3, 1, 4]], dtype=torch.int32, device="cuda"
+    )
     small_topk_weights = torch.tensor(
-        [[0.3, 0.7, 0.1], [0.2, 0.8, 0.4], [0.5, 0.6, 0.9]], dtype=torch.float32, device="cuda"
+        [[0.3, 0.7, 0.1], [0.2, 0.8, 0.4], [0.5, 0.6, 0.9]],
+        dtype=torch.float32,
+        device="cuda",
     )
     _check_moe_align_fused(small_topk_ids, small_topk_weights, expert_num)
 
-    small_many_topk_ids = torch.arange(128 * 17, dtype=torch.int32, device="cuda").reshape(128, 17) % expert_num
-    small_many_topk_weights = torch.arange(small_many_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(
-        128, 17
+    small_many_topk_ids = (
+        torch.arange(128 * 17, dtype=torch.int32, device="cuda").reshape(128, 17)
+        % expert_num
     )
+    small_many_topk_weights = torch.arange(
+        small_many_topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(128, 17)
     _check_moe_align_fused(small_many_topk_ids, small_many_topk_weights, expert_num)
 
 
 def test_moe_align_fused_large_token():
     expert_num = 5
 
-    base_topk_ids = torch.tensor([[0, 1, 2], [0, 3, 1], [3, 1, 4], [2, 0, 4]], dtype=torch.int32, device="cuda")
+    base_topk_ids = torch.tensor(
+        [[0, 1, 2], [0, 3, 1], [3, 1, 4], [2, 0, 4]], dtype=torch.int32, device="cuda"
+    )
     large_topk_ids = base_topk_ids.repeat(33, 1)[:129].contiguous()
-    large_topk_weights = torch.arange(large_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(129, 3)
-    _check_moe_align_fused(large_topk_ids, large_topk_weights, expert_num, ordered=False)
+    large_topk_weights = torch.arange(
+        large_topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(129, 3)
+    _check_moe_align_fused(
+        large_topk_ids, large_topk_weights, expert_num, ordered=False
+    )
 
     medium_topk_ids = base_topk_ids.repeat(1024, 1).contiguous()
-    medium_topk_weights = torch.arange(medium_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(4096, 3)
-    _check_moe_align_fused(medium_topk_ids, medium_topk_weights, expert_num, ordered=False)
+    medium_topk_weights = torch.arange(
+        medium_topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(4096, 3)
+    _check_moe_align_fused(
+        medium_topk_ids, medium_topk_weights, expert_num, ordered=False
+    )
 
     shared_expert_num = 257
-    shared_routing = torch.arange(512 * 7, dtype=torch.int32, device="cuda").reshape(512, 7) % 256
+    shared_routing = (
+        torch.arange(512 * 7, dtype=torch.int32, device="cuda").reshape(512, 7) % 256
+    )
     shared_last = torch.full((512, 1), 256, dtype=torch.int32, device="cuda")
     shared_topk_ids = torch.cat([shared_routing, shared_last], dim=1).contiguous()
-    shared_topk_weights = torch.arange(shared_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(512, 8)
-    _check_moe_align_fused(shared_topk_ids, shared_topk_weights, shared_expert_num, ordered=False)
+    shared_topk_weights = torch.arange(
+        shared_topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(512, 8)
+    _check_moe_align_fused(
+        shared_topk_ids, shared_topk_weights, shared_expert_num, ordered=False
+    )
 
     large_atomic_topk_ids = base_topk_ids.repeat(1281, 1)[:5121].contiguous()
-    large_atomic_topk_weights = torch.arange(large_atomic_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(
-        5121, 3
+    large_atomic_topk_weights = torch.arange(
+        large_atomic_topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(5121, 3)
+    _check_moe_align_fused(
+        large_atomic_topk_ids, large_atomic_topk_weights, expert_num, ordered=False
     )
-    _check_moe_align_fused(large_atomic_topk_ids, large_atomic_topk_weights, expert_num, ordered=False)
 
     sparse_expert_num = 257
     sparse_topk_ids = base_topk_ids.repeat(1281, 1)[:5121].contiguous()
-    sparse_topk_weights = torch.arange(sparse_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(5121, 3)
-    _check_moe_align_fused(sparse_topk_ids, sparse_topk_weights, sparse_expert_num, ordered=False)
+    sparse_topk_weights = torch.arange(
+        sparse_topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(5121, 3)
+    _check_moe_align_fused(
+        sparse_topk_ids, sparse_topk_weights, sparse_expert_num, ordered=False
+    )
 
 
 def test_moe_align_fused_large_token_unordered():
     expert_num = 257
-    topk_ids = torch.arange(5121 * 8, dtype=torch.int32, device="cuda").reshape(5121, 8) % expert_num
-    topk_weights = torch.arange(topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(5121, 8)
+    topk_ids = (
+        torch.arange(5121 * 8, dtype=torch.int32, device="cuda").reshape(5121, 8)
+        % expert_num
+    )
+    topk_weights = torch.arange(
+        topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(5121, 8)
     _check_moe_align_fused(topk_ids, topk_weights, expert_num, ordered=False)
 
 
 def test_moe_align_fused_atomic_token_unordered():
     expert_num = 9
-    topk_ids = torch.arange(257 * 4, dtype=torch.int32, device="cuda").reshape(257, 4) % expert_num
-    topk_weights = torch.arange(topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(257, 4)
-    expert_to_token_index = torch.empty((expert_num, topk_ids.numel()), dtype=torch.int32, device="cuda")
-    expert_to_weight = torch.empty((expert_num, topk_ids.numel()), dtype=torch.float32, device="cuda")
+    topk_ids = (
+        torch.arange(257 * 4, dtype=torch.int32, device="cuda").reshape(257, 4)
+        % expert_num
+    )
+    topk_weights = torch.arange(
+        topk_ids.numel(), dtype=torch.float32, device="cuda"
+    ).reshape(257, 4)
+    expert_to_token_index = torch.empty(
+        (expert_num, topk_ids.numel()), dtype=torch.int32, device="cuda"
+    )
+    expert_to_weight = torch.empty(
+        (expert_num, topk_ids.numel()), dtype=torch.float32, device="cuda"
+    )
     expert_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
 
     _moe_align_fused_atomic_token(
@@ -184,11 +246,17 @@ def test_moe_align_fused_atomic_token_unordered():
 
     flat_topk_ids = topk_ids.flatten()
     flat_topk_weights = topk_weights.flatten()
-    expected_token_num = torch.bincount(flat_topk_ids, minlength=expert_num).to(torch.int32)
+    expected_token_num = torch.bincount(flat_topk_ids, minlength=expert_num).to(
+        torch.int32
+    )
     assert torch.equal(expert_token_num, expected_token_num)
 
     for expert_id, token_num in enumerate(expected_token_num.tolist()):
-        expected_index = torch.nonzero(flat_topk_ids == expert_id, as_tuple=False).flatten().to(torch.int32)
+        expected_index = (
+            torch.nonzero(flat_topk_ids == expert_id, as_tuple=False)
+            .flatten()
+            .to(torch.int32)
+        )
         expected_weight = flat_topk_weights[expected_index]
         token_index = expert_to_token_index[expert_id, :token_num]
         token_weight = expert_to_weight[expert_id, :token_num]
@@ -203,11 +271,34 @@ def test_fused_experts_atomic_align_path_is_deterministic():
     hidden_size = 64
     intermediate_size = 128
     topk = 4
-    hidden_states = torch.randn((token_num, hidden_size), dtype=torch.bfloat16, device="cuda") / 10
-    w1 = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.bfloat16, device="cuda") / 10
-    w2 = torch.randn((expert_num, hidden_size, intermediate_size // 2), dtype=torch.bfloat16, device="cuda") / 10
-    topk_ids = torch.arange(token_num * topk, dtype=torch.int32, device="cuda").reshape(token_num, topk) % expert_num
-    topk_weights = torch.softmax(torch.randn((token_num, topk), dtype=torch.float32, device="cuda"), dim=-1)
+    hidden_states = (
+        torch.randn((token_num, hidden_size), dtype=torch.bfloat16, device="cuda") / 10
+    )
+    w1 = (
+        torch.randn(
+            (expert_num, intermediate_size, hidden_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    w2 = (
+        torch.randn(
+            (expert_num, hidden_size, intermediate_size // 2),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    topk_ids = (
+        torch.arange(token_num * topk, dtype=torch.int32, device="cuda").reshape(
+            token_num, topk
+        )
+        % expert_num
+    )
+    topk_weights = torch.softmax(
+        torch.randn((token_num, topk), dtype=torch.float32, device="cuda"), dim=-1
+    )
 
     out_0 = fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids)
     out_1 = fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids)
@@ -216,8 +307,179 @@ def test_fused_experts_atomic_align_path_is_deterministic():
     assert torch.equal(out_0, out_1)
 
 
-def test_moe_align2():
+@pytest.mark.parametrize("token_num", [1, 4, 8])
+def test_fused_experts_sparse_direct_assignment_matches_reference(token_num):
+    expert_num = 129
+    hidden_size = 64
+    intermediate_size = 32
+    topk = 4
+    hidden_states = (
+        torch.randn((token_num, hidden_size), dtype=torch.bfloat16, device="cuda") / 10
+    )
+    w1 = (
+        torch.randn(
+            (expert_num, intermediate_size * 2, hidden_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    w2 = (
+        torch.randn(
+            (expert_num, hidden_size, intermediate_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    topk_ids = torch.arange(token_num * topk, dtype=torch.int32, device="cuda").reshape(
+        token_num, topk
+    )
+    topk_weights = torch.softmax(
+        torch.randn((token_num, topk), dtype=torch.float32, device="cuda"), dim=-1
+    )
 
+    output = fused_experts_impl(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        use_direct_assignment=True,
+    )
+
+    reference = torch.zeros_like(hidden_states, dtype=torch.float32)
+    for token_index in range(token_num):
+        for route_index in range(topk):
+            expert_index = int(topk_ids[token_index, route_index])
+            gate_up = torch.matmul(
+                hidden_states[token_index], w1[expert_index].transpose(0, 1)
+            )
+            activated = (
+                F.silu(gate_up[:intermediate_size]) * gate_up[intermediate_size:]
+            )
+            route_output = torch.matmul(activated, w2[expert_index].transpose(0, 1))
+            reference[token_index] += (
+                route_output.float() * topk_weights[token_index, route_index]
+            )
+
+    assert torch.allclose(output.float(), reference, atol=2e-2, rtol=2e-2)
+
+
+def test_fused_experts_sparse_output_is_batch_size_invariant():
+    """A request must not change numerically when sparse peers join its batch."""
+    expert_num = 33
+    hidden_size = 128
+    intermediate_size = 64
+    topk = 4
+    batch_size = 3
+
+    hidden_states = (
+        torch.randn((batch_size, hidden_size), dtype=torch.bfloat16, device="cuda")
+        / 10
+    )
+    w1 = (
+        torch.randn(
+            (expert_num, intermediate_size * 2, hidden_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    w2 = (
+        torch.randn(
+            (expert_num, hidden_size, intermediate_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    topk_ids = torch.arange(
+        batch_size * topk, dtype=torch.int32, device="cuda"
+    ).reshape(batch_size, topk)
+    topk_weights = torch.softmax(
+        torch.randn((batch_size, topk), dtype=torch.float32, device="cuda"), dim=-1
+    )
+
+    single_output = fused_experts_impl(
+        hidden_states[:1],
+        w1,
+        w2,
+        topk_weights[:1],
+        topk_ids[:1],
+        use_direct_assignment=True,
+    )
+    batched_output = fused_experts_impl(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        use_direct_assignment=True,
+    )
+
+    assert torch.equal(single_output[0], batched_output[0])
+
+
+def test_fused_experts_sorted_output_is_batch_size_invariant():
+    """The sorted prefill path must preserve a request when peers join."""
+    expert_num = 33
+    hidden_size = 128
+    intermediate_size = 64
+    topk = 4
+    single_size = 9
+    batch_size = 27
+
+    hidden_states = (
+        torch.randn((batch_size, hidden_size), dtype=torch.bfloat16, device="cuda")
+        / 10
+    )
+    w1 = (
+        torch.randn(
+            (expert_num, intermediate_size * 2, hidden_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    w2 = (
+        torch.randn(
+            (expert_num, hidden_size, intermediate_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 10
+    )
+    topk_ids = (
+        torch.arange(batch_size * topk, dtype=torch.int32, device="cuda")
+        .reshape(batch_size, topk)
+        .remainder(expert_num)
+    )
+    topk_weights = torch.softmax(
+        torch.randn((batch_size, topk), dtype=torch.float32, device="cuda"),
+        dim=-1,
+    )
+
+    # Prefill explicitly uses the same sorted/grouped implementation.
+    single_output = fused_experts_impl(
+        hidden_states[:single_size],
+        w1,
+        w2,
+        topk_weights[:single_size],
+        topk_ids[:single_size],
+    )
+    batched_output = fused_experts_impl(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+    )
+
+    assert torch.equal(single_output, batched_output[:single_size])
+
+
+def test_moe_align2():
     experts_token_num = torch.zeros((4,), dtype=torch.int32, device="cuda")
     experts_token_num[0] = 8
     experts_token_num[1] = 0
@@ -226,12 +488,20 @@ def test_moe_align2():
 
     token_num_mul_topk_num = 100
     block_m = 16
-    mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, experts_token_num, block_m=block_m)
-    expected_expert_ids = torch.tensor([0, 2, 2, 2, 2, 3, -1, -1, -1, -1], device="cuda", dtype=torch.int32)
+    mblocks_to_tuple_info = moe_align2(
+        token_num_mul_topk_num, experts_token_num, block_m=block_m
+    )
+    expected_expert_ids = torch.tensor(
+        [0, 2, 2, 2, 2, 3, -1, -1, -1, -1], device="cuda", dtype=torch.int32
+    )
     valid_blocks = expected_expert_ids != -1
 
-    max_num_tokens_padded = token_num_mul_topk_num + experts_token_num.shape[0] * (block_m - 1)
-    expected_max_num_m_blocks = min(token_num_mul_topk_num, triton.cdiv(max_num_tokens_padded, block_m))
+    max_num_tokens_padded = token_num_mul_topk_num + experts_token_num.shape[0] * (
+        block_m - 1
+    )
+    expected_max_num_m_blocks = min(
+        token_num_mul_topk_num, triton.cdiv(max_num_tokens_padded, block_m)
+    )
     assert mblocks_to_tuple_info.shape[0] == expected_max_num_m_blocks
     assert torch.equal(mblocks_to_tuple_info[:, 0], expected_expert_ids)
     assert torch.equal(
@@ -245,11 +515,15 @@ def test_moe_align2():
     block_m = 16
     experts_token_num = torch.zeros((10,), dtype=torch.int32, device="cuda")
     experts_token_num[0] = 8
-    max_num_tokens_padded = token_num_mul_topk_num + experts_token_num.shape[0] * (block_m - 1)
+    max_num_tokens_padded = token_num_mul_topk_num + experts_token_num.shape[0] * (
+        block_m - 1
+    )
     padded_cdiv = triton.cdiv(max_num_tokens_padded, block_m)
     assert padded_cdiv > token_num_mul_topk_num
 
-    mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, experts_token_num, block_m=block_m)
+    mblocks_to_tuple_info = moe_align2(
+        token_num_mul_topk_num, experts_token_num, block_m=block_m
+    )
     assert mblocks_to_tuple_info.shape[0] == token_num_mul_topk_num
     assert torch.equal(
         mblocks_to_tuple_info[:1, 0],
@@ -317,9 +591,13 @@ def test_grouped_matmul():
     logger.info(f"grouped_matmul test cost time: {time.time() - start} s")
 
     ans_list = []
-    ans_list.append(torch.matmul(token_inputs[0:1, :], expert_weights[0].transpose(0, 1)))
+    ans_list.append(
+        torch.matmul(token_inputs[0:1, :], expert_weights[0].transpose(0, 1))
+    )
     for i in range(9):
-        t_ans = torch.matmul(token_inputs[(i + 1) : (i + 2), :], expert_weights[1].transpose(0, 1))
+        t_ans = torch.matmul(
+            token_inputs[(i + 1) : (i + 2), :], expert_weights[1].transpose(0, 1)
+        )
         ans_list.append(t_ans)
 
     true_out = torch.cat(ans_list, dim=0)

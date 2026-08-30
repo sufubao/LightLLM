@@ -114,7 +114,7 @@ def get_tokenizer(
         tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
-    elif model_type in ["qwen3_5", "qwen3_5_moe"] and "vision_config" in model_cfg:
+    elif model_type in ["qwen3_5", "qwen3_5_moe", "qwen4_exp"] and "vision_config" in model_cfg:
         from transformers import AutoProcessor
         from ..models.qwen3_5.model import QWen3_5Tokenizer
 

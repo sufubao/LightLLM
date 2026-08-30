@@ -46,6 +46,24 @@ def test_init_reqs_shm(shm_req_manager):
     assert shm_req_manager.reqs_shm.size == shm_req_manager.req_shm_byte_size
 
 
+@pytest.mark.parametrize(
+    ("shm_req_max_size", "expected"),
+    [(None, 8), (16, 16), (4, 8)],
+)
+def test_get_max_req_num(monkeypatch, shm_req_max_size, expected):
+    args = EasyDict(
+        running_max_req_size=8,
+        shm_req_max_size=shm_req_max_size,
+    )
+    monkeypatch.setattr(
+        "lightllm.server.core.objs.shm_req_manager.get_env_start_args",
+        lambda: args,
+    )
+
+    manager = ShmReqManager.__new__(ShmReqManager)
+    assert manager.get_max_req_num() == expected
+
+
 def test_alloc_req_index(shm_req_manager):
     index = shm_req_manager.alloc_req_index()
     assert index is not None

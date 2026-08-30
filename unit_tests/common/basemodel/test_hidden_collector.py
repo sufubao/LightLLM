@@ -127,6 +127,22 @@ def test_final_collector_returns_final_hidden_without_layer_bookkeeping():
     assert collected.data_ptr() == final_hidden.data_ptr()
 
 
+def test_final_collector_returns_and_clears_draft_tokens():
+    final_hidden = torch.randn(2, 3)
+    draft_token_ids = torch.tensor([7, 11])
+    collector = FinalHiddenCollector()
+    collector.add_final_hidden(final_hidden)
+    collector.add_mtp_outputs(draft_token_ids=draft_token_ids, confidence_logits=None)
+
+    output = collector.finish_output(infer_state=None)
+
+    assert output.spec_hidden.data_ptr() == final_hidden.data_ptr()
+    assert output.draft_token_ids is draft_token_ids
+    assert collector.final_hidden is None
+    assert collector.draft_token_ids is None
+    assert collector.confidence_logits is None
+
+
 def test_layer_collector_preserves_selected_layers_in_model_order(monkeypatch):
     _mock_target_layer_ids(monkeypatch, [0, 2])
     layer0 = torch.full((2, 2), 1.0)

@@ -56,6 +56,25 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
         return
 
+    def _tpsp_reduce(self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo):
+        # A packed prefill can cross FlashInfer's small-message threshold even
+        # though each request is unchanged. Keep every prefill reduction on the
+        # same SymmMem path; decode retains the faster FlashInfer dispatch.
+        if (
+            infer_state.is_prefill
+            and self.tp_world_size_ > 1
+            and not get_env_start_args().enable_tpsp_mix_mode
+        ):
+            all_reduce(
+                input,
+                op=dist.ReduceOp.SUM,
+                group=infer_state.dist_group,
+                async_op=False,
+                use_flashinfer=False,
+            )
+            return input
+        return super()._tpsp_reduce(input=input, infer_state=infer_state)
+
     def _ffn_tp_impl(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ) -> torch.Tensor:
@@ -266,11 +285,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                 alloc_func=self.alloc_tensor,
             )
 
-        gdn_out = self._linear_post(core_attn_out, z, layer_weight)
-
-        if self.tp_world_size_ > 1:
-            all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return gdn_out
+        gdn_out = self._linear_post(
+            core_attn_out, z, infer_state, layer_weight
+        )
+        return self._tpsp_reduce(input=gdn_out, infer_state=infer_state)
 
     def token_attention_forward(
         self,
@@ -297,11 +315,11 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             ),
             alloc_func=self.alloc_tensor,
         )
-        gdn_out = self._linear_post(core_attn_out, z, layer_weight)
+        gdn_out = self._linear_post(
+            core_attn_out, z, infer_state, layer_weight
+        )
 
-        if self.tp_world_size_ > 1:
-            all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return gdn_out
+        return self._tpsp_reduce(input=gdn_out, infer_state=infer_state)
 
     def _linear_in_proj(
         self,
@@ -315,6 +333,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         self,
         core_attn_out: torch.Tensor,
         z: torch.Tensor,
+        infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> torch.Tensor:
         num_tokens = z.shape[0]
@@ -322,5 +341,20 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         z = z.contiguous().view(-1, z.shape[-1])
         norm_out = layer_weight.linear_norm(core_attn_out, z, self.eps_)
         core_attn_out = norm_out.view(num_tokens, -1)
-        output = layer_weight.linear_out_proj.mm(core_attn_out)
-        return output
+        query_lens = infer_state.prefill_q_seq_lens
+        if infer_state.is_prefill and len(query_lens) > 1:
+            output = self.alloc_tensor(
+                (num_tokens, self.embed_dim_),
+                dtype=core_attn_out.dtype,
+                device=core_attn_out.device,
+            )
+            start = 0
+            for query_len in query_lens:
+                end = start + query_len
+                layer_weight.linear_out_proj.mm(
+                    core_attn_out[start:end], out=output[start:end]
+                )
+                start = end
+            assert start == num_tokens
+            return output
+        return layer_weight.linear_out_proj.mm(core_attn_out)

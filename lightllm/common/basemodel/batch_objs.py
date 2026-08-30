@@ -47,6 +47,9 @@ class ModelInput:
     # 的一些变量
     # 标记 prefill 请求是否会在本轮产生输出。Prefill 必填（空 batch 使用空 list），decode 不使用。
     b_prefill_has_output_cpu: List[bool] = None
+    # Host-side query lengths used by model-specific prefill kernels whose
+    # numerical path must remain request-local inside a packed batch.
+    b_q_seq_len_cpu: List[int] = None
 
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输入变量。只在特殊的模型模式下才会具体使用和生效。
@@ -57,6 +60,11 @@ class ModelInput:
 
     def to_cuda(self):
         self.check_input()
+
+        if self.is_prefill and self.b_q_seq_len_cpu is None:
+            self.b_q_seq_len_cpu = (
+                self.b_seq_len - self.b_ready_cache_len
+            ).tolist()
 
         # Prefill 和 decode 都必须提供的公共张量。
         if self.mem_indexes is None:

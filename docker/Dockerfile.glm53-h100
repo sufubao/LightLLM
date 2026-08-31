@@ -108,13 +108,13 @@ LABEL org.opencontainers.image.created="${OCI_CREATED}" \
       org.opencontainers.image.revision="${OCI_REVISION}" \
       org.opencontainers.image.source="${OCI_SOURCE}" \
       org.opencontainers.image.version="${OCI_VERSION}" \
-      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100/H200 TP8 multimodal" \
+      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100/H200 TP8 512K text" \
       org.opencontainers.image.base.name="${BASE_NAME}" \
       org.opencontainers.image.base.digest="${BASE_DIGEST}" \
       ai.lightllm.model="GLM-5.3-Flash" \
       ai.lightllm.accelerator="NVIDIA H100/H200" \
       ai.lightllm.tensor-parallel-size="8" \
-      ai.lightllm.profile="multimodal-1m-tp8-c256-no-prompt-cache" \
+      ai.lightllm.profile="text-512k-tp8-mtp4-c256-no-prompt-cache" \
       ai.lightllm.security-profile="flattened-no-sglang-server-components"
 
 ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -156,10 +156,9 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
     CMD /opt/sglang/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/v1/models', timeout=3).read()" || exit 1
 
-# LightLLM reserves 36 tokens in its HTTP admission guard. The token pool is
-# therefore request_limit + 36 so /v1/models advertises the full 1,048,576.
-# This pure-TP8 profile is the exact full-multimodal configuration validated
-# from 1 through 256 concurrent requests on an eight-H100 80 GB node.
+# Exact 512K-input/1K-output text profile validated on an eight-H100 80 GB
+# node. The request queue accepts 256 clients; one 512K request is GPU-resident
+# at a time. MTP accelerates the 1K-token decode phase.
 CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--model_dir", "/model", \
      "--model_name", "glm-5.3-flash", \
@@ -168,29 +167,26 @@ CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--port", "8002", \
      "--httpserver_workers", "16", \
      "--mem_fraction", ".90", \
-     "--max_total_token_num", "1048612", \
+     "--max_total_token_num", "560000", \
      "--running_max_req_size", "256", \
-     "--max_req_total_len", "1048576", \
-     "--batch_max_tokens", "16384", \
-     "--chunked_prefill_size", "1024", \
+     "--max_req_total_len", "532480", \
+     "--batch_max_tokens", "32768", \
+     "--chunked_prefill_size", "32768", \
      "--linear_att_ssm_data_type", "bfloat16", \
      "--linear_att_cache_size", "256", \
-     "--graph_max_batch_size", "256", \
-     "--graph_split_batch_size", "8", \
-     "--graph_grow_step_size", "16", \
-     "--graph_max_len_in_batch", "2048", \
+     "--graph_max_batch_size", "1", \
+     "--disable_cudagraph", \
      "--disable_flashinfer_allreduce", \
      "--enable_fused_shared_experts", \
      "--disable_dynamic_prompt_cache", \
      "--disable_aggressive_schedule", \
      "--router_max_wait_tokens", "64", \
-     "--max_image_pixels", "6272000", \
-     "--max_image_token_count", "8000", \
-     "--visual_tp", "1", \
-     "--visual_dp", "8", \
-     "--visual_infer_batch_size", "8", \
+     "--disable_vision", \
      "--cache_capacity", "64", \
      "--schedule_time_interval", "0.001", \
      "--prefill_coalesce_interval", "0.5", \
+     "--mtp_mode", "eagle_with_att", \
+     "--mtp_step", "4", \
+     "--mtp_draft_model_dir", "/model", \
      "--reasoning_parser", "glm45", \
      "--tool_call_parser", "glm47"]

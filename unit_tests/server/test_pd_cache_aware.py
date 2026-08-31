@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +83,59 @@ def test_cache_aware_estimates_hit_rate_only_for_connected_worker():
     expected_hit_rate = len(prompt[:-10]) / len(prompt)
     assert policy.estimate_cache_hit_rate([cached_worker], prompt) == pytest.approx(expected_hit_rate)
     assert policy.estimate_cache_hit_rate([_worker("10.0.0.2:8000")], prompt) == 0.0
+
+
+def test_cache_aware_reuses_admission_match_during_worker_selection(monkeypatch):
+    policy = CacheAwarePolicy()
+    cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=110, dispatched_req_num=2)
+    least_loaded_worker = _worker("10.0.0.2:8000", dispatched_prompt_chars=100, dispatched_req_num=2)
+    prompt = "shared prefix " * 100
+    policy.prompt_cache_tree.insert(prompt, cache_worker.client_ip_port)
+
+    prefix_match = policy.prompt_cache_tree.prefix_match
+    match_call_count = 0
+
+    def counting_prefix_match(text):
+        nonlocal match_call_count
+        match_call_count += 1
+        return prefix_match(text)
+
+    monkeypatch.setattr(policy.prompt_cache_tree, "prefix_match", counting_prefix_match)
+
+    async def select_worker():
+        return policy.select_worker([cache_worker, least_loaded_worker], prompt)
+
+    async def estimate_then_select_in_child_task():
+        policy.estimate_cache_hit_rate([cache_worker, least_loaded_worker], prompt)
+        return await asyncio.gather(*(asyncio.create_task(select_worker()) for _ in range(2)))
+
+    selected_workers = asyncio.run(estimate_then_select_in_child_task())
+    assert selected_workers == [cache_worker, cache_worker]
+    assert match_call_count == 1
+
+    policy.select_worker([cache_worker, least_loaded_worker], prompt + " new turn")
+    assert match_call_count == 2
+
+
+def test_cache_aware_keeps_reused_matches_isolated_between_requests():
+    policy = CacheAwarePolicy()
+    workers = [
+        _worker("10.0.0.1:8000", dispatched_req_num=1),
+        _worker("10.0.0.2:8000", dispatched_req_num=1),
+    ]
+    prompts = ["a" * 1024, "b" * 1024]
+    for worker, prompt in zip(workers, prompts):
+        policy.prompt_cache_tree.insert(prompt, worker.client_ip_port)
+
+    async def estimate_then_select(prompt):
+        policy.estimate_cache_hit_rate(workers, prompt)
+        await asyncio.sleep(0)
+        return policy.select_worker(workers, prompt)
+
+    async def run_concurrent_requests():
+        return await asyncio.gather(*(estimate_then_select(prompt) for prompt in prompts))
+
+    assert asyncio.run(run_concurrent_requests()) == workers
 
 
 def test_cache_aware_keeps_cache_worker_when_inflight_load_is_balanced():

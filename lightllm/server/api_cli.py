@@ -74,25 +74,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Disable PD master admission control based on the total capacity of registered decode nodes.",
     )
     parser.add_argument(
-        "--pd_master_decode_waiting_queue_ratio",
-        type=float,
-        default=0.5,
-        help=(
-            "Extra PD master waiting queue size as a ratio of the total capacity of registered decode nodes. "
-            "For example, 0.5 allows an additional waiting queue equal to 50%% of decode capacity. Default: 0.5."
-        ),
-    )
-    parser.add_argument(
-        "--pd_master_cache_aware_queue_reserved_ratio",
-        type=float,
-        default=0.5,
-        help=(
-            "Fraction of the PD master waiting queue reserved for requests with reusable prompt cache. "
-            "Cache-aware admission gradually unlocks this reserved capacity based on the estimated cache hit rate. "
-            "Set to 0 to disable cache-aware reservation. Default: 0.5."
-        ),
-    )
-    parser.add_argument(
         "--pd_trans_mode",
         type=str,
         choices=["nccl", "nixl"],

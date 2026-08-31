@@ -71,7 +71,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable_pd_master_decode_capacity_limit",
         action="store_true",
-        help="Disable the PD master capacity and cache-aware admission queue.",
+        help="Disable the PD master admission queue based on registered decode capacity.",
     )
     parser.add_argument(
         "--pd_trans_mode",

@@ -13,7 +13,14 @@ from contextlib import aclosing
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInfo
+from ..pd_io_struct import (
+    PD_Client_Obj,
+    PDUpKVStatus,
+    ObjType,
+    PDDecodeNodeInfo,
+    PD_MASTER_CAPACITY_EPOCH_KEY,
+    PD_MASTER_CAPACITY_SHARE_KEY,
+)
 from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
@@ -31,7 +38,6 @@ from .admission import (
     AdmissionPolicy,
     AdmissionPriority,
     AdmissionRequest,
-    CacheCapacitySnapshot,
     PDAdmissionController,
     SessionTracker,
 )
@@ -57,9 +63,11 @@ class HttpServerManagerForPDMaster:
             ttl_seconds=self.admission_policy.active_session_ttl_seconds,
             max_sessions=self.admission_policy.max_tracked_sessions,
         )
+        self._last_admission_metric_values: Dict[str, int] = {}
+        self._pending_admission_metric_values: Optional[Dict[str, int]] = None
+        self._admission_metric_flush_scheduled = False
         self.admission_controller = PDAdmissionController(
             decode_capacity_provider=self.pd_manager.get_decode_capacity,
-            cache_capacity_provider=self.pd_manager.get_prefill_cache_capacity,
             policy=self.admission_policy,
             state_change_callback=self._record_admission_state,
         )
@@ -115,25 +123,42 @@ class HttpServerManagerForPDMaster:
         return
 
     def update_node_load_info(self, load_info: Optional[dict]) -> None:
-        """更新节点遥测并重新驱动准入队列。"""
-        self.pd_manager.update_node_load_info(load_info)
-        # Decode 租约或 Prefill cache 余量变化后都需要重新尝试队列。
-        self.admission_controller.on_capacity_change()
+        """更新节点遥测；仅 Decode 容量租约变化时重新驱动准入队列。"""
+        if self.pd_manager.update_node_load_info(load_info):
+            self.admission_controller.on_capacity_change()
 
     def _record_admission_state(self, controller: PDAdmissionController) -> None:
-        """把当前准入队列状态写入监控指标。"""
-        self.metric_client.gauge_set(
-            "lightllm_pd_master_admission_queue_size",
-            controller.queued_request_count,
-        )
-        self.metric_client.gauge_set(
-            "lightllm_pd_master_admission_active_slots",
-            controller.active_slots,
-        )
-        self.metric_client.gauge_set(
-            "lightllm_pd_master_admission_cold_capacity",
-            controller.cold_capacity,
-        )
+        """合并同一事件循环周期内的状态变化，避免重复发送 gauge RPC。"""
+        self._pending_admission_metric_values = {
+            "lightllm_pd_master_admission_queue_size": controller.queued_request_count,
+            "lightllm_pd_master_admission_active_slots": controller.active_slots,
+            "lightllm_pd_master_admission_decode_capacity": self.pd_manager.get_decode_capacity(),
+        }
+        if self._admission_metric_flush_scheduled:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._flush_admission_state_metrics()
+            return
+
+        self._admission_metric_flush_scheduled = True
+        loop.call_soon(self._flush_admission_state_metrics)
+
+    def _flush_admission_state_metrics(self) -> None:
+        """只发送相较于上次上报实际发生变化的 admission gauge。"""
+        self._admission_metric_flush_scheduled = False
+        metric_values = self._pending_admission_metric_values
+        self._pending_admission_metric_values = None
+        if metric_values is None:
+            return
+
+        for name, value in metric_values.items():
+            if self._last_admission_metric_values.get(name) == value:
+                continue
+            self.metric_client.gauge_set(name, value)
+            self._last_admission_metric_values[name] = value
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
@@ -174,47 +199,33 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         admission_lease = None
-        admission_request = None
-        observed_prefill_ids = set()
+        running_request_registered = False
         session_key = self._get_session_key(request)
-        if not self.args.disable_pd_master_decode_capacity_limit:
-            admission_request = self._build_admission_request(prompt, sampling_params, session_key)
-            admission_lease = await self.admission_controller.acquire(admission_request)
-            admission_request = admission_lease.request
-            self.metric_client.histogram_observe(
-                "lightllm_request_queue_duration_bucket", admission_lease.waited_seconds
-            )
-            if admission_lease.waited_seconds > 0:
-                # 排队期间节点和缓存内容可能变化；派发前重新匹配，避免复用过期快照。
-                self.pd_manager.selector.estimate_prompt_cache_hit_rate(prompt)
-
-        was_idle = self.running_request_count == 0
-        self.running_request_count += 1
-        if was_idle:
-            self.latest_success_infer_time = time.time()
         try:
+            if not self.args.disable_pd_master_decode_capacity_limit:
+                admission_request = self._build_admission_request(prompt, sampling_params, session_key)
+                admission_lease = await self.admission_controller.acquire(admission_request)
+                self.metric_client.histogram_observe(
+                    "lightllm_request_queue_duration_bucket", admission_lease.waited_seconds
+                )
+                if admission_lease.waited_seconds > 0:
+                    # 排队期间节点和缓存内容可能变化；派发前重新匹配，避免复用过期快照。
+                    self.pd_manager.selector.estimate_prompt_cache_hit_rate(prompt)
+
+            was_idle = self.running_request_count == 0
+            self.running_request_count += 1
+            running_request_registered = True
+            if was_idle:
+                self.latest_success_infer_time = time.time()
             async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
                 async for result in generator:
-                    if (
-                        admission_request is not None
-                        and isinstance(result, tuple)
-                        and len(result) >= 3
-                        and result[0] not in observed_prefill_ids
-                        and isinstance(result[2], dict)
-                        and "prompt_tokens" in result[2]
-                    ):
-                        observed_prefill_ids.add(result[0])
-                        self.admission_controller.record_prefill_result(
-                            admission_request,
-                            result[2]["prompt_tokens"],
-                            result[2].get("prompt_cache_len", 0),
-                        )
                     if session_key is not None and not self.session_tracker.is_continuation(session_key):
                         self.session_tracker.mark_success(session_key)
                         self.admission_controller.promote_session(session_key)
                     yield result
         finally:
-            self.running_request_count -= 1
+            if running_request_registered:
+                self.running_request_count -= 1
             if admission_lease is not None:
                 admission_lease.release()
 
@@ -245,13 +256,10 @@ class HttpServerManagerForPDMaster:
             priority = AdmissionPriority.COLD
 
         decode_slots = max(1, int(getattr(sampling_params, "n", 1) or 1))
-        prompt_size = len(prompt) if prompt is not None else 0
-        estimated_uncached_work = math.ceil(prompt_size * (1.0 - estimated_cache_hit_rate)) * decode_slots
         return AdmissionRequest(
             session_key=session_key,
             priority=priority,
             decode_slots=decode_slots,
-            estimated_uncached_work=estimated_uncached_work,
         )
 
     async def _generate(
@@ -878,44 +886,6 @@ class PDManager:
             for node in self.decode_nodes
         )
 
-    def get_prefill_cache_capacity(self) -> Optional[CacheCapacitySnapshot]:
-        """汇总当前 Master 对应的 Prefill cache 份额；遥测不完整时不参与限流。"""
-        if not self.prefill_nodes:
-            return None
-
-        statuses = [node.run_status for node in self.prefill_nodes]
-        if any(status.radix_cache_capacity_tokens <= 0 or status.report_time <= 0 for status in statuses):
-            return None
-
-        full_decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.decode_nodes)
-        local_decode_capacity = self.get_decode_capacity()
-        if full_decode_capacity <= 0 or local_decode_capacity <= 0:
-            return None
-
-        # 所有 Master 都能看到同一组 P 节点，因此按本 Master 的 Decode 租约比例
-        # 切分缓存余量，避免每个 Master 重复消费整份 headroom。
-        share_ratio = min(1.0, local_decode_capacity / full_decode_capacity)
-        # total_token_usage_rate 已排除可驱逐 Radix token，因此下面两项分别表示
-        # 当前可驱逐缓存量和运行中请求之外还能留给缓存的容量。
-        total_tokens = int(
-            sum(max(0, status.radix_cache_total_tokens - status.radix_cache_refed_tokens) for status in statuses)
-            * share_ratio
-        )
-        capacity_tokens = int(
-            sum(
-                max(
-                    0,
-                    status.radix_cache_capacity_tokens * (1.0 - min(max(status.total_token_usage_rate, 0.0), 1.0)),
-                )
-                for status in statuses
-            )
-            * share_ratio
-        )
-        return CacheCapacitySnapshot(
-            total_tokens=total_tokens,
-            capacity_tokens=capacity_tokens,
-        )
-
     def is_pd_nodes_ready(self):
         prefill_node_count = len(self.prefill_nodes)
         decode_node_count = len(self.decode_nodes)
@@ -967,7 +937,24 @@ class PDManager:
         return True
 
     def register_pd(self, pd_info_json, websocket):
-        pd_client = PD_Client_Obj(**pd_info_json)
+        # Capacity metadata lives in reserved start_args keys so newer P/D
+        # nodes retain the legacy registration schema for older Masters. Keep
+        # accepting the short-lived top-level form for branch compatibility.
+        pd_info = dict(pd_info_json)
+        start_args = pd_info.get("start_args") or {}
+        capacity_share = pd_info.pop(
+            "capacity_share",
+            start_args.get(PD_MASTER_CAPACITY_SHARE_KEY),
+        )
+        capacity_epoch = pd_info.pop(
+            "capacity_epoch",
+            start_args.get(PD_MASTER_CAPACITY_EPOCH_KEY, 0),
+        )
+        pd_client = PD_Client_Obj(
+            **pd_info,
+            capacity_share=capacity_share,
+            capacity_epoch=capacity_epoch,
+        )
         client_max_req_total_len = pd_client.start_args["max_req_total_len"]
         if client_max_req_total_len != self.args.max_req_total_len:
             logger.error(
@@ -1007,19 +994,25 @@ class PDManager:
         return
 
     def remove_pd(self, pd_info_json):
-        pd_client = PD_Client_Obj(**pd_info_json)
+        # Disconnect cleanup only needs the stable legacy identity fields; do
+        # not reconstruct PD_Client_Obj from a possibly newer registration.
+        client_ip_port = pd_info_json["client_ip_port"]
+        mode = pd_info_json.get("mode", "unknown")
 
-        self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
-        self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
-        self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
+        self.url_to_pd_nodes.pop(client_ip_port, None)
+        self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != client_ip_port]
+        self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != client_ip_port]
 
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
-        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
+        logger.info(f"mode: {mode} url: {client_ip_port} removed")
         return
 
-    def update_node_load_info(self, load_info: Optional[dict]):
-        """更新节点负载信息
+    def update_node_load_info(self, load_info: Optional[dict]) -> bool:
+        """更新节点负载信息，并返回有效 Decode 容量份额是否发生变化。
+
+        capacity_epoch 只用于拒绝旧上报；仅 epoch 变化不会重新驱动 admission。
+
         load_info: 节点负载信息字典，内容格式如下，可以为 None
         {
         "total_token_usage_rate": xxxx,
@@ -1028,16 +1021,12 @@ class PDManager:
         """
         try:
             if load_info is None:
-                return
+                return False
             client_ip_port = load_info["client_ip_port"]
             pd_client = self.url_to_pd_nodes.get(client_ip_port)
             if pd_client is None:
-                return
+                return False
             pd_client.run_status.total_token_usage_rate = load_info["total_token_usage_rate"]
-            pd_client.run_status.radix_cache_total_tokens = load_info.get("radix_cache_total_tokens", 0)
-            pd_client.run_status.radix_cache_refed_tokens = load_info.get("radix_cache_refed_tokens", 0)
-            pd_client.run_status.radix_cache_capacity_tokens = load_info.get("radix_cache_capacity_tokens", 0)
-            pd_client.run_status.report_time = time.monotonic()
 
             capacity_epoch = int(load_info.get("capacity_epoch", pd_client.capacity_epoch))
             if capacity_epoch >= pd_client.capacity_epoch:
@@ -1046,11 +1035,14 @@ class PDManager:
                     if pd_client.capacity_share is not None
                     else pd_client.start_args["running_max_req_size"]
                 )
-                pd_client.capacity_share = max(0, int(load_info.get("capacity_share", fallback_capacity)))
+                capacity_share = max(0, int(load_info.get("capacity_share", fallback_capacity)))
+                capacity_changed = fallback_capacity != capacity_share
+                pd_client.capacity_share = capacity_share
                 pd_client.capacity_epoch = capacity_epoch
+                return pd_client.mode == "decode" and capacity_changed
         except Exception as e:
             logger.warning(f"udpate node load info failed, load_info: {load_info} error: {str(e)}")
-        return
+        return False
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams

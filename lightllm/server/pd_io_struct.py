@@ -11,6 +11,13 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+# Keep per-Master capacity metadata inside ``start_args`` so a new P/D node can
+# still register with an older Master whose PD_Client_Obj rejects unknown
+# top-level fields. New Masters extract these reserved protocol keys.
+PD_MASTER_CAPACITY_SHARE_KEY = "__pd_master_capacity_share"
+PD_MASTER_CAPACITY_EPOCH_KEY = "__pd_master_capacity_epoch"
+
+
 # 节点的行为
 class NodeRole(enum.Enum):
     P = "prefill"
@@ -47,10 +54,6 @@ class ObjType(enum.Enum):
 @dataclass
 class _PD_Client_RunStatus:
     total_token_usage_rate: float = 0.0  # pd 节点上的 token 使用率
-    radix_cache_total_tokens: int = 0
-    radix_cache_refed_tokens: int = 0
-    radix_cache_capacity_tokens: int = 0
-    report_time: float = 0.0
 
 
 @dataclass

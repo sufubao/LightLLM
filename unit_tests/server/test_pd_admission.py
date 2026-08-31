@@ -6,7 +6,6 @@ from lightllm.server.httpserver_for_pd_master.admission import (
     AdmissionPolicy,
     AdmissionPriority,
     AdmissionRequest,
-    CacheCapacitySnapshot,
     PDAdmissionController,
     SessionTracker,
 )
@@ -17,13 +16,11 @@ def _request(
     priority=AdmissionPriority.COLD,
     session_key=None,
     decode_slots=1,
-    estimated_uncached_work=0,
 ):
     return AdmissionRequest(
         session_key=session_key,
         priority=priority,
         decode_slots=decode_slots,
-        estimated_uncached_work=estimated_uncached_work,
     )
 
 
@@ -74,6 +71,45 @@ def test_admission_prioritizes_continuations_without_starving_lower_classes():
     asyncio.run(run())
 
 
+def test_decode_capacity_one_still_follows_slot_weighted_drr():
+    async def run():
+        policy = AdmissionPolicy(
+            continuation_weight=8,
+            probable_cache_hit_weight=3,
+            cold_weight=1,
+            waiting_decode_waves=12,
+        )
+        controller = PDAdmissionController(lambda: 1, policy=policy)
+        active = await controller.acquire(_request())
+        acquired = asyncio.Queue()
+
+        async def acquire(label, priority):
+            lease = await controller.acquire(_request(priority))
+            await acquired.put((label, lease))
+
+        tasks = [
+            asyncio.create_task(acquire(f"continuation-{index}", AdmissionPriority.CONTINUATION)) for index in range(8)
+        ]
+        tasks.extend(
+            asyncio.create_task(acquire(f"probable-{index}", AdmissionPriority.PROBABLE_CACHE_HIT))
+            for index in range(3)
+        )
+        tasks.append(asyncio.create_task(acquire("cold-0", AdmissionPriority.COLD)))
+        await asyncio.sleep(0)
+
+        active.release()
+        expected = ["continuation"] * 8 + ["probable"] * 3 + ["cold"]
+        for expected_prefix in expected:
+            label, lease = await asyncio.wait_for(acquired.get(), timeout=1.0)
+            assert label.startswith(expected_prefix)
+            lease.release()
+
+        await asyncio.gather(*tasks)
+        assert controller.active_slots == 0
+
+    asyncio.run(run())
+
+
 def test_higher_priority_request_can_replace_a_queued_cold_request():
     async def run():
         controller = PDAdmissionController(lambda: 1)
@@ -111,7 +147,7 @@ def test_multi_choice_request_acquires_all_slots_atomically():
     asyncio.run(run())
 
 
-def test_multi_choice_request_reserves_capacity_across_individual_releases():
+def test_same_priority_small_request_backfills_a_blocked_gang_without_idle_slots():
     async def run():
         controller = PDAdmissionController(lambda: 3)
         active = [await controller.acquire(_request()) for _ in range(3)]
@@ -120,52 +156,138 @@ def test_multi_choice_request_reserves_capacity_across_individual_releases():
         await asyncio.sleep(0)
 
         active[0].release()
-        await asyncio.sleep(0)
+        later = await later_task
         assert multi_choice_task.done() is False
-        assert later_task.done() is False
+        assert controller.active_slots == 3
+        assert all(deficit >= 0 for deficit in controller._deficits.values())
 
         active[1].release()
-        multi_choice = await multi_choice_task
-        assert later_task.done() is False
+        assert multi_choice_task.done() is False
 
-        active[2].release()
-        later = await later_task
-        multi_choice.release()
         later.release()
+        multi_choice = await multi_choice_task
+        assert controller.active_slots == 3
+        multi_choice.release()
+        active[2].release()
 
     asyncio.run(run())
 
 
-def test_multi_choice_reservation_does_not_block_fitting_higher_priority_request():
+def test_blocked_gang_keeps_backfill_open_for_a_later_small_request():
     async def run():
-        controller = PDAdmissionController(lambda: 3)
-        active = [await controller.acquire(_request()) for _ in range(3)]
-
-        # 先消费调度表中的 continuation 和 probable 配额，使下一次轮到 cold。
-        first_continuation_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
-        first_probable_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.PROBABLE_CACHE_HIT)))
+        controller = PDAdmissionController(
+            lambda: 2,
+            policy=AdmissionPolicy(waiting_decode_waves=2),
+        )
+        active = [await controller.acquire(_request()) for _ in range(2)]
+        gang_task = asyncio.create_task(controller.acquire(_request(decode_slots=2)))
         await asyncio.sleep(0)
+
         active[0].release()
-        first_continuation = await first_continuation_task
-        active[1].release()
-        first_probable = await first_probable_task
+        assert gang_task.done() is False
+        assert controller.active_slots == 1
 
-        large_cold_task = asyncio.create_task(controller.acquire(_request(decode_slots=2)))
-        later_continuation_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        small_task = asyncio.create_task(controller.acquire(_request()))
+        small = await small_task
+        assert controller.active_slots == 2
+        assert gang_task.done() is False
+
+        small.release()
+        assert gang_task.done() is False
+        active[1].release()
+        gang = await gang_task
+        gang.release()
+
+    asyncio.run(run())
+
+
+def test_full_queue_of_session_blocked_waiters_cannot_leave_other_sessions_idle():
+    async def run():
+        controller = PDAdmissionController(lambda: 4)
+        active_a = await controller.acquire(_request(AdmissionPriority.CONTINUATION, session_key="session-a"))
+        queued_a_tasks = [
+            asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION, session_key="session-a")))
+            for _ in range(4)
+        ]
+        await asyncio.sleep(0)
+        assert controller.queued_slots == 4
+        assert controller.active_slots == 1
+
+        session_b = await controller.acquire(_request(AdmissionPriority.CONTINUATION, session_key="session-b"))
+        assert controller.active_slots == 2
+        assert controller.queued_slots == 4
+
+        session_b.release()
+        active_a.release()
+        for task in queued_a_tasks:
+            lease = await task
+            lease.release()
+        assert controller.active_slots == 0
+
+    asyncio.run(run())
+
+
+def test_full_gang_queue_still_accepts_a_fitting_request_within_backfill_budget():
+    async def run():
+        controller = PDAdmissionController(lambda: 4)
+        active = await controller.acquire(_request(decode_slots=3))
+        gang_tasks = [asyncio.create_task(controller.acquire(_request(decode_slots=2))) for _ in range(2)]
+        await asyncio.sleep(0)
+        assert controller.queued_slots == 4
+        assert controller.active_slots == 3
+
+        small = await controller.acquire(_request())
+        assert controller.active_slots == 4
+        assert controller.queued_slots == 4
+        assert controller._backfilled_slots == 1
+
+        small.release()
+        active.release()
+        first_gang = await gang_tasks[0]
+        second_gang = await gang_tasks[1]
+        first_gang.release()
+        second_gang.release()
+        assert controller.active_slots == 0
+
+    asyncio.run(run())
+
+
+def test_gang_reservation_starts_after_one_backfill_wave_and_blocks_later_priority():
+    async def run():
+        controller = PDAdmissionController(
+            lambda: 3,
+            policy=AdmissionPolicy(waiting_decode_waves=5),
+        )
+        active = [await controller.acquire(_request()) for _ in range(3)]
+        gang_task = asyncio.create_task(controller.acquire(_request(decode_slots=3)))
+        backfill_tasks = [asyncio.create_task(controller.acquire(_request())) for _ in range(3)]
         await asyncio.sleep(0)
 
-        active[2].release()
-        later_continuation = await later_continuation_task
-        assert controller.active_slots == 3
-        assert large_cold_task.done() is False
+        backfills = []
+        for active_lease, backfill_task in zip(active, backfill_tasks):
+            active_lease.release()
+            backfills.append(await backfill_task)
+            assert gang_task.done() is False
 
-        first_continuation.release()
-        assert large_cold_task.done() is False
-        first_probable.release()
-        large_cold = await large_cold_task
+        later_high_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        await asyncio.sleep(0)
 
-        later_continuation.release()
-        large_cold.release()
+        backfills[0].release()
+        await asyncio.sleep(0)
+        assert later_high_task.done() is False
+        assert gang_task.done() is False
+        backfills[1].release()
+        await asyncio.sleep(0)
+        assert later_high_task.done() is False
+        assert gang_task.done() is False
+
+        backfills[2].release()
+        gang = await gang_task
+        assert later_high_task.done() is False
+
+        gang.release()
+        later_high = await later_high_task
+        later_high.release()
 
     asyncio.run(run())
 
@@ -210,6 +332,38 @@ def test_cancelled_waiter_is_removed_and_does_not_leak_capacity():
     asyncio.run(run())
 
 
+def test_cancelling_reserved_gang_removes_the_backfill_barrier():
+    async def run():
+        controller = PDAdmissionController(
+            lambda: 2,
+            policy=AdmissionPolicy(waiting_decode_waves=4),
+        )
+        active = [await controller.acquire(_request()) for _ in range(2)]
+        gang_task = asyncio.create_task(controller.acquire(_request(decode_slots=2)))
+        backfill_tasks = [asyncio.create_task(controller.acquire(_request())) for _ in range(2)]
+        await asyncio.sleep(0)
+
+        backfills = []
+        for active_lease, backfill_task in zip(active, backfill_tasks):
+            active_lease.release()
+            backfills.append(await backfill_task)
+
+        later_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        await asyncio.sleep(0)
+        assert later_task.done() is False
+
+        gang_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await gang_task
+
+        backfills[0].release()
+        later = await later_task
+        backfills[1].release()
+        later.release()
+
+    asyncio.run(run())
+
+
 def test_wait_timeout_removes_request_from_queue():
     async def run():
         policy = AdmissionPolicy(
@@ -225,6 +379,40 @@ def test_wait_timeout_removes_request_from_queue():
 
         assert controller.queued_request_count == 0
         active.release()
+
+    asyncio.run(run())
+
+
+def test_reserved_gang_timeout_removes_the_backfill_barrier():
+    async def run():
+        policy = AdmissionPolicy(
+            continuation_max_wait_seconds=1.0,
+            probable_cache_hit_max_wait_seconds=1.0,
+            cold_max_wait_seconds=0.03,
+            waiting_decode_waves=4,
+        )
+        controller = PDAdmissionController(lambda: 2, policy=policy)
+        active = [await controller.acquire(_request()) for _ in range(2)]
+        gang_task = asyncio.create_task(controller.acquire(_request(decode_slots=2)))
+        await asyncio.sleep(0)
+
+        active[0].release()
+        first_backfill_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        first_backfill = await first_backfill_task
+
+        second_backfill_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        await asyncio.sleep(0)
+        active[1].release()
+        second_backfill = await second_backfill_task
+
+        later_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        with pytest.raises(ServerBusyError, match="wait timed out"):
+            await gang_task
+
+        first_backfill.release()
+        later = await later_task
+        second_backfill.release()
+        later.release()
 
     asyncio.run(run())
 
@@ -254,6 +442,99 @@ def test_capacity_changes_wake_waiters_without_overcommitting():
         second.release()
         third = await third_task
         third.release()
+
+    asyncio.run(run())
+
+
+def test_capacity_shrink_fails_an_oversized_blocked_gang_and_clears_state():
+    async def run():
+        capacity = [3]
+        controller = PDAdmissionController(
+            lambda: capacity[0],
+            policy=AdmissionPolicy(waiting_decode_waves=2),
+        )
+        active = [await controller.acquire(_request()) for _ in range(3)]
+        gang_task = asyncio.create_task(controller.acquire(_request(decode_slots=3)))
+        await asyncio.sleep(0)
+
+        active[0].release()
+        assert gang_task.done() is False
+
+        capacity[0] = 2
+        controller.on_capacity_change()
+        with pytest.raises(ServerBusyError, match="fell below queued request size"):
+            await gang_task
+        assert controller.queued_slots == 0
+
+        small_task = asyncio.create_task(controller.acquire(_request()))
+        await asyncio.sleep(0)
+        assert small_task.done() is False
+        active[1].release()
+        small = await small_task
+        active[2].release()
+        small.release()
+
+    asyncio.run(run())
+
+
+def test_capacity_shrink_trims_queue_to_dynamic_slot_limit_by_priority_and_recency():
+    async def run():
+        capacity = [4]
+        policy = AdmissionPolicy(waiting_decode_waves=2)
+        controller = PDAdmissionController(lambda: capacity[0], policy=policy)
+        active = await controller.acquire(_request(decode_slots=4))
+
+        cold_tasks = [asyncio.create_task(controller.acquire(_request(AdmissionPriority.COLD))) for _ in range(3)]
+        probable_tasks = [
+            asyncio.create_task(controller.acquire(_request(AdmissionPriority.PROBABLE_CACHE_HIT))) for _ in range(2)
+        ]
+        continuation_tasks = [
+            asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION))) for _ in range(3)
+        ]
+        await asyncio.sleep(0)
+        assert controller.queued_slots == 8
+
+        capacity[0] = 1
+        controller.on_capacity_change()
+        assert controller.queued_slots == capacity[0] * policy.waiting_decode_waves
+
+        for task in cold_tasks + probable_tasks + [continuation_tasks[-1]]:
+            with pytest.raises(ServerBusyError, match="queue capacity shrank"):
+                await task
+        assert continuation_tasks[0].done() is False
+        assert continuation_tasks[1].done() is False
+
+        active.release()
+        first = await continuation_tasks[0]
+        assert continuation_tasks[1].done() is False
+        first.release()
+        second = await continuation_tasks[1]
+        second.release()
+
+    asyncio.run(run())
+
+
+def test_zero_capacity_fails_all_queued_requests():
+    async def run():
+        capacity = [2]
+        controller = PDAdmissionController(
+            lambda: capacity[0],
+            policy=AdmissionPolicy(waiting_decode_waves=2),
+        )
+        active = [await controller.acquire(_request()) for _ in range(2)]
+        tasks = [asyncio.create_task(controller.acquire(_request())) for _ in range(2)]
+        await asyncio.sleep(0)
+
+        capacity[0] = 0
+        controller.on_capacity_change()
+        for task in tasks:
+            with pytest.raises(ServerBusyError, match="fell below queued request size"):
+                await task
+        assert controller.queued_slots == 0
+        assert controller.queued_request_count == 0
+
+        for lease in active:
+            lease.release()
 
     asyncio.run(run())
 
@@ -325,103 +606,22 @@ def test_session_promotion_extends_the_wait_deadline():
     asyncio.run(run())
 
 
-def test_cold_capacity_tracks_live_cache_headroom_and_actual_miss_size():
-    snapshot = [CacheCapacitySnapshot(total_tokens=200, capacity_tokens=1000)]
-    controller = PDAdmissionController(
-        lambda: 4,
-        cache_capacity_provider=lambda: snapshot[0],
-    )
-    cold = _request(AdmissionPriority.COLD)
-
-    controller.record_prefill_result(cold, prompt_tokens=100, cached_tokens=0)
-    assert controller.cold_capacity == 4
-
-    snapshot[0] = CacheCapacitySnapshot(total_tokens=800, capacity_tokens=1000)
-    controller.on_capacity_change()
-    assert controller.cold_capacity == 2
-
-    snapshot[0] = CacheCapacitySnapshot(total_tokens=1000, capacity_tokens=1000)
-    controller.on_capacity_change()
-    assert controller.cold_capacity == 1
-
-
-def test_cache_friendly_request_bypasses_cold_capacity():
+def test_requests_remain_fifo_within_the_same_priority_class():
     async def run():
-        snapshot = CacheCapacitySnapshot(total_tokens=1000, capacity_tokens=1000)
         controller = PDAdmissionController(
-            lambda: 3,
-            cache_capacity_provider=lambda: snapshot,
+            lambda: 1,
+            policy=AdmissionPolicy(waiting_decode_waves=2),
         )
-        cold_request = _request(AdmissionPriority.COLD)
-        controller.record_prefill_result(cold_request, prompt_tokens=100, cached_tokens=0)
-
-        first_cold = await controller.acquire(cold_request)
-        second_cold_task = asyncio.create_task(controller.acquire(cold_request))
-        await asyncio.sleep(0)
-        assert second_cold_task.done() is False
-
-        probable = await controller.acquire(_request(AdmissionPriority.PROBABLE_CACHE_HIT))
-        assert controller.active_slots == 2
-        probable.release()
-
-        first_cold.release()
-        second_cold = await second_cold_task
-        second_cold.release()
-
-    asyncio.run(run())
-
-
-def test_probable_cache_hits_consume_cold_capacity_when_actual_hits_are_low():
-    async def run():
-        snapshot = CacheCapacitySnapshot(total_tokens=1000, capacity_tokens=1000)
-        controller = PDAdmissionController(
-            lambda: 3,
-            cache_capacity_provider=lambda: snapshot,
-        )
-        probable_request = _request(AdmissionPriority.PROBABLE_CACHE_HIT)
-
-        initially_trusted = await controller.acquire(probable_request)
-        assert controller.active_cold_slots == 0
-        controller.record_prefill_result(
-            probable_request,
-            prompt_tokens=100,
-            cached_tokens=0,
-        )
-        assert controller.cold_capacity == 1
-
-        first_gated = await controller.acquire(probable_request)
-        assert controller.active_cold_slots == 1
-        second_gated_task = asyncio.create_task(controller.acquire(probable_request))
-        await asyncio.sleep(0)
-        assert second_gated_task.done() is False
-
-        # 可信度变化不能让已经取得的租约在释放时误扣冷槽位。
-        initially_trusted.release()
-        assert controller.active_cold_slots == 1
-        assert second_gated_task.done() is False
-
-        first_gated.release()
-        second_gated = await second_gated_task
-        second_gated.release()
-
-    asyncio.run(run())
-
-
-def test_smaller_cold_request_is_dispatched_first():
-    async def run():
-        controller = PDAdmissionController(lambda: 2)
-        active = [await controller.acquire(_request()) for _ in range(2)]
-        large_task = asyncio.create_task(controller.acquire(_request(estimated_uncached_work=100)))
-        small_task = asyncio.create_task(controller.acquire(_request(estimated_uncached_work=10)))
+        active = await controller.acquire(_request())
+        first_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.COLD, session_key="first")))
+        second_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.COLD, session_key="second")))
         await asyncio.sleep(0)
 
-        active[0].release()
-        small = await small_task
-        assert large_task.done() is False
-
-        active[1].release()
-        large = await large_task
-        small.release()
-        large.release()
+        active.release()
+        first = await first_task
+        assert second_task.done() is False
+        first.release()
+        second = await second_task
+        second.release()
 
     asyncio.run(run())

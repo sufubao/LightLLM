@@ -12,23 +12,24 @@ import sys
 import time
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
-from lightllm.server.pd_io_struct import NodeRole, ObjType
+from lightllm.server.pd_io_struct import (
+    NodeRole,
+    ObjType,
+    PD_MASTER_CAPACITY_EPOCH_KEY,
+    PD_MASTER_CAPACITY_SHARE_KEY,
+)
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_unique_server_name
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
 from lightllm.utils.shm_port_args import get_shm_port_args
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 
 logger = init_logger(__name__)
-
-_radix_cache_client = None
-_radix_cache_client_key = None
 
 
 def _update_pd_master_membership(manager: HttpServerManager, pd_master_ids) -> None:
@@ -56,40 +57,24 @@ def _allocate_capacity_share(total_capacity: int, pd_master_ids, pd_master_node_
     return base + int(pd_master_ids.index(pd_master_node_id) < remainder)
 
 
-def _get_radix_cache_info():
-    """读取本节点各 DP 的 Radix cache token 统计。"""
-    global _radix_cache_client, _radix_cache_client_key
-
-    from lightllm.server.api_http import g_objs
-
-    args = g_objs.args
-    if args.disable_dynamic_prompt_cache:
-        return 0, 0, 0
-
-    max_total_token_num = g_objs.httpserver_manager.shm_max_total_token_num.get_value()
-    if max_total_token_num <= 0:
-        return 0, 0, 0
-
-    node_world_size = args.tp // args.nnodes
-    dp_world_size = args.tp // args.dp
-    client_key = (get_unique_server_name(), max_total_token_num, node_world_size, dp_world_size)
-    try:
-        if _radix_cache_client is None or _radix_cache_client_key != client_key:
-            _radix_cache_client = RadixCacheReadOnlyClient(
-                get_unique_server_name(),
-                max_total_token_num,
-                node_world_size=node_world_size,
-                dp_world_size=dp_world_size,
-            )
-            _radix_cache_client_key = client_key
-
-        dp_size_in_node = max(1, args.dp // args.nnodes)
-        total_tokens = sum(_radix_cache_client.get_tree_total_tokens_num(i) for i in range(dp_size_in_node))
-        refed_tokens = sum(_radix_cache_client.get_refed_tokens_num(i) for i in range(dp_size_in_node))
-        return int(total_tokens), int(refed_tokens), int(max_total_token_num * dp_size_in_node)
-    except Exception as exc:
-        logger.debug(f"read radix cache load failed: {str(exc)}")
-        return 0, 0, 0
+def _build_pd_registration_info(manager: HttpServerManager, pd_master_obj: PD_Master_Obj) -> dict:
+    """构造保持旧顶层 schema 兼容的 P/D 节点注册信息。"""
+    # Older Masters expand the registration JSON directly into PD_Client_Obj
+    # and reject unknown top-level fields during a rolling upgrade.
+    args_dict = vars(manager.args).copy()
+    args_dict["host"] = manager.host_ip
+    args_dict[PD_MASTER_CAPACITY_SHARE_KEY] = _allocate_capacity_share(
+        manager.args.running_max_req_size,
+        manager.pd_master_ids,
+        pd_master_obj.node_id,
+    )
+    args_dict[PD_MASTER_CAPACITY_EPOCH_KEY] = manager.pd_master_capacity_epoch
+    return {
+        "node_id": manager.args.pd_node_id,
+        "client_ip_port": f"{manager.host_ip}:{get_shm_port_args().port}",
+        "mode": manager.pd_mode.value,
+        "start_args": args_dict,
+    }
 
 
 async def timer_log(manager: HttpServerManager):
@@ -165,21 +150,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                args_dict = vars(manager.args)
-                args_dict["host"] = manager.host_ip
                 # 发送注册信息
-                regist_json = {
-                    "node_id": manager.args.pd_node_id,
-                    "client_ip_port": f"{manager.host_ip}:{get_shm_port_args().port}",
-                    "mode": manager.pd_mode.value,
-                    "start_args": args_dict,
-                    "capacity_share": _allocate_capacity_share(
-                        manager.args.running_max_req_size,
-                        manager.pd_master_ids,
-                        pd_master_obj.node_id,
-                    ),
-                    "capacity_epoch": manager.pd_master_capacity_epoch,
-                }
+                regist_json = _build_pd_registration_info(manager, pd_master_obj)
 
                 await websocket.send(json.dumps(regist_json))
                 logger.info(f"Sent registration JSON: {regist_json}")
@@ -375,7 +347,7 @@ async def _send_heartbeat_to_pd_master(
 
 # 获取节点负载信息
 def _get_load_info(pd_master_node_id: int) -> dict:
-    """汇总当前 Master 对应的容量、负载和缓存遥测。"""
+    """汇总当前 Master 对应的容量和节点负载。"""
 
     from lightllm.server.api_http import g_objs
 
@@ -389,15 +361,11 @@ def _get_load_info(pd_master_node_id: int) -> dict:
         float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in range(dp_size_in_node)
     ]
     mean_node_load = sum(current_load) / len(current_load)
-    radix_cache_total_tokens, radix_cache_refed_tokens, radix_cache_capacity_tokens = _get_radix_cache_info()
     pd_master_ids = getattr(g_objs.httpserver_manager, "pd_master_ids", (pd_master_node_id,))
     load_info = {
         "total_token_usage_rate": mean_node_load,
         "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}",
         "capacity_share": _allocate_capacity_share(args.running_max_req_size, pd_master_ids, pd_master_node_id),
         "capacity_epoch": getattr(g_objs.httpserver_manager, "pd_master_capacity_epoch", 0),
-        "radix_cache_total_tokens": radix_cache_total_tokens,
-        "radix_cache_refed_tokens": radix_cache_refed_tokens,
-        "radix_cache_capacity_tokens": radix_cache_capacity_tokens,
     }
     return load_info

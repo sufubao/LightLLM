@@ -34,7 +34,7 @@ MONITOR_INFO = {
     "lightllm_num_running_reqs": "Number of running requests",
     "lightllm_pd_master_admission_queue_size": "Number of requests waiting at the PD master admission queue",
     "lightllm_pd_master_admission_active_slots": "Number of decode slots leased by the PD master",
-    "lightllm_pd_master_admission_cold_capacity": "Current cold-request slot capacity at the PD master",
+    "lightllm_pd_master_admission_decode_capacity": "Decode slot capacity currently assigned to the PD master",
 }
 
 
@@ -116,7 +116,7 @@ class Monitor:
         self.create_gauge("lightllm_num_running_reqs")
         self.create_gauge("lightllm_pd_master_admission_queue_size")
         self.create_gauge("lightllm_pd_master_admission_active_slots")
-        self.create_gauge("lightllm_pd_master_admission_cold_capacity")
+        self.create_gauge("lightllm_pd_master_admission_decode_capacity")
 
     def create_histogram(self, name, buckets, labelnames=None):
         all_labels = ["model_name"] + (labelnames or [])

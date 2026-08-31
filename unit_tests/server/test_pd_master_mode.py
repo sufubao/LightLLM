@@ -1,12 +1,17 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from easydict import EasyDict
 
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.server.httpserver.pd_loop import _allocate_capacity_share, _update_pd_master_membership
+from lightllm.server.httpserver.pd_loop import (
+    _allocate_capacity_share,
+    _build_pd_registration_info,
+    _update_pd_master_membership,
+)
 from lightllm.server.httpserver_for_pd_master.admission import (
     AdmissionPolicy,
     AdmissionPriority,
@@ -14,6 +19,7 @@ from lightllm.server.httpserver_for_pd_master.admission import (
     SessionTracker,
 )
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+from lightllm.server.pd_io_struct import PD_MASTER_CAPACITY_EPOCH_KEY, PD_MASTER_CAPACITY_SHARE_KEY
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
@@ -200,6 +206,52 @@ def test_pd_node_capacity_is_partitioned_without_overlap():
     assert _allocate_capacity_share(8, master_ids, 99) == 0
 
 
+def test_pd_registration_keeps_legacy_top_level_schema(monkeypatch):
+    from lightllm.server.httpserver import pd_loop
+
+    args = SimpleNamespace(pd_node_id=7, running_max_req_size=8, host="0.0.0.0")
+    manager = SimpleNamespace(
+        args=args,
+        host_ip="10.0.0.7",
+        pd_mode=SimpleNamespace(value="decode"),
+        pd_master_ids=(10, 20),
+        pd_master_capacity_epoch=123,
+    )
+    monkeypatch.setattr(pd_loop, "get_shm_port_args", lambda: SimpleNamespace(port=8001))
+
+    registration = _build_pd_registration_info(manager, SimpleNamespace(node_id=10))
+
+    assert set(registration) == {"node_id", "client_ip_port", "mode", "start_args"}
+    assert registration["start_args"][PD_MASTER_CAPACITY_SHARE_KEY] == 4
+    assert registration["start_args"][PD_MASTER_CAPACITY_EPOCH_KEY] == 123
+    assert args.host == "0.0.0.0"
+
+
+def test_pd_node_load_info_omits_radix_cache_hot_path(monkeypatch):
+    from lightllm.server import api_http
+    from lightllm.server.httpserver import pd_loop
+
+    args = SimpleNamespace(tp=4, dp=2, nnodes=1, running_max_req_size=8)
+    httpserver_manager = SimpleNamespace(
+        host_ip="10.0.0.1",
+        pd_master_ids=(10, 20),
+        pd_master_capacity_epoch=123,
+    )
+    shared_token_load = SimpleNamespace(get_dynamic_max_load=lambda dp_index: (0.25, 0.75)[dp_index])
+    monkeypatch.setattr(api_http.g_objs, "args", args)
+    monkeypatch.setattr(api_http.g_objs, "httpserver_manager", httpserver_manager)
+    monkeypatch.setattr(api_http.g_objs, "shared_token_load", shared_token_load)
+    monkeypatch.setattr(pd_loop, "get_shm_port_args", lambda: SimpleNamespace(port=8001))
+
+    assert not hasattr(pd_loop, "_get_radix_cache_info")
+    assert pd_loop._get_load_info(pd_master_node_id=10) == {
+        "total_token_usage_rate": 0.5,
+        "client_ip_port": "10.0.0.1:8001",
+        "capacity_share": 4,
+        "capacity_epoch": 123,
+    }
+
+
 def test_pd_master_membership_change_advances_epoch_and_wakes_heartbeats(monkeypatch):
     async def run():
         manager = SimpleNamespace()
@@ -222,7 +274,7 @@ def test_pd_master_membership_change_advances_epoch_and_wakes_heartbeats(monkeyp
     asyncio.run(run())
 
 
-def test_pd_manager_uses_latest_decode_capacity_lease_and_cache_telemetry():
+def test_pd_manager_reports_only_actual_decode_capacity_changes():
     args = StartArgs()
     manager = PDManager(args)
     client_ip_port = "10.0.0.2:8000"
@@ -243,36 +295,133 @@ def test_pd_manager_uses_latest_decode_capacity_lease_and_cache_telemetry():
 
     assert manager.get_decode_capacity() == 3
 
-    manager.update_node_load_info(
-        {
-            "client_ip_port": client_ip_port,
-            "total_token_usage_rate": 0.25,
-            "capacity_share": 1,
-            "capacity_epoch": 99,
-        }
+    assert (
+        manager.update_node_load_info(
+            {
+                "client_ip_port": client_ip_port,
+                "total_token_usage_rate": 0.25,
+                "capacity_share": 1,
+                "capacity_epoch": 99,
+            }
+        )
+        is False
     )
     assert manager.get_decode_capacity() == 3
 
-    manager.update_node_load_info(
-        {
-            "client_ip_port": client_ip_port,
-            "total_token_usage_rate": 0.5,
-            "capacity_share": 2,
-            "capacity_epoch": 101,
-            "radix_cache_total_tokens": 700,
-            "radix_cache_refed_tokens": 200,
-            "radix_cache_capacity_tokens": 1000,
-        }
+    assert (
+        manager.update_node_load_info(
+            {
+                "client_ip_port": client_ip_port,
+                "total_token_usage_rate": 0.5,
+                "capacity_share": 2,
+                "capacity_epoch": 101,
+                # Old nodes may continue sending cache telemetry during a
+                # rolling upgrade. It must not affect decode admission.
+                "radix_cache_total_tokens": 700,
+                "radix_cache_refed_tokens": 200,
+                "radix_cache_capacity_tokens": 1000,
+            }
+        )
+        is True
     )
     node = manager.decode_nodes[0]
     assert manager.get_decode_capacity() == 2
     assert node.run_status.total_token_usage_rate == 0.5
-    assert node.run_status.radix_cache_total_tokens == 700
-    assert node.run_status.radix_cache_refed_tokens == 200
-    assert node.run_status.radix_cache_capacity_tokens == 1000
+
+    # A fresh report and a load-only change are not capacity changes.
+    assert (
+        manager.update_node_load_info(
+            {
+                "client_ip_port": client_ip_port,
+                "total_token_usage_rate": 0.75,
+                "capacity_share": 2,
+                "capacity_epoch": 102,
+            }
+        )
+        is False
+    )
+    assert manager.get_decode_capacity() == 2
 
 
-def test_prefill_cache_headroom_is_scaled_to_the_master_decode_lease():
+def test_pd_registration_reads_capacity_from_legacy_safe_start_args():
+    args = StartArgs()
+    manager = PDManager(args)
+    manager.register_pd(
+        {
+            "node_id": 2,
+            "client_ip_port": "10.0.0.2:8000",
+            "mode": "decode",
+            "start_args": {
+                "max_req_total_len": args.max_req_total_len,
+                "running_max_req_size": 8,
+                PD_MASTER_CAPACITY_SHARE_KEY: 3,
+                PD_MASTER_CAPACITY_EPOCH_KEY: 100,
+            },
+        },
+        websocket=object(),
+    )
+
+    node = manager.decode_nodes[0]
+    assert node.capacity_share == 3
+    assert node.capacity_epoch == 100
+    assert manager.get_decode_capacity() == 3
+
+
+def test_pd_disconnect_accepts_transitional_top_level_capacity_fields():
+    args = StartArgs()
+    manager = PDManager(args)
+    registration = {
+        "node_id": 2,
+        "client_ip_port": "10.0.0.2:8000",
+        "mode": "decode",
+        "start_args": {
+            "max_req_total_len": args.max_req_total_len,
+            "running_max_req_size": 8,
+        },
+        "capacity_share": 3,
+        "capacity_epoch": 100,
+    }
+    manager.register_pd(registration, websocket=object())
+
+    manager.remove_pd(registration)
+
+    assert manager.decode_nodes == []
+    assert manager.url_to_pd_nodes == {}
+
+
+def test_materializing_decode_fallback_share_is_not_a_capacity_change():
+    args = StartArgs()
+    manager = PDManager(args)
+    client_ip_port = "10.0.0.2:8000"
+    manager.register_pd(
+        {
+            "node_id": 2,
+            "client_ip_port": client_ip_port,
+            "mode": "decode",
+            "start_args": {
+                "max_req_total_len": args.max_req_total_len,
+                "running_max_req_size": 8,
+            },
+        },
+        websocket=object(),
+    )
+
+    assert manager.decode_nodes[0].capacity_share is None
+    assert manager.get_decode_capacity() == 8
+    assert (
+        manager.update_node_load_info(
+            {
+                "client_ip_port": client_ip_port,
+                "total_token_usage_rate": 0.5,
+                "capacity_epoch": 1,
+            }
+        )
+        is False
+    )
+    assert manager.get_decode_capacity() == 8
+
+
+def test_prefill_cache_telemetry_does_not_change_decode_capacity():
     args = StartArgs()
     manager = PDManager(args)
     manager.register_pd(
@@ -302,21 +451,201 @@ def test_prefill_cache_headroom_is_scaled_to_the_master_decode_lease():
         },
         websocket=object(),
     )
-    manager.update_node_load_info(
-        {
-            "client_ip_port": "10.0.0.1:8000",
-            "total_token_usage_rate": 0.25,
-            "radix_cache_total_tokens": 800,
-            "radix_cache_refed_tokens": 100,
-            "radix_cache_capacity_tokens": 1000,
-        }
-    )
 
-    snapshot = manager.get_prefill_cache_capacity()
-    assert snapshot is not None
-    assert snapshot.total_tokens == 350
-    assert snapshot.capacity_tokens == 375
-    assert snapshot.free_tokens == 25
+    assert manager.get_decode_capacity() == 4
+    assert (
+        manager.update_node_load_info(
+            {
+                "client_ip_port": "10.0.0.1:8000",
+                "total_token_usage_rate": 0.25,
+                "radix_cache_total_tokens": 1000,
+                "radix_cache_refed_tokens": 100,
+                "radix_cache_capacity_tokens": 1000,
+            }
+        )
+        is False
+    )
+    assert manager.get_decode_capacity() == 4
+
+
+def test_pd_master_redrains_admission_only_for_decode_capacity_changes():
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.pd_manager = SimpleNamespace(update_node_load_info=MagicMock(side_effect=[False, True]))
+    manager.admission_controller = SimpleNamespace(on_capacity_change=MagicMock())
+
+    unchanged_load = {"client_ip_port": "10.0.0.1:8000", "capacity_share": 4}
+    changed_load = {"client_ip_port": "10.0.0.1:8000", "capacity_share": 2}
+
+    manager.update_node_load_info(unchanged_load)
+    manager.admission_controller.on_capacity_change.assert_not_called()
+
+    manager.update_node_load_info(changed_load)
+    manager.admission_controller.on_capacity_change.assert_called_once_with()
+    assert manager.pd_manager.update_node_load_info.call_args_list == [
+        call(unchanged_load),
+        call(changed_load),
+    ]
+
+
+def test_token_packs_redrain_admission_only_after_decode_capacity_change():
+    from lightllm.server.pd_io_struct import ObjType
+
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(config_server_host=None)
+        manager.pd_manager = SimpleNamespace(update_node_load_info=MagicMock(side_effect=[False, True]))
+        manager.admission_controller = SimpleNamespace(on_capacity_change=MagicMock())
+        manager.timer_log = AsyncMock()
+        manager.infos_queues = None
+        manager.req_id_to_out_inf = {}
+
+        handle_task = asyncio.create_task(manager.handle_loop())
+        try:
+            while manager.infos_queues is None:
+                await asyncio.sleep(0)
+
+            unchanged_load = {"client_ip_port": "10.0.0.1:8000", "capacity_share": 4}
+            changed_load = {"client_ip_port": "10.0.0.1:8000", "capacity_share": 2}
+            await manager.put_to_handle_queue((ObjType.TOKEN_PACKS, [], unchanged_load))
+            await manager.put_to_handle_queue((ObjType.TOKEN_PACKS, [], changed_load))
+
+            for _ in range(100):
+                if manager.pd_manager.update_node_load_info.call_count == 2:
+                    break
+                await asyncio.sleep(0)
+
+            assert manager.pd_manager.update_node_load_info.call_args_list == [
+                call(unchanged_load),
+                call(changed_load),
+            ]
+            manager.admission_controller.on_capacity_change.assert_called_once_with()
+        finally:
+            handle_task.cancel()
+            await asyncio.gather(handle_task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_pd_master_deduplicates_unchanged_admission_metrics(monkeypatch):
+    from lightllm.server.httpserver_for_pd_master import manager as manager_module
+
+    metric_client = SimpleNamespace(gauge_set=MagicMock())
+    monkeypatch.setattr(manager_module, "MetricClient", lambda _port: metric_client)
+    monkeypatch.setattr(manager_module, "ReqIDGenerator", lambda: object())
+    monkeypatch.setattr(manager_module, "get_tokenizer", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(manager_module, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
+
+    manager = HttpServerManagerForPDMaster(StartArgs(max_req_total_len=1024))
+    manager.pd_manager.get_decode_capacity = lambda: 4
+    controller = SimpleNamespace(queued_request_count=2, active_slots=1)
+
+    async def run():
+        manager._record_admission_state(controller)
+        controller.active_slots = 2
+        manager._record_admission_state(controller)
+        assert metric_client.gauge_set.call_count == 0
+
+        await asyncio.sleep(0)
+        assert {metric_call.args for metric_call in metric_client.gauge_set.call_args_list} == {
+            ("lightllm_pd_master_admission_queue_size", 2),
+            ("lightllm_pd_master_admission_active_slots", 2),
+            ("lightllm_pd_master_admission_decode_capacity", 4),
+        }
+        first_call_count = metric_client.gauge_set.call_count
+
+        manager._record_admission_state(controller)
+        await asyncio.sleep(0)
+        assert metric_client.gauge_set.call_count == first_call_count
+
+        controller.active_slots = 3
+        manager._record_admission_state(controller)
+        await asyncio.sleep(0)
+        assert metric_client.gauge_set.call_args_list[-1] == call("lightllm_pd_master_admission_active_slots", 3)
+        assert metric_client.gauge_set.call_count == first_call_count + 1
+
+    asyncio.run(run())
+
+
+def test_pd_master_decode_lease_covers_prefill_and_stream_lifecycle():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = StartArgs()
+        manager.pd_manager = SimpleNamespace(
+            selector=SimpleNamespace(estimate_prompt_cache_hit_rate=lambda _prompt: 0.0),
+        )
+        manager.admission_policy = AdmissionPolicy()
+        manager.admission_controller = PDAdmissionController(lambda: 1, policy=manager.admission_policy)
+        manager.session_tracker = SessionTracker(
+            ttl_seconds=manager.admission_policy.active_session_ttl_seconds,
+            max_sessions=manager.admission_policy.max_tracked_sessions,
+        )
+        manager.metric_client = SimpleNamespace(histogram_observe=lambda *_args: None)
+        manager.running_request_count = 0
+        manager.latest_success_infer_time = 0
+        dispatched_prompts = []
+
+        async def fake_generate(prompt, *_args):
+            dispatched_prompts.append(prompt)
+            yield 1, "prefill", {"prompt_tokens": 16, "prompt_cache_len": 0}, object()
+            yield 1, "decode", {}, object()
+
+        manager._generate = fake_generate
+        first = manager.generate("first", None, None, None)
+        first_prefill = await first.__anext__()
+        assert first_prefill[1] == "prefill"
+        assert manager.admission_controller.active_slots == 1
+
+        second = manager.generate("second", None, None, None)
+        second_result = asyncio.create_task(second.__anext__())
+        await asyncio.sleep(0)
+        assert second_result.done() is False
+        assert dispatched_prompts == ["first"]
+
+        first_decode = await first.__anext__()
+        assert first_decode[1] == "decode"
+        assert manager.admission_controller.active_slots == 1
+        await first.aclose()
+
+        assert (await second_result)[1] == "prefill"
+        await second.aclose()
+        assert manager.admission_controller.active_slots == 0
+
+    asyncio.run(run())
+
+
+def test_pd_master_releases_admission_lease_when_post_acquire_setup_fails():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = StartArgs()
+        manager.pd_manager = SimpleNamespace(
+            selector=SimpleNamespace(estimate_prompt_cache_hit_rate=lambda _prompt: 0.0),
+        )
+        manager.admission_policy = AdmissionPolicy()
+        manager.admission_controller = PDAdmissionController(lambda: 1, policy=manager.admission_policy)
+        manager.session_tracker = SessionTracker(
+            ttl_seconds=manager.admission_policy.active_session_ttl_seconds,
+            max_sessions=manager.admission_policy.max_tracked_sessions,
+        )
+
+        def fail_histogram(*_args):
+            raise RuntimeError("metric enqueue failed")
+
+        manager.metric_client = SimpleNamespace(histogram_observe=fail_histogram)
+        manager.running_request_count = 0
+        manager.latest_success_infer_time = 0
+
+        async def fake_generate(*_args):
+            yield "must not dispatch"
+
+        manager._generate = fake_generate
+        generator = manager.generate("prompt", SimpleNamespace(n=1), None, None)
+        with pytest.raises(RuntimeError, match="metric enqueue failed"):
+            await generator.__anext__()
+
+        assert manager.admission_controller.active_slots == 0
+        assert manager.running_request_count == 0
+
+    asyncio.run(run())
 
 
 def test_prefill_registration_preserves_existing_inflight_prompt_chars():
@@ -438,7 +767,7 @@ def test_pd_master_waits_before_dispatching_beyond_decode_capacity():
     asyncio.run(run())
 
 
-def test_pd_master_admission_classifies_session_cache_and_multi_choice_cost():
+def test_pd_master_admission_classifies_priority_and_multi_choice_cost():
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.pd_manager = SimpleNamespace(
         selector=SimpleNamespace(estimate_prompt_cache_hit_rate=lambda _prompt: 0.75),
@@ -454,7 +783,6 @@ def test_pd_master_admission_classifies_session_cache_and_multi_choice_cost():
     )
     assert probable.priority == AdmissionPriority.PROBABLE_CACHE_HIT
     assert probable.decode_slots == 3
-    assert probable.estimated_uncached_work == 9
 
     manager.session_tracker.mark_success("session-a")
     continuation = manager._build_admission_request(

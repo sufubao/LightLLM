@@ -88,32 +88,11 @@ class AdmissionRequest:
     session_key: Optional[str]
     priority: AdmissionPriority
     decode_slots: int = 1
-    estimated_uncached_work: int = 0
 
     def __post_init__(self) -> None:
-        """校验请求槽位数和预计未命中工作量。"""
+        """校验请求需要原子获取的 Decode 槽位数。"""
         if self.decode_slots < 1:
             raise ValueError("decode_slots must be positive")
-        if self.estimated_uncached_work < 0:
-            raise ValueError("estimated_uncached_work must be non-negative")
-
-
-@dataclass(frozen=True, slots=True)
-class CacheCapacitySnapshot:
-    """当前 PD Master 可使用的 Prefill Radix cache 份额。"""
-
-    total_tokens: int
-    capacity_tokens: int
-
-    def __post_init__(self) -> None:
-        """校验缓存 token 统计值均为非负数。"""
-        if self.total_tokens < 0 or self.capacity_tokens < 0:
-            raise ValueError("cache token counts must be non-negative")
-
-    @property
-    def free_tokens(self) -> int:
-        """返回当前还能容纳的缓存 token 数。"""
-        return max(0, self.capacity_tokens - self.total_tokens)
 
 
 class SessionTracker:
@@ -157,7 +136,6 @@ class SessionTracker:
 
 @dataclass(slots=True)
 class _WaitingRequest:
-    sequence_id: int
     request: AdmissionRequest
     enqueue_time: float
     deadline: float
@@ -173,13 +151,11 @@ class AdmissionLease:
         controller: "PDAdmissionController",
         request: AdmissionRequest,
         waited_seconds: float,
-        cold_slots: int,
     ) -> None:
-        """保存本次租约占用的总槽位和冷请求槽位。"""
+        """保存本次租约占用的 Decode 槽位。"""
         self._controller = controller
         self.request = request
         self.waited_seconds = waited_seconds
-        self._cold_slots = cold_slots
         self._released = False
 
     async def __aenter__(self) -> "AdmissionLease":
@@ -210,7 +186,6 @@ class PDAdmissionController:
     def __init__(
         self,
         decode_capacity_provider: Callable[[], int],
-        cache_capacity_provider: Optional[Callable[[], Optional[CacheCapacitySnapshot]]] = None,
         policy: Optional[AdmissionPolicy] = None,
         clock: Callable[[], float] = time.monotonic,
         state_change_callback: Optional[Callable[["PDAdmissionController"], None]] = None,
@@ -218,53 +193,27 @@ class PDAdmissionController:
         """初始化容量提供器、优先级队列和调度状态。"""
         self.policy = policy or AdmissionPolicy()
         self._decode_capacity_provider = decode_capacity_provider
-        self._cache_capacity_provider = cache_capacity_provider
         self._clock = clock
         self._state_change_callback = state_change_callback
         self._active_slots = 0
-        self._active_cold_slots = 0
-        self._average_cold_uncached_tokens: Optional[float] = None
-        self._probable_actual_hit_rate: Optional[float] = None
         self._active_sessions = set()
         self._queues: Dict[AdmissionPriority, Deque[_WaitingRequest]] = {
             priority: deque() for priority in self._PRIORITY_ORDER
         }
         self._session_queues: Dict[str, Deque[_WaitingRequest]] = {}
         self._queued_slots = 0
-        self._sequence_id = 0
-        self._schedule = self._build_schedule()
-        self._schedule_index = 0
+        self._deficits: Dict[AdmissionPriority, int] = {priority: 0 for priority in self._PRIORITY_ORDER}
+        self._priority_index = 0
+        self._priority_visit_started = False
+        self._blocked_waiter: Optional[_WaitingRequest] = None
+        self._backfilled_slots = 0
+        self._backfill_limit = 0
+        self._reservation_active = False
 
     @property
     def active_slots(self) -> int:
         """返回当前已经发放的 Decode 槽位数。"""
         return self._active_slots
-
-    @property
-    def active_cold_slots(self) -> int:
-        """返回当前由冷请求占用的槽位数。"""
-        return self._active_cold_slots
-
-    @property
-    def cold_capacity(self) -> int:
-        """返回在当前缓存余量下允许并发的冷请求槽位数。"""
-        decode_capacity = self._capacity()
-        if (
-            decode_capacity <= 0
-            or self._cache_capacity_provider is None
-            or self._average_cold_uncached_tokens is None
-            or self._average_cold_uncached_tokens <= 0
-        ):
-            return decode_capacity
-
-        snapshot = self._cache_capacity_provider()
-        if snapshot is None or snapshot.capacity_tokens <= 0:
-            return decode_capacity
-
-        # 剩余缓存能容纳几个“平均冷请求”，就开放几个冷槽位；至少保留一个
-        # 探索槽位，使系统在缓存已满时仍能接纳新会话并持续获得反馈。
-        requests_fitting_in_cache = int(snapshot.free_tokens / self._average_cold_uncached_tokens)
-        return min(decode_capacity, max(1, requests_fitting_in_cache))
 
     @property
     def queued_slots(self) -> int:
@@ -280,39 +229,31 @@ class PDAdmissionController:
         """读取并规范化当前可用的 Decode 容量。"""
         return max(0, int(self._decode_capacity_provider()))
 
-    def _build_schedule(self) -> tuple[AdmissionPriority, ...]:
-        """按策略权重生成一个完整的轮转调度周期。"""
-        remaining = {priority: self.policy.weight(priority) for priority in self._PRIORITY_ORDER}
-        schedule = []
-        while any(remaining.values()):
-            for priority in self._PRIORITY_ORDER:
-                if remaining[priority] > 0:
-                    schedule.append(priority)
-                    remaining[priority] -= 1
-        return tuple(schedule)
-
     async def acquire(self, request: AdmissionRequest) -> AdmissionLease:
         """立即发放租约或等待队列调度后再返回租约。"""
         capacity = self._capacity()
         if capacity <= 0 or request.decode_slots > capacity:
             raise ServerBusyError("PD decode capacity is unavailable")
 
-        if self.queued_request_count == 0 and self._can_activate(request):
+        if self.queued_request_count == 0 and self._can_activate(request, capacity):
             lease = self._activate(request, waited_seconds=0.0)
             self._notify_state_change()
             return lease
 
+        idle_fill_lease = self._try_activate_idle_fill(request, capacity)
+        if idle_fill_lease is not None:
+            self._notify_state_change()
+            return idle_fill_lease
+
         loop = asyncio.get_running_loop()
         enqueue_time = self._clock()
         waiter = _WaitingRequest(
-            sequence_id=self._sequence_id,
             request=request,
             enqueue_time=enqueue_time,
             deadline=enqueue_time + self.policy.max_wait_seconds(request.priority),
             deadline_changed=asyncio.Event(),
             future=loop.create_future(),
         )
-        self._sequence_id += 1
 
         if not self._make_queue_room(waiter):
             raise ServerBusyError("PD master admission queue is full")
@@ -334,36 +275,9 @@ class PDAdmissionController:
             raise
 
     def on_capacity_change(self) -> None:
-        """容量或缓存余量变化后重新尝试驱动队列。"""
-        self._drain()
-
-    def record_prefill_result(
-        self,
-        request: AdmissionRequest,
-        prompt_tokens: int,
-        cached_tokens: int,
-    ) -> None:
-        """用真实命中结果更新预计命中的可信度和冷请求容量。"""
-        if request.priority == AdmissionPriority.CONTINUATION:
-            return
-
-        prompt_tokens = max(0, int(prompt_tokens))
-        cached_tokens = min(prompt_tokens, max(0, int(cached_tokens)))
-        uncached_tokens = prompt_tokens - cached_tokens
-
-        if request.priority == AdmissionPriority.PROBABLE_CACHE_HIT:
-            actual_hit_rate = cached_tokens / max(prompt_tokens, 1)
-            self._probable_actual_hit_rate = self._update_average(
-                self._probable_actual_hit_rate,
-                actual_hit_rate,
-            )
-
-        # 预计命中的真实命中率低于承诺阈值时，让后续同类请求也消费冷槽位。
-        if self._requires_cold_capacity(request):
-            self._average_cold_uncached_tokens = self._update_average(
-                self._average_cold_uncached_tokens,
-                float(uncached_tokens),
-            )
+        """Decode 容量变化后重置临时公平状态并重新驱动队列。"""
+        self._clear_backfill_state()
+        self._reset_deficits()
         self._drain()
 
     def promote_session(self, session_key: Optional[str]) -> None:
@@ -374,6 +288,8 @@ class PDAdmissionController:
         if not session_queue:
             return
 
+        if self._blocked_waiter in session_queue:
+            self._clear_backfill_state(reset_deficits=True)
         for waiter in tuple(session_queue):
             old_priority = waiter.request.priority
             if old_priority == AdmissionPriority.CONTINUATION:
@@ -386,59 +302,76 @@ class PDAdmissionController:
             )
             waiter.deadline_changed.set()
             self._queues[AdmissionPriority.CONTINUATION].append(waiter)
+            if not self._queues[old_priority]:
+                self._deficits[old_priority] = 0
         self._drain()
 
-    def _update_average(self, current: Optional[float], sample: float) -> float:
-        """按一个 Decode 波次大小更新指数移动平均。"""
-        # 一个 Decode 波次作为自适应窗口：容量越大，单个样本对均值的影响越小。
-        sample_window = max(1, self._capacity())
-        alpha = 2.0 / (sample_window + 1.0)
-        if current is None:
-            return sample
-        return current + alpha * (sample - current)
-
-    def _requires_cold_capacity(self, request: AdmissionRequest) -> bool:
-        """判断请求是否需要消耗冷请求容量。"""
-        if request.priority == AdmissionPriority.COLD:
-            return True
-        return (
-            request.priority == AdmissionPriority.PROBABLE_CACHE_HIT
-            and self._probable_actual_hit_rate is not None
-            and self._probable_actual_hit_rate < self.policy.probable_cache_hit_threshold
-        )
-
-    def _has_cold_capacity(self, request: AdmissionRequest) -> bool:
-        """判断剩余冷请求容量能否容纳当前请求。"""
-        if not self._requires_cold_capacity(request):
-            return True
-        return self._active_cold_slots + request.decode_slots <= self.cold_capacity
-
-    def _can_activate(self, request: AdmissionRequest) -> bool:
-        """检查总容量、冷容量和 Session 串行约束。"""
-        if self._active_slots + request.decode_slots > self._capacity():
-            return False
-        if not self._has_cold_capacity(request):
+    def _can_activate(self, request: AdmissionRequest, capacity: Optional[int] = None) -> bool:
+        """检查 Decode 总容量和 Session 串行约束。"""
+        if capacity is None:
+            capacity = self._capacity()
+        if self._active_slots + request.decode_slots > capacity:
             return False
         return request.session_key is None or request.session_key not in self._active_sessions
+
+    def _try_activate_idle_fill(
+        self,
+        request: AdmissionRequest,
+        capacity: int,
+    ) -> Optional[AdmissionLease]:
+        """在满队列拒绝前，用当前唯一可运行的新请求填充空槽。
+
+        只覆盖两种不会越过可运行旧请求的场景：现有队列全部受
+        Session 串行约束，或已保护 gang 仍在一波 bounded backfill 预算内。
+        """
+        if not self._can_activate(request, capacity):
+            return None
+        if request.session_key is not None and request.session_key in self._session_queues:
+            return None
+
+        blocked = self._blocked_waiter
+        if blocked is None:
+            has_grantable_waiter = any(
+                not waiter.future.done() and self._session_is_grantable(waiter)
+                for queue in self._queues.values()
+                for waiter in queue
+            )
+            if has_grantable_waiter:
+                return None
+            return self._activate(request, waited_seconds=0.0)
+
+        available_slots = capacity - self._active_slots
+        if (
+            self._reservation_active
+            or blocked.future.done()
+            or not self._session_is_grantable(blocked)
+            or self._has_fitting_backfill(blocked, available_slots)
+        ):
+            return None
+
+        remaining_backfill = self._backfill_limit - self._backfilled_slots
+        if request.decode_slots > remaining_backfill:
+            return None
+
+        lease = self._activate(request, waited_seconds=0.0)
+        self._backfilled_slots += request.decode_slots
+        if self._backfilled_slots >= self._backfill_limit:
+            self._reservation_active = True
+        return lease
 
     def _activate(self, request: AdmissionRequest, waited_seconds: float) -> AdmissionLease:
         """占用所需槽位并创建对应的准入租约。"""
         self._active_slots += request.decode_slots
-        cold_slots = request.decode_slots if self._requires_cold_capacity(request) else 0
-        self._active_cold_slots += cold_slots
         if request.session_key is not None:
             self._active_sessions.add(request.session_key)
-        return AdmissionLease(self, request, waited_seconds, cold_slots)
+        return AdmissionLease(self, request, waited_seconds)
 
     def _release(self, lease: AdmissionLease) -> None:
         """归还租约槽位并继续调度等待请求。"""
         request = lease.request
         self._active_slots -= request.decode_slots
-        self._active_cold_slots -= lease._cold_slots
         if self._active_slots < 0:
             raise RuntimeError("PD admission active slot count became negative")
-        if self._active_cold_slots < 0:
-            raise RuntimeError("PD admission active cold slot count became negative")
         if request.session_key is not None:
             self._active_sessions.discard(request.session_key)
         self._drain()
@@ -500,6 +433,12 @@ class PDAdmissionController:
             session_queue.remove(waiter)
             if not session_queue:
                 self._session_queues.pop(session_key, None)
+        if waiter is self._blocked_waiter:
+            # 非正常移除（取消、超时、替换、缩容）放弃已经预扣的 gang
+            # 服务机会；重置 DRR 状态比跨优先级退款更安全。
+            self._clear_backfill_state(reset_deficits=True)
+        if not self._queues[waiter.request.priority]:
+            self._deficits[waiter.request.priority] = 0
         return True
 
     def _cancel_waiter_or_take_lease(self, waiter: _WaitingRequest) -> Optional[AdmissionLease]:
@@ -547,76 +486,228 @@ class PDAdmissionController:
             return False
         return self._session_queues[session_key][0] is waiter
 
-    def _first_grantable(self, priority: AdmissionPriority) -> Optional[_WaitingRequest]:
-        """返回指定优先级中当前最合适的可调度等待项。"""
-        candidates = []
-        available_decode_slots = self._capacity() - self._active_slots
+    def _first_grantable(
+        self,
+        priority: AdmissionPriority,
+        excluded: Optional[_WaitingRequest] = None,
+        available_slots: Optional[int] = None,
+    ) -> Optional[_WaitingRequest]:
+        """按类内 FIFO 返回第一个满足 Session 和可选槽位约束的等待项。"""
         for waiter in self._queues[priority]:
+            if waiter is excluded:
+                continue
             if not self._session_is_grantable(waiter):
                 continue
-            if priority != AdmissionPriority.COLD:
-                return waiter
-            if waiter.request.decode_slots > self.cold_capacity:
+            if available_slots is not None and waiter.request.decode_slots > available_slots:
                 continue
-            if waiter.request.decode_slots <= available_decode_slots and not self._has_cold_capacity(waiter.request):
-                continue
-            candidates.append(waiter)
+            return waiter
+        return None
 
+    def _advance_priority(self) -> None:
+        """结束当前 DRR 类访问并移到下一优先级。"""
+        self._priority_index = (self._priority_index + 1) % len(self._PRIORITY_ORDER)
+        self._priority_visit_started = False
+
+    def _reset_deficits(self) -> None:
+        """清空按 Decode 槽位计费的 DRR 临时信用。"""
+        for priority in self._PRIORITY_ORDER:
+            self._deficits[priority] = 0
+        self._priority_index = 0
+        self._priority_visit_started = False
+
+    def _select_weighted(
+        self,
+        capacity: int,
+        excluded: Optional[_WaitingRequest] = None,
+        available_slots: Optional[int] = None,
+    ) -> Optional[_WaitingRequest]:
+        """用按槽位计费的 deficit round-robin 选择一个等待项。"""
+        candidates = {
+            priority: waiter
+            for priority in self._PRIORITY_ORDER
+            if (
+                waiter := self._first_grantable(
+                    priority,
+                    excluded=excluded,
+                    available_slots=available_slots,
+                )
+            )
+            is not None
+        }
+        for priority in self._PRIORITY_ORDER:
+            # 空类和暂时全部受 Session 串行约束的类都不能积攒无限信用。
+            if self._first_grantable(priority) is None:
+                self._deficits[priority] = 0
         if not candidates:
             return None
-        # 冷请求内部优先处理预计新增缓存最少的任务，在同等代价下保持 FIFO。
-        return min(
-            candidates,
-            key=lambda waiter: (
-                waiter.request.estimated_uncached_work,
-                waiter.sequence_id,
-            ),
+
+        only_priority = next(iter(candidates)) if len(candidates) == 1 else None
+        while True:
+            priority = self._PRIORITY_ORDER[self._priority_index]
+            waiter = candidates.get(priority)
+            if waiter is None:
+                self._advance_priority()
+                continue
+
+            if not self._priority_visit_started:
+                self._deficits[priority] += self.policy.weight(priority)
+                self._priority_visit_started = True
+
+            # 单一活跃类必须保持 work-conserving；直接补足若干轮 quantum，
+            # 避免大 gang 仅因 DRR 信用暂时不足而留下 Decode 空槽。
+            if only_priority == priority and self._deficits[priority] < waiter.request.decode_slots:
+                quantum = self.policy.weight(priority)
+                missing = waiter.request.decode_slots - self._deficits[priority]
+                visits = (missing + quantum - 1) // quantum
+                self._deficits[priority] += visits * quantum
+
+            if waiter.request.decode_slots <= self._deficits[priority]:
+                # 在选择点统一按 choice 槽位扣费。即使 gang 暂时因物理空槽
+                # 不足进入 backfill，它的 DRR 服务机会也已经被完整计费。
+                self._deficits[priority] -= waiter.request.decode_slots
+                return waiter
+            self._advance_priority()
+
+    def _clear_backfill_state(self, reset_deficits: bool = False) -> None:
+        """清除 gang backfill 或 reservation 的全部临时状态。"""
+        self._blocked_waiter = None
+        self._backfilled_slots = 0
+        self._backfill_limit = 0
+        self._reservation_active = False
+        if reset_deficits:
+            self._reset_deficits()
+
+    def _start_backfill(self, waiter: _WaitingRequest, capacity: int) -> None:
+        """为仅受当前可用槽位阻塞的 gang 启动一波有限 backfill。"""
+        self._blocked_waiter = waiter
+        self._backfilled_slots = 0
+        self._backfill_limit = capacity
+        self._reservation_active = False
+
+    def _fail_oversized_waiters(self, capacity: int) -> None:
+        """容量缩小时失败掉已经不可能原子获得所需槽位的等待项。"""
+        for priority in self._PRIORITY_ORDER:
+            for waiter in tuple(self._queues[priority]):
+                if waiter.request.decode_slots <= capacity:
+                    continue
+                if self._remove_waiter(waiter) and not waiter.future.done():
+                    waiter.future.set_exception(ServerBusyError("PD decode capacity fell below queued request size"))
+
+    def _trim_queue_to_capacity(self, capacity: int) -> None:
+        """容量缩小时按低优先级、同级最新顺序恢复等待队列上限。"""
+        waiting_capacity = capacity * self.policy.waiting_decode_waves
+        slots_to_remove = self._queued_slots - waiting_capacity
+        if slots_to_remove <= 0:
+            return
+
+        victims = []
+        removed_slots = 0
+        for priority in reversed(self._PRIORITY_ORDER):
+            for waiter in reversed(self._queues[priority]):
+                victims.append(waiter)
+                removed_slots += waiter.request.decode_slots
+                if removed_slots >= slots_to_remove:
+                    break
+            if removed_slots >= slots_to_remove:
+                break
+
+        for victim in victims:
+            if self._remove_waiter(victim) and not victim.future.done():
+                victim.future.set_exception(ServerBusyError("PD master admission queue capacity shrank"))
+
+    def _grant_waiter(self, waiter: _WaitingRequest) -> bool:
+        """从队列移除已由 DRR 计费的等待项并原子发放租约。"""
+        if waiter.future.done():
+            self._remove_waiter(waiter)
+            self._reset_deficits()
+            return False
+
+        priority = waiter.request.priority
+        if waiter is self._blocked_waiter:
+            # 正常兑现 reservation 时保留选择点已经完成的 DRR 扣费。
+            self._clear_backfill_state()
+        if not self._remove_waiter(waiter):
+            self._reset_deficits()
+            return False
+        if not self._queues[priority]:
+            self._deficits[priority] = 0
+
+        lease = self._activate(
+            waiter.request,
+            waited_seconds=max(0.0, self._clock() - waiter.enqueue_time),
+        )
+        waiter.future.set_result(lease)
+        return True
+
+    def _has_fitting_backfill(self, blocked: _WaitingRequest, available_slots: int) -> bool:
+        """判断是否有不含被保护 gang 的请求当前可以填充空槽。"""
+        return any(
+            self._first_grantable(
+                priority,
+                excluded=blocked,
+                available_slots=available_slots,
+            )
+            is not None
+            for priority in self._PRIORITY_ORDER
         )
 
-    def _first_fitting_higher_priority(self, blocked_priority: AdmissionPriority) -> Optional[_WaitingRequest]:
-        """查找能绕过受阻请求的更高优先级等待项。"""
-        for priority in self._PRIORITY_ORDER:
-            if priority <= blocked_priority:
-                continue
-            for waiter in self._queues[priority]:
-                if self._session_is_grantable(waiter) and self._can_activate(waiter.request):
-                    return waiter
-        return None
-
-    def _select_next(self) -> Optional[_WaitingRequest]:
-        """按照加权轮转顺序选择下一个等待项。"""
-        schedule_size = len(self._schedule)
-        for offset in range(schedule_size):
-            index = (self._schedule_index + offset) % schedule_size
-            waiter = self._first_grantable(self._schedule[index])
-            if waiter is not None:
-                self._schedule_index = (index + 1) % schedule_size
-                return waiter
-        return None
-
     def _drain(self) -> None:
-        """持续发放当前容量允许的等待请求。"""
-        while self._active_slots < self._capacity():
-            schedule_index = self._schedule_index
-            waiter = self._select_next()
+        """持续发放租约，并为受空槽碎片阻塞的 gang 提供有限 backfill。"""
+        capacity = self._capacity()
+        self._fail_oversized_waiters(capacity)
+        self._trim_queue_to_capacity(capacity)
+
+        while self._active_slots < capacity:
+            available_slots = capacity - self._active_slots
+            blocked = self._blocked_waiter
+            if blocked is not None:
+                if blocked.future.done():
+                    self._remove_waiter(blocked)
+                    continue
+                if not self._session_is_grantable(blocked):
+                    # Session 阻塞不是容量碎片，不能借此获得全局 reservation。
+                    self._clear_backfill_state(reset_deficits=True)
+                    continue
+                if blocked.request.decode_slots <= available_slots:
+                    self._grant_waiter(blocked)
+                    continue
+                if self._reservation_active:
+                    break
+
+                remaining_backfill = self._backfill_limit - self._backfilled_slots
+                if remaining_backfill <= 0:
+                    self._reservation_active = True
+                    break
+                backfill_slots = min(available_slots, remaining_backfill)
+                waiter = self._select_weighted(
+                    capacity,
+                    excluded=blocked,
+                    available_slots=backfill_slots,
+                )
+                if waiter is None:
+                    # 没有可填当前空槽的请求时保留 backfill 机会；稍后到达的小请求
+                    # 仍可使用本波预算。只有存在物理上可填、但会越过预算的请求时
+                    # 才立即转入 reservation。
+                    if self._has_fitting_backfill(blocked, available_slots):
+                        self._reservation_active = True
+                    break
+                granted_slots = waiter.request.decode_slots
+                if not self._grant_waiter(waiter):
+                    continue
+                self._backfilled_slots += granted_slots
+                if self._backfilled_slots >= self._backfill_limit:
+                    self._reservation_active = True
+                continue
+
+            waiter = self._select_weighted(capacity)
             if waiter is None:
                 break
-            if not self._can_activate(waiter.request):
-                # 为被选中的多 choice 请求积累槽位，但不因此阻塞当前可以执行的更高优先级请求。
-                self._schedule_index = schedule_index
-                waiter = self._first_fitting_higher_priority(waiter.request.priority)
-                if waiter is None:
-                    break
-            if not self._remove_waiter(waiter):
+            if waiter.request.decode_slots > available_slots:
+                # 此处 waiter 已满足 Session 约束且不超过总容量，唯一阻塞原因
+                # 是当前空槽不足，因此可以安全启动 bounded backfill。
+                self._start_backfill(waiter, capacity)
                 continue
-            lease = self._activate(
-                waiter.request,
-                waited_seconds=max(0.0, self._clock() - waiter.enqueue_time),
-            )
-            if waiter.future.done():
-                lease.release()
-                continue
-            waiter.future.set_result(lease)
+            self._grant_waiter(waiter)
         self._notify_state_change()
 
     def _notify_state_change(self) -> None:

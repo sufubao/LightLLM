@@ -132,8 +132,8 @@ class HttpServerManagerForPDMaster:
     ):
         if not self.args.disable_pd_master_decode_capacity_limit:
             decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
-            # Every request gets half a decode wave of buffering. Reusable prompt cache progressively unlocks
-            # the other half, while two full decode waves remain the hard upper bound.
+            # 每个请求默认获得半个解码波次的缓冲容量；可复用的提示词缓存会逐步开放另外半个波次，
+            # 同时以两个完整解码波次作为硬上限。
             general_waiting_capacity = (decode_capacity + 1) // 2
             cache_waiting_capacity = decode_capacity // 2
             hard_admission_limit = decode_capacity + general_waiting_capacity + cache_waiting_capacity

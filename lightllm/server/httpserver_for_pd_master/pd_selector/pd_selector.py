@@ -31,7 +31,7 @@ class PDSelector:
         return
 
     def estimate_prompt_cache_hit_rate(self, prompt: Union[str, List[int]]) -> Optional[float]:
-        """Return None when this selector cannot estimate reusable prompt cache."""
+        """当选择器无法估算可复用的提示词缓存时返回 None。"""
         return None
 
 

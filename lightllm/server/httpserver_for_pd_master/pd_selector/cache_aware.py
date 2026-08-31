@@ -170,7 +170,7 @@ class CacheAwarePolicy:
         self.balance_rel_threshold_controller.update_config(self.config)
 
     def estimate_cache_hit_rate(self, workers: List[PD_Client_Obj], request_text: str) -> float:
-        """Estimate reusable cache and retain the match in this async request context."""
+        """估算可复用缓存的命中率，并在当前异步请求上下文中保留匹配结果。"""
         if not workers or not request_text:
             _prompt_cache_match_context.set(None)
             return 0.0
@@ -187,8 +187,8 @@ class CacheAwarePolicy:
 
     def _match_prompt_cache(self, request_text: str) -> PromptCacheMatchResult:
         match_context = _prompt_cache_match_context.get()
-        # Admission and selection share the same prompt object. Identity avoids comparing a potentially long string,
-        # while ContextVar safely propagates the snapshot to every n-choice child task.
+        # 准入和选点共享同一个提示词对象。通过对象身份判断可以避免比较可能很长的字符串，
+        # ContextVar 则会将快照安全地传递给每个 n-choice 子任务。
         if match_context is not None and match_context.policy is self and match_context.request_text is request_text:
             _prompt_cache_match_context.set(None)
             return match_context.match_result

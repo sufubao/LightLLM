@@ -32,22 +32,23 @@ class Message(BaseModel):
 class Function(BaseModel):
     """Function descriptions."""
 
-    name: Optional[str] = None
+    name: str
     description: Optional[str] = Field(default=None, examples=[None])
     parameters: Optional[dict] = None
+    strict: Optional[bool] = None
 
 
 class Tool(BaseModel):
     """Function wrapper."""
 
-    type: str = Field(default="function", examples=["function"])
+    type: Literal["function"] = Field(default="function", examples=["function"])
     function: Function
 
 
 class ToolChoiceFuncName(BaseModel):
     """The name of tool choice function."""
 
-    name: Optional[str] = None
+    name: str
 
 
 class ToolChoice(BaseModel):

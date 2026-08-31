@@ -8,17 +8,17 @@ CUDA Graph 128，面向 16K 输入、256 输出的高并发文本服务。
 私有仓库标签：
 
 ```text
-registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm:v1.5.0-glm53-16k256-kpool-c3f39a82
+registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm:v1.5.0-glm53-16k256-kpool-996cef93
 ```
 
 不可变镜像：
 
 ```text
-registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:76a968231ffb0a4c8996bc9a0fb981b88b3afbf25b7ad77a07fa07fccc04901d
+registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:0260e9884e46de899f4b845aa3796d0603b7b6ee7593c1fded35b7cee4462169
 ```
 
 本机镜像为 `lightllm-glm53:16k256-kpool`，镜像 ID 为
-`sha256:d388173fbbc1fc2e8961785248331cecd08683af3c5f28ff67bc530d770d1409`。
+`sha256:8fbb91ee50dde5af4289d9e3cc75dddf93a8dd6fc2a201222a28612a5679cf0c`。
 同一不可变镜像已拉取到 H100 节点。
 
 ## H100 部署命令
@@ -26,7 +26,7 @@ registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:76a968231ffb0a4c899
 镜像已内置服务参数；启动时显式开启 K-pool decode 快路径：
 
 ```bash
-IMAGE="registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:76a968231ffb0a4c8996bc9a0fb981b88b3afbf25b7ad77a07fa07fccc04901d"
+IMAGE="registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:0260e9884e46de899f4b845aa3796d0603b7b6ee7593c1fded35b7cee4462169"
 
 sudo docker pull "$IMAGE"
 sudo docker run -d \

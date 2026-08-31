@@ -245,16 +245,47 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     return shm_addr
 
 
-@lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
-    """Synchronously cudaHostRegister the given [shm_ptr, shm_ptr+size)."""
+def _normalize_registration_ranges(
+    size: int, ranges: Optional[Tuple[Tuple[int, int], ...]], page_size: Optional[int] = None
+) -> Tuple[Tuple[int, int], ...]:
+    if ranges is None:
+        return ((0, size),)
+
+    page_size = page_size or os.sysconf("SC_PAGE_SIZE")
+    normalized = []
+    for offset, length in ranges:
+        if offset < 0 or length <= 0 or offset + length > size:
+            raise ValueError(f"invalid registration range: offset={offset}, length={length}, size={size}")
+        start = (offset // page_size) * page_size
+        end = min(size, triton.cdiv(offset + length, page_size) * page_size)
+        normalized.append((start, end))
+
+    normalized.sort()
+    merged = []
+    for start, end in normalized:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple((start, end - start) for start, end in merged)
+
+
+def _register_shm_ptr_to_pin(
+    shm_ptr: int,
+    size: int,
+    ranges: Optional[Tuple[Tuple[int, int], ...]],
+    handle: Optional["AsyncRegistrationHandle"] = None,
+) -> int:
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     tasks: list[tuple[int, int]] = []
-    offset = 0
-    while offset < size:
-        seg_len = min(chunk_bytes, size - offset)
-        tasks.append((offset, seg_len))
-        offset += seg_len
+    registration_ranges = _normalize_registration_ranges(size=size, ranges=ranges)
+    for range_offset, range_size in registration_ranges:
+        offset = range_offset
+        range_end = range_offset + range_size
+        while offset < range_end:
+            seg_len = min(chunk_bytes, range_end - offset)
+            tasks.append((offset, seg_len))
+            offset += seg_len
 
     cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
     cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
@@ -275,23 +306,98 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
         r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
         if r != 0:
             raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
-        return
+        return offset
 
     # worker_num的数值需要与_pre_warm_memory一致，不然会丢失warmup的效果
-    if tasks:
-        worker_num = min(8, len(tasks))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
-            futures = [executor.submit(_register_one_segment, task) for task in tasks]
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=desc):
-                future.result()
+    worker_num = min(8, len(tasks))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
+        futures = [executor.submit(_register_one_segment, task) for task in tasks]
+        completed = concurrent.futures.as_completed(futures)
+        if handle is None:
+            completed = tqdm(completed, total=len(futures), desc=desc)
 
-    device_ptr = ctypes.c_void_p()
-    host_ptr = ctypes.c_void_p(shm_ptr)
-    res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
-    if res != 0:
-        raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
-    logger.info(f"cudaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}")
-    return device_ptr.value
+        device_base_ptr = None
+        for future in completed:
+            registered_offset = future.result()
+            if device_base_ptr is None:
+                device_ptr = ctypes.c_void_p()
+                host_ptr = ctypes.c_void_p(shm_ptr + registered_offset)
+                res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+                if res != 0:
+                    raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+                device_base_ptr = device_ptr.value - registered_offset
+                if handle is not None:
+                    handle._set_device_ptr(device_base_ptr)
+
+            if handle is not None:
+                handle.completed_tasks += 1
+
+    registered_bytes = sum(range_size for _, range_size in registration_ranges)
+    logger.info(
+        f"cudaHostRegister success, device_base_ptr={device_base_ptr}, "
+        f"registered_bytes={registered_bytes}, total_bytes={size}, ranges={len(registration_ranges)}"
+    )
+    return device_base_ptr
+
+
+class AsyncRegistrationHandle:
+    def __init__(self, total_tasks: int):
+        self.total_tasks = total_tasks
+        self.completed_tasks = 0
+        self.device_ptr: Optional[int] = None
+        self._exception: Optional[BaseException] = None
+        self._device_ptr_ready = threading.Event()
+        self._finished = threading.Event()
+
+    def _set_device_ptr(self, device_ptr: int):
+        self.device_ptr = device_ptr
+        self._device_ptr_ready.set()
+
+    def _set_exception(self, exception: BaseException):
+        self._exception = exception
+        self._device_ptr_ready.set()
+        self._finished.set()
+
+    def wait_for_device_ptr(self) -> int:
+        self._device_ptr_ready.wait()
+        if self._exception is not None:
+            raise self._exception
+        assert self.device_ptr is not None
+        return self.device_ptr
+
+    def wait(self) -> int:
+        self._finished.wait()
+        if self._exception is not None:
+            raise self._exception
+        assert self.device_ptr is not None
+        return self.device_ptr
+
+
+def register_shm_ptr_to_pin_async(
+    shm_ptr: int, size: int, ranges: Optional[Tuple[Tuple[int, int], ...]] = None
+) -> AsyncRegistrationHandle:
+    registration_ranges = _normalize_registration_ranges(size=size, ranges=ranges)
+    chunk_bytes = 128 * 1024 * 1024
+    total_tasks = sum(triton.cdiv(range_size, chunk_bytes) for _, range_size in registration_ranges)
+    handle = AsyncRegistrationHandle(total_tasks=total_tasks)
+
+    def _worker():
+        try:
+            _register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=size, ranges=ranges, handle=handle)
+            handle._finished.set()
+        except BaseException as exception:
+            handle._set_exception(exception)
+
+    threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True).start()
+    return handle
+
+
+@lru_cache(maxsize=None)
+def register_shm_ptr_to_pin(
+    shm_ptr: int, size: int, ranges: Optional[Tuple[Tuple[int, int], ...]] = None
+) -> int:
+    """Synchronously cudaHostRegister selected ranges of a shared-memory allocation."""
+    return _register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=size, ranges=ranges)
 
 
 @lru_cache(maxsize=None)

@@ -3,9 +3,13 @@ from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.cpu_cache import CpuCacheCreator, CpuCacheTensorSpec
+from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
 from lightllm.server.core.objs import AtomicShmLock
+from lightllm.utils.config_utils import is_linear_att_mixed_model
+from lightllm.utils.dist_utils import get_current_rank_in_dp
 from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
+from lightllm.utils.startup_status import set_cpu_cache_ready, wait_cpu_cache_ready
 
 logger = init_logger(__name__)
 
@@ -17,6 +21,8 @@ class CpuKvCacheClient(object):
 
     def __init__(self, only_create_meta_data: bool, init_shm_data: bool):
         self.args = get_env_start_args()
+        if not init_shm_data:
+            wait_cpu_cache_ready()
         # to do here need calcu from from settings.
         self.kv_cache_tensor_meta = calcu_cpu_cache_meta()
         self.page_num: int = self.kv_cache_tensor_meta.page_num
@@ -37,10 +43,21 @@ class CpuKvCacheClient(object):
                 size_bytes=self.kv_cache_tensor_meta.calcu_size(),
             )
             tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
-            self.cpu_kv_cache_tensor = tensor_creator.create_or_attach(
-                init_shm_data=init_shm_data,
-                pin=not init_shm_data,
-            )
+            pin_ranges = None
+            if not init_shm_data and is_linear_att_mixed_model(self.args.model_dir):
+                pin_ranges = LinearAttCacheConfig.load_from_args().get_cpu_cache_rank_registration_ranges(
+                    page_num=self.kv_cache_tensor_meta.page_num,
+                    tp_rank=get_current_rank_in_dp(),
+                )
+            if init_shm_data:
+                self.cpu_kv_cache_tensor = tensor_creator.create_or_attach(init_shm_data=True, pin=False)
+                self.registration_handle = None
+            else:
+                self.cpu_kv_cache_tensor, self.registration_handle = tensor_creator.create_or_attach_async(
+                    pin_ranges=pin_ranges
+                )
+        if init_shm_data:
+            set_cpu_cache_ready(True)
         return
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:

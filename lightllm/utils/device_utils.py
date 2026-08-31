@@ -11,6 +11,16 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+@lru_cache(maxsize=1)
+def has_cuda_compiler() -> bool:
+    try:
+        from torch.utils.cpp_extension import CUDA_HOME
+
+        return CUDA_HOME is not None and os.path.isfile(os.path.join(CUDA_HOME, "bin", "nvcc"))
+    except Exception:
+        return False
+
+
 @lru_cache(maxsize=None)
 def is_tesla():
     return "Tesla" in torch.cuda.get_device_name(0)

@@ -105,6 +105,45 @@ class LinearAttCacheConfig:
         c = self.get_ssm_state_bytes_per_layer() * self.linear_layer_num * self.tp_world_size
         return c
 
+    def get_cpu_cache_rank_registration_ranges(self, page_num: int, tp_rank: int):
+        """Return the byte ranges in shared CPU cache that this TP rank can access."""
+        tp_world_size = self.tp_world_size
+        assert 0 <= tp_rank < tp_world_size
+
+        if self.full_att_all_num_kv_heads % tp_world_size == 0:
+            full_att_shard_num = tp_world_size
+            full_att_shard_index = tp_rank
+        else:
+            assert tp_world_size % self.full_att_all_num_kv_heads == 0
+            ranks_per_kv_head = tp_world_size // self.full_att_all_num_kv_heads
+            full_att_shard_num = self.full_att_all_num_kv_heads
+            full_att_shard_index = tp_rank // ranks_per_kv_head
+
+        full_att_bytes = self.get_cpu_cache_full_att_bytes()
+        conv_bytes = self.get_cpu_cache_conv_bytes()
+        ssm_bytes = self.get_cpu_cache_ssm_bytes()
+        page_bytes = self.get_cpu_cache_big_page_bytes()
+        assert full_att_bytes % full_att_shard_num == 0
+        assert conv_bytes % tp_world_size == 0
+        assert ssm_bytes % tp_world_size == 0
+
+        full_att_rank_bytes = full_att_bytes // full_att_shard_num
+        conv_rank_bytes = conv_bytes // tp_world_size
+        ssm_rank_bytes = ssm_bytes // tp_world_size
+        # Triton validates the logical base pointer of each strided view before
+        # launch, even though the kernel only dereferences this rank's shard.
+        ranges = [(0, 1), (full_att_bytes, 1), (full_att_bytes + conv_bytes, 1)]
+        for page_index in range(page_num):
+            page_offset = page_index * page_bytes
+            ranges.extend(
+                (
+                    (page_offset + full_att_shard_index * full_att_rank_bytes, full_att_rank_bytes),
+                    (page_offset + full_att_bytes + tp_rank * conv_rank_bytes, conv_rank_bytes),
+                    (page_offset + full_att_bytes + conv_bytes + tp_rank * ssm_rank_bytes, ssm_rank_bytes),
+                )
+            )
+        return tuple(ranges)
+
     @staticmethod
     def load_from_args() -> "LinearAttCacheConfig":
         args = get_env_start_args()

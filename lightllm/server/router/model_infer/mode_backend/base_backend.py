@@ -120,6 +120,11 @@ class ModeBackend:
 
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
 
+        wait_events = []
+        if self.args.enable_cpu_cache:
+            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
+            wait_events.append(self.multi_level_cache_module)
+
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
 
@@ -143,6 +148,7 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
+            "wait_events": wait_events,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -244,9 +250,6 @@ class ModeBackend:
         if self.args.mtp_mode is not None:
             self.init_mtp_draft_model(model_kvargs)
             self.init_spec_engine()
-
-        if self.args.enable_cpu_cache:
-            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
 
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling

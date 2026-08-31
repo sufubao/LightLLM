@@ -1,4 +1,4 @@
-"""Backend validation with subprocess isolation and ground truth checks."""
+"""Backend selection with static fast paths and isolated ground-truth fallbacks."""
 
 import multiprocessing as mp
 import os
@@ -314,10 +314,29 @@ def _run_in_subprocess(backend_name, pipe):
         devnull.close()
 
 
+def _quick_validate(backend_name: str):
+    """Use static capability checks where they are sufficient for backend selection."""
+    if backend_name == "fa3":
+        from lightllm.utils.device_utils import is_hopper
+        from lightllm.utils.sgl_utils import flash_attn_varlen_func
+
+        return is_hopper() and flash_attn_varlen_func is not None
+
+    if backend_name in ("flashinfer", "flashqla"):
+        from lightllm.utils.device_utils import has_cuda_compiler
+
+        if not has_cuda_compiler():
+            logger.info(f"Skipping {backend_name}: CUDA compiler is unavailable")
+            return False
+
+    return None
+
+
 @lru_cache(maxsize=None)
 def validate(backend_name: str) -> bool:
     if get_global_rank() == 0:
-        validate_ok = _validate(backend_name)
+        quick_result = _quick_validate(backend_name)
+        validate_ok = _validate(backend_name) if quick_result is None else quick_result
         torch.distributed.broadcast_object_list([validate_ok], src=0)
     else:
         validate_ok = [None]

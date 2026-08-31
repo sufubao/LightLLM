@@ -25,6 +25,7 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from lightllm.utils.startup_status import set_cpu_cache_ready, set_server_ready
 
 logger = init_logger(__name__)
 
@@ -378,33 +379,37 @@ def _launch_subprocesses(args: StartArgs):
             ],
         )
 
+    set_server_ready(False)
+    if args.enable_cpu_cache:
+        set_cpu_cache_ready(False)
+    http_server_process = _start_http_server(args)
+
+    core_start_funcs = []
+    core_start_args = []
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
 
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_multi_level_kv_cache_manager,
-            ],
-            start_args=[(args,)],
+        core_start_funcs.append(start_multi_level_kv_cache_manager)
+        core_start_args.append((args,))
+    core_start_funcs.append(start_metric_manager)
+    core_start_args.append((args,))
+    router_process_index = len(core_start_funcs)
+    core_start_funcs.extend((start_router_process, start_detokenization_process))
+    core_start_args.extend(((args,), (args,)))
+    try:
+        processes = process_manager.start_submodule_processes(
+            start_funcs=core_start_funcs,
+            start_args=core_start_args,
         )
-
-    process_manager.start_submodule_processes(
-        start_funcs=[
-            start_metric_manager,
-        ],
-        start_args=[(args,)],
-    )
-
-    router_process, _ = process_manager.start_submodule_processes(
-        start_funcs=[start_router_process, start_detokenization_process],
-        start_args=[
-            (args,),
-            (args,),
-        ],
-    )
+    except BaseException:
+        http_server_process.terminate()
+        http_server_process.wait()
+        raise
+    router_process = processes[router_process_index]
     process_manager.register_process_tree(router_process)
+    set_server_ready(True)
 
-    return process_manager
+    return process_manager, http_server_process
 
 
 def _hypercorn_config_args(args: StartArgs):
@@ -413,10 +418,7 @@ def _hypercorn_config_args(args: StartArgs):
     return ["--keep-alive", "10"]
 
 
-def normal_or_p_d_start(args: StartArgs):
-    process_manager = _launch_subprocesses(args)
-
-    # 启动 Hypercorn
+def _start_http_server(args: StartArgs):
     command = [
         "hypercorn",
         *_hypercorn_config_args(args),
@@ -432,9 +434,11 @@ def normal_or_p_d_start(args: StartArgs):
         "-",
         "lightllm.server.api_http:app",
     ]
+    return subprocess.Popen(command)
 
-    # 启动子进程
-    http_server_process = subprocess.Popen(command)
+
+def normal_or_p_d_start(args: StartArgs):
+    process_manager, http_server_process = _launch_subprocesses(args)
 
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_clear

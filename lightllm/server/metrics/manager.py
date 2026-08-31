@@ -81,7 +81,15 @@ class MetricClient(threading.Thread):
     def __init__(self, port):
         super().__init__()
         self.port = port
-        self.conn = rpyc.connect("localhost", self.port)
+        deadline = time.monotonic() + 600
+        while True:
+            try:
+                self.conn = rpyc.connect("localhost", self.port)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
         def async_wrap(f):
             f = rpyc.async_(f)

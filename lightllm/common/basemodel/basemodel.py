@@ -82,6 +82,7 @@ class TpPartBaseModel:
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
+        self.wait_events = kvargs.get("wait_events", [])
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         self.data_type = get_llm_data_type()
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
@@ -128,6 +129,8 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self.load_weights(self.weight_dict)
+        for event in self.wait_events:
+            event.wait()
 
         self._init_att_backend()
         self._init_att_backend1()
@@ -291,10 +294,11 @@ class TpPartBaseModel:
             )
         )
         if self.graph is not None:
+            initial_batch_sizes = self.graph.cuda_graph_batch_sizes[:1]
             if get_env_start_args().enable_decode_microbatch_overlap:
-                self.graph.warmup_overlap(self)
+                self.graph.warmup_overlap(self, batch_sizes=initial_batch_sizes)
             else:
-                self.graph.warmup(self)
+                self.graph.warmup(self, batch_sizes=initial_batch_sizes)
 
     def _init_prefill_cuda_graph(self):
         self.prefill_graph = (

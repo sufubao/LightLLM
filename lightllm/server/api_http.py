@@ -50,6 +50,7 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.startup_status import is_server_ready
 from dataclasses import asdict, dataclass, is_dataclass
 
 from .api_errors import create_error_response, create_server_busy_response
@@ -185,7 +186,8 @@ def readiness():
             {"status": "ok" if pd_nodes_are_ready else "not ready"},
             status_code=200 if pd_nodes_are_ready else 503,
         )
-    return {"status": "ok"}
+    ready = is_server_ready()
+    return JSONResponse({"status": "ok" if ready else "not ready"}, status_code=200 if ready else 503)
 
 
 @app.get("/get_model_name")
@@ -250,6 +252,9 @@ async def healthcheck(request: Request):
             }
         )
         return JSONResponse(health_info, status_code=200 if is_healthy else 503)
+
+    if not is_server_ready():
+        return JSONResponse({"message": "Starting"}, status_code=503)
 
     from lightllm.utils.health_check import health_check
 

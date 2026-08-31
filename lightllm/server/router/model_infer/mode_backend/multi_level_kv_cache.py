@@ -38,6 +38,9 @@ class MultiLevelKvCacheModule(object):
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
 
+    def wait(self):
+        self.cpu_cache_client.registration_handle.wait()
+
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
         """

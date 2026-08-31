@@ -20,6 +20,9 @@ class ModelInput:
     b_req_idx: torch.Tensor = None
     b_mtp_index: torch.Tensor = None
     b_seq_len: torch.Tensor = None
+    # Original prompt length per request/row.  This remains on CPU and is used
+    # only for one-time model-specific fast-path eligibility decisions.
+    b_input_len: torch.Tensor = None
     # 在 prefill 阶段，用于在 enable_prefill_decode_mixed 开启下，
     # 用于标识请求是否为 decode 请求混合在 prefill 请求中。
     # 其对应的 input_ids 需要特殊处理, 从 req_to_next_token_ids 中获取。
@@ -55,6 +58,13 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # Whether every request in this prefill batch starts and ends on an
+    # index-kpool boundary.  BaseModel computes this once while the length
+    # tensors are still on CPU; NSA layers reuse it without a per-layer GPU
+    # synchronization.
+    kpool_prefill_aligned: bool = False
+    kpool_decode_aligned: bool = False
+
     # The router enables sparse vocabulary output only when target sampling is
     # exact, unmodified greedy. Draft models always consume greedy proposals.
     use_vocab_parallel_greedy: bool = False
@@ -89,6 +99,11 @@ class ModelInput:
         self.check_input()
 
     def check_input(self):
+        if self.b_input_len is None:
+            # Internal warmup/padding inputs predate this metadata.  Their
+            # synthetic prompt occupies the whole sequence, so b_seq_len is
+            # the correct conservative default.
+            self.b_input_len = self.b_seq_len
         if self.input_ids is not None:
             assert (
                 self.input_ids.dtype == torch.int64
@@ -97,12 +112,14 @@ class ModelInput:
         assert self.b_req_idx is not None
         assert self.b_mtp_index is not None
         assert self.b_seq_len is not None
+        assert self.b_input_len is not None
         assert self.multimodal_params is not None
         assert self.mem_indexes is not None or self.mem_indexes_cpu is not None
 
         assert self.b_req_idx.shape == (self.batch_size,)
         assert self.b_mtp_index.shape == self.b_req_idx.shape
         assert self.b_seq_len.shape == self.b_req_idx.shape
+        assert self.b_input_len.shape == self.b_req_idx.shape
         assert len(self.multimodal_params) == self.batch_size
 
         if self.is_prefill:

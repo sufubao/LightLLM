@@ -197,7 +197,11 @@ class NsaInfer:
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
         self.index_kpool = network_config.get("index_kpool", 1)
         self.index_kpool_compress = network_config.get("index_kpool_compress", False)
-        self._kpool_indexer_k_buffer = None
+        self.enable_kpool_decode_fastpath = os.getenv(
+            "LIGHTLLM_ENABLE_KPOOL_DECODE_FASTPATH", "0"
+        ).upper() in {"1", "ON", "TRUE"}
+        self._kpool_tail_k = None
+        self._kpool_tail_score = None
         # Most NSA models only instantiate the target model, so their decode
         # layout follows the process-wide MTP setting.  A model that reuses an
         # NSA layer as a recurrent drafter can override this with its own
@@ -240,8 +244,8 @@ class NsaInfer:
                 .view(q.shape[0], self.index_n_heads, q.shape[2])
             )
 
-        q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
-        k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
+        q_fp8, q_scale = self._quantize_indexer_activation(q)
+        k_fp8, k_scale = self._quantize_indexer_activation(k)
 
         indexer_k_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_)
         destindex_copy_indexer_ks(
@@ -251,24 +255,31 @@ class NsaInfer:
             O_buffer=indexer_k_buffer,
         )
 
-        weights = (
-            layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
+        weights = self._scale_indexer_weights(
+            layer_weight.weights_proj_.mm(hidden_states), q_scale
         )
-        weights = weights.unsqueeze(-1) * q_scale
 
         ks = att_state.ks
         ke = att_state.ke
         lengths = att_state.lengths
 
-        use_kpool = (
+        use_kpool_prefill = (
             infer_state.is_prefill
             and self.index_kpool > 1
             and self.index_kpool_compress
             and raw_k is not None
-            and infer_state.b_seq_len.shape[0] == 1
+            and infer_state.kpool_prefill_aligned
             and infer_state.mem_index.shape[0] == q_fp8.shape[0]
         )
-        if use_kpool:
+        use_kpool_decode = (
+            not infer_state.is_prefill
+            and self.enable_kpool_decode_fastpath
+            and infer_state.kpool_decode_aligned
+            and raw_k is not None
+            and get_env_start_args().mtp_mode is None
+        )
+        use_kpool = use_kpool_prefill or use_kpool_decode
+        if use_kpool_prefill:
             (
                 k_fp8_,
                 k_scale_,
@@ -276,6 +287,25 @@ class NsaInfer:
                 score_ke,
                 score_lengths,
             ) = self._prepare_kpool_scoring(
+                raw_k=raw_k,
+                hidden_states=hidden_states,
+                q_lora=q_lora,
+                infer_state=infer_state,
+                layer_weight=layer_weight,
+                indexer_k_buffer=indexer_k_buffer,
+                ragged_mem_index=att_state.ragged_mem_index,
+                ks=ks,
+                lengths=lengths,
+            )
+            use_kpool = k_fp8_ is not None
+        elif use_kpool_decode:
+            (
+                k_fp8_,
+                k_scale_,
+                score_ks,
+                score_ke,
+                score_lengths,
+            ) = self._prepare_kpool_decode_scoring(
                 raw_k=raw_k,
                 hidden_states=hidden_states,
                 q_lora=q_lora,
@@ -334,7 +364,6 @@ class NsaInfer:
 
         from sgl_kernel import fast_topk_v2
 
-        weights = weights.squeeze(-1)
         query_token_num = q_fp8.shape[0]
         kv_token_num = k_fp8_.shape[0]
         query_chunk_size = self._get_mqa_logits_chunk_size(
@@ -418,6 +447,16 @@ class NsaInfer:
 
         return b_topk_mem_index, b_topk_index
 
+    def _quantize_indexer_activation(self, value: torch.Tensor):
+        return act_quant(value, self.block_size, self.scale_fmt)
+
+    def _scale_indexer_weights(
+        self, weights: torch.Tensor, q_scale: torch.Tensor
+    ) -> torch.Tensor:
+        return (
+            weights.mul(self.index_n_heads_scale).unsqueeze(-1).mul(q_scale)
+        ).squeeze(-1)
+
     def _prepare_kpool_scoring(
         self,
         raw_k,
@@ -426,22 +465,25 @@ class NsaInfer:
         infer_state,
         layer_weight,
         indexer_k_buffer,
+        ragged_mem_index,
+        ks,
         lengths,
     ):
         pool_size = self.index_kpool
         query_token_num = raw_k.shape[0]
-        total_seq_len = infer_state.max_kv_seq_len
-        prefix_len = total_seq_len - query_token_num
-        if prefix_len < 0 or prefix_len % pool_size != 0:
+        if not infer_state.kpool_prefill_aligned:
             return None, None, None, None, None
-
-        if self._kpool_indexer_k_buffer is None:
-            self._kpool_indexer_k_buffer = torch.empty_like(indexer_k_buffer)
+        # Without decode K-pool enabled the zero-prefix path is intentionally
+        # transient, so no pooled history exists for a later chunk.
+        if infer_state.max_cache_len > 0 and not self.enable_kpool_decode_fastpath:
+            return None, None, None, None, None
 
         gate_score = layer_weight.index_kpool_compress_gate.mm(
             hidden_states.to(q_lora.dtype)
         )
         closed_pool_num = query_token_num // pool_size
+        compressed_k = None
+        compressed_scale = None
         if closed_pool_num:
             closed_token_num = closed_pool_num * pool_size
             slot_k = raw_k[:closed_token_num].view(
@@ -453,28 +495,44 @@ class NsaInfer:
             write_locs = infer_state.mem_index[:closed_token_num].view(
                 closed_pool_num, pool_size
             )[:, -1]
-            self._compress_kpool_keys(
+            compressed_k, compressed_scale = self._compress_kpool_keys(
                 slot_k=slot_k,
                 slot_score=slot_score,
                 write_locs=write_locs,
                 layer_weight=layer_weight,
+                output_buffer=indexer_k_buffer,
+                persist=self.enable_kpool_decode_fastpath,
             )
 
-        pool_seq_len = total_seq_len // pool_size
-        if pool_seq_len == 0:
+        # The common serving path has no prefix and each request fits in this
+        # aligned chunk.  DeepGEMM can consume the freshly compressed pools
+        # directly; allocating and gathering a second max-token-sized cache
+        # would waste several GiB for GLM-5.3 TP8 and can make c64 OOM.
+        if infer_state.max_cache_len == 0:
+            if compressed_k is None:
+                return None, None, None, None, None
+            pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(
+                torch.int32
+            )
+            score_ks = torch.div(ks, pool_size, rounding_mode="floor").to(torch.int32)
+            score_ke = score_ks + pool_lengths
+            return compressed_k, compressed_scale, score_ks, score_ke, pool_lengths
+
+        pooled_token_num = infer_state.total_token_num // pool_size
+        if pooled_token_num == 0:
             return None, None, None, None, None
-        req_idx = infer_state.b_req_idx[-1:].to(torch.int64)
-        token_positions = torch.arange(
+        # Every request boundary is pool-aligned, so selecting each pool's
+        # final token from the ragged request-major layout preserves exactly
+        # the packed-K order expected by DeepGEMM's per-row ks/ke ranges.
+        pooled_ragged_positions = torch.arange(
             pool_size - 1,
-            pool_seq_len * pool_size,
+            infer_state.total_token_num,
             pool_size,
             dtype=torch.int64,
             device=raw_k.device,
         )
-        mem_indices = infer_state.req_manager.req_to_token_indexs[
-            req_idx, token_positions
-        ].view(-1)
-        packed_k = self._kpool_indexer_k_buffer[mem_indices, 0]
+        mem_indices = ragged_mem_index[pooled_ragged_positions].to(torch.int64)
+        packed_k = indexer_k_buffer[mem_indices, 0]
         k_fp8 = (
             packed_k[:, : self.index_head_dim].contiguous().view(torch.float8_e4m3fn)
         )
@@ -488,8 +546,103 @@ class NsaInfer:
         pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(
             torch.int32
         )
-        score_ks = torch.zeros_like(pool_lengths)
-        return k_fp8, k_scale, score_ks, pool_lengths, pool_lengths
+        score_ks = torch.div(ks, pool_size, rounding_mode="floor").to(torch.int32)
+        score_ke = score_ks + pool_lengths
+        return k_fp8, k_scale, score_ks, score_ke, pool_lengths
+
+    def _prepare_kpool_decode_scoring(
+        self,
+        raw_k,
+        hidden_states,
+        q_lora,
+        infer_state,
+        layer_weight,
+        indexer_k_buffer,
+        lengths,
+    ):
+        """Update one-token K-pool tails and gather pooled decode history.
+
+        This fast path deliberately targets plain decode.  MTP verify has
+        multiple speculative rows per request and needs acceptance-aware tail
+        rollback, so it remains on the regular indexer path.
+        """
+
+        pool_size = self.index_kpool
+        batch_size = raw_k.shape[0]
+        if batch_size == 0:
+            return None, None, None, None, None
+
+        if self._kpool_tail_k is None:
+            tail_shape = (
+                infer_state.req_manager.max_request_num + 1,
+                pool_size,
+                self.index_head_dim,
+            )
+            self._kpool_tail_k = torch.empty(
+                tail_shape, dtype=torch.bfloat16, device=raw_k.device
+            )
+            self._kpool_tail_score = torch.empty_like(self._kpool_tail_k)
+
+        req_idx = infer_state.b_req_idx.to(torch.int64)
+        positions = infer_state.b_seq_len.to(torch.int64) - 1
+        tail_slots = torch.remainder(positions, pool_size)
+        gate_score = layer_weight.index_kpool_compress_gate.mm(
+            hidden_states.to(q_lora.dtype)
+        )
+        self._kpool_tail_k[req_idx, tail_slots] = raw_k
+        self._kpool_tail_score[req_idx, tail_slots] = gate_score
+
+        # Compress every row's current tail.  Only pool-end token locations are
+        # gathered as history, so writes at intermediate token locations are
+        # harmless and avoid a dynamic nonzero/host synchronization.
+        self._compress_kpool_keys(
+            slot_k=self._kpool_tail_k[req_idx],
+            slot_score=self._kpool_tail_score[req_idx],
+            write_locs=infer_state.mem_index,
+            layer_weight=layer_weight,
+            output_buffer=indexer_k_buffer,
+            persist=True,
+        )
+
+        max_pool_len = infer_state.max_kv_seq_len // pool_size
+        if max_pool_len == 0:
+            return None, None, None, None, None
+        pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(
+            torch.int32
+        )
+        endpoint_positions = (
+            torch.arange(max_pool_len, dtype=torch.int64, device=raw_k.device)
+            * pool_size
+            + pool_size
+            - 1
+        )
+        last_endpoint = torch.clamp(
+            pool_lengths.to(torch.int64) * pool_size - 1, min=0
+        )
+        safe_positions = torch.minimum(
+            endpoint_positions.unsqueeze(0), last_endpoint.unsqueeze(1)
+        )
+        mem_indices = infer_state.req_manager.req_to_token_indexs[
+            req_idx.unsqueeze(1), safe_positions
+        ].to(torch.int64)
+        packed_k = indexer_k_buffer[mem_indices.reshape(-1), 0]
+        k_fp8 = (
+            packed_k[:, : self.index_head_dim]
+            .contiguous()
+            .view(torch.float8_e4m3fn)
+        )
+        k_scale = (
+            packed_k[:, self.index_head_dim : self.index_head_dim + 4]
+            .contiguous()
+            .view(torch.float32)
+            .view(-1)
+        )
+        score_ks = (
+            torch.arange(batch_size, dtype=torch.int32, device=raw_k.device)
+            * max_pool_len
+        )
+        score_ke = score_ks + pool_lengths
+        return k_fp8, k_scale, score_ks, score_ke, pool_lengths
 
     def _compress_kpool_keys(
         self,
@@ -497,6 +650,8 @@ class NsaInfer:
         slot_score,
         write_locs,
         layer_weight,
+        output_buffer,
+        persist,
     ):
         from types import SimpleNamespace
 
@@ -506,7 +661,7 @@ class NsaInfer:
 
         compressed_k, compressed_scale = kpool_softmax_rotate_write_cache(
             pool=SimpleNamespace(page_size=64, index_head_dim=self.index_head_dim),
-            buf=self._kpool_indexer_k_buffer,
+            buf=output_buffer,
             slot_k=slot_k,
             slot_score=slot_score,
             ape=layer_weight.index_kpool_compress_ape.weight,
@@ -515,12 +670,14 @@ class NsaInfer:
             return_compressed=True,
             write_cache=False,
         )
-        destindex_copy_indexer_ks(
-            K_fp8=compressed_k,
-            K_scale=compressed_scale,
-            DestLoc=write_locs,
-            O_buffer=self._kpool_indexer_k_buffer,
-        )
+        if persist:
+            destindex_copy_indexer_ks(
+                K_fp8=compressed_k,
+                K_scale=compressed_scale,
+                DestLoc=write_locs,
+                O_buffer=output_buffer,
+            )
+        return compressed_k, compressed_scale
 
     @classmethod
     def _get_mqa_logits_chunk_size(

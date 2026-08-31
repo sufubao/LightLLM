@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-image="${LIGHTLLM_GLM53_IMAGE:-lightllm-glm53:text-512k-mtp4}"
-name="${LIGHTLLM_GLM53_CONTAINER:-glm53-lightllm-text-512k-mtp4}"
+image="${LIGHTLLM_GLM53_IMAGE:-lightllm-glm53:16k256-kpool}"
+name="${LIGHTLLM_GLM53_CONTAINER:-glm53-lightllm-16k256-kpool}"
 model_dir="${LIGHTLLM_GLM53_MODEL_DIR:-/home/devsft/models/GLM-5.3-Flash}"
 cache_dir="${LIGHTLLM_GLM53_CACHE_DIR:-/home/devsft/cache-glm53-lightllm}"
 triton_cache_dir="${LIGHTLLM_GLM53_TRITON_CACHE_DIR:-/home/devsft/cache-glm53-triton}"
@@ -19,6 +19,8 @@ exec sudo docker run --rm --name "${name}" \
   --gpus all \
   --ipc host \
   --network host \
+  -e LIGHTLLM_ENABLE_KPOOL_DECODE_FASTPATH=1 \
+  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --ulimit memlock=-1:-1 \
   --ulimit nofile=1048576:1048576 \
   -v "${model_dir}:/model:ro" \

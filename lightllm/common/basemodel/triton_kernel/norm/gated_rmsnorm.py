@@ -26,6 +26,7 @@ def gated_rmsnorm_forward_kernel(
     BLOCK_N: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
+    SIGMOID_GATE: tl.constexpr,
     Z_HEADS: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
@@ -46,7 +47,7 @@ def gated_rmsnorm_forward_kernel(
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if not NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=cols < N).to(tl.float32)
-        x *= z * tl.sigmoid(z)
+        x *= tl.sigmoid(z) if SIGMOID_GATE else z * tl.sigmoid(z)
     # RMS norm: compute variance directly without mean subtraction
     xbar = tl.where(cols < N, x, 0.0)
     var = tl.sum(xbar * xbar, axis=0) / N
@@ -61,7 +62,7 @@ def gated_rmsnorm_forward_kernel(
     y = x_hat * w + b if HAS_BIAS else x_hat * w
     if NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=mask).to(tl.float32)
-        y *= z * tl.sigmoid(z)
+        y *= tl.sigmoid(z) if SIGMOID_GATE else z * tl.sigmoid(z)
     # Write output
     tl.store(Y + cols, y, mask=mask)
 
@@ -108,6 +109,7 @@ def gated_rmsnorm_forward(
     out: torch.Tensor = None,
     group_size: int = None,
     norm_before_gate: bool = True,
+    activation: str = "silu",
     run_config: dict = None,
 ):
     M, N = x.shape
@@ -118,6 +120,7 @@ def gated_rmsnorm_forward(
     assert x.stride(-1) == 1
     # z is required for gated_rmsnorm
     assert z is not None, "z cannot be None for gated_rmsnorm_forward"
+    assert activation in ("silu", "sigmoid"), f"unsupported gate activation: {activation}"
     # Accept GDN's strided 3D gate without materializing a flattened copy.
     assert z.ndim in (2, 3), f"z must be [M, N] or [tokens, heads, N], got shape={z.shape}"
     assert z.stride(-1) == 1
@@ -181,6 +184,7 @@ def gated_rmsnorm_forward(
         eps,
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
+        SIGMOID_GATE=activation == "sigmoid",
         Z_HEADS=z_heads,
         num_warps=num_warps,
     )

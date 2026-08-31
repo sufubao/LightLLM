@@ -396,6 +396,32 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
+        if model_input.is_prefill:
+            pool_size = int(self.config.get("index_kpool", 1) or 1)
+            if pool_size > 1:
+                # These tensors are normally still on CPU here.  Computing the
+                # batch-wide predicate once avoids synchronizing every NSA
+                # layer merely to decide whether its batched K-pool path is
+                # safe.  Requiring both boundaries to align also makes every
+                # query chunk an integer number of pools.
+                model_input.kpool_prefill_aligned = bool(
+                    torch.all(
+                        (model_input.b_ready_cache_len.remainder(pool_size) == 0)
+                        & (model_input.b_seq_len.remainder(pool_size) == 0)
+                        & (model_input.b_input_len.remainder(pool_size) == 0)
+                    ).item()
+                )
+        else:
+            pool_size = int(self.config.get("index_kpool", 1) or 1)
+            model_input.kpool_decode_aligned = bool(
+                pool_size > 1
+                and os.getenv("LIGHTLLM_ENABLE_KPOOL_DECODE_FASTPATH", "0").upper()
+                in {"1", "ON", "TRUE"}
+                and self.args.mtp_mode is None
+                and self.args.disable_dynamic_prompt_cache
+                and self.args.chunked_prefill_size % pool_size == 0
+                and torch.all(model_input.b_input_len.remainder(pool_size) == 0).item()
+            )
         model_input.to_cuda()
         assert model_input.mem_indexes.is_cuda
 
@@ -426,6 +452,8 @@ class TpPartBaseModel:
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
         infer_state.max_cache_len = model_input.max_cache_len
+        infer_state.kpool_prefill_aligned = model_input.kpool_prefill_aligned
+        infer_state.kpool_decode_aligned = model_input.kpool_decode_aligned
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
@@ -486,6 +514,9 @@ class TpPartBaseModel:
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
+        new_model_input.b_input_len = F.pad(
+            new_model_input.b_input_len, (0, padded_batch_size), mode="constant", value=2
+        )
         if new_model_input.b_position_delta is not None:
             new_model_input.b_position_delta = F.pad(
                 new_model_input.b_position_delta, (0, padded_batch_size), mode="constant", value=0

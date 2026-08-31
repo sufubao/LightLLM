@@ -9,12 +9,20 @@ from lightllm.common.basemodel.layer_weights.transformer_layer_weight import (
 )
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     COLMMWeight,
+    GatedRMSNormWeight,
     LayerNormWeight,
     ParameterWeight,
     RMSNormWeight,
     ROWMMWeight,
     TpParameterWeight,
 )
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
+    get_row_slice_mixin,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import (
+    MMWeightTpl,
+)
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import (
     Deepseek2TransformerLayerWeight,
 )
@@ -22,6 +30,50 @@ from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import (
     Deepseek3_2TransformerLayerWeight,
 )
 from .pre_and_post_layer_weight import add_language_model_aliases
+
+
+class Glm5NextMergedKdaProjection(MMWeightTpl):
+    """One KDA input GEMM with TP-sharded q/k/v/b and replicated f_a/g_a."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        projection: int,
+        head_count: int,
+        head_dim: int,
+        weight_names: list[str],
+        data_type: torch.dtype,
+        tp_rank: int | None = None,
+        tp_world_size: int | None = None,
+    ):
+        tp_rank = get_current_rank_in_dp() if tp_rank is None else tp_rank
+        tp_world_size = get_dp_world_size() if tp_world_size is None else tp_world_size
+        assert projection % tp_world_size == 0
+        assert head_count % tp_world_size == 0
+        super().__init__(
+            in_dim=in_dim,
+            out_dims=[
+                projection // tp_world_size,
+                projection // tp_world_size,
+                projection // tp_world_size,
+                head_count // tp_world_size,
+                head_dim,
+                head_dim,
+            ],
+            weight_names=weight_names,
+            bias_names=None,
+            data_type=data_type,
+            quant_method=None,
+            tp_rank=tp_rank,
+            tp_world_size=tp_world_size,
+        )
+        self.sharded_slicer = get_row_slice_mixin(
+            "none", tp_rank=tp_rank, tp_world_size=tp_world_size
+        )
+        self.replicated_slicer = get_row_slice_mixin("none", tp_rank=0, tp_world_size=1)
+
+    def _get_param_slicer(self, sub_child_index: int):
+        return self.replicated_slicer if sub_child_index >= 4 else self.sharded_slicer
 
 
 class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
@@ -63,27 +115,20 @@ class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
         head_count = self.linear_num_heads
         head_dim = self.linear_head_dim
 
-        self.linear_qkvb_proj = ROWMMWeight(
+        self.linear_qkvbfg_a_proj = Glm5NextMergedKdaProjection(
             in_dim=self.n_embed,
-            out_dims=[projection, projection, projection, head_count],
+            projection=projection,
+            head_count=head_count,
+            head_dim=head_dim,
             weight_names=[
                 f"{prefix}.q_proj.weight",
                 f"{prefix}.k_proj.weight",
                 f"{prefix}.v_proj.weight",
                 f"{prefix}.b_proj.weight",
+                f"{prefix}.f_a_proj.weight",
+                f"{prefix}.g_a_proj.weight",
             ],
             data_type=self.data_type_,
-            quant_method=None,
-        )
-        # f_a and g_a are replicated across TP ranks.
-        self.linear_fg_a_proj = ROWMMWeight(
-            in_dim=self.n_embed,
-            out_dims=[head_dim, head_dim],
-            weight_names=[f"{prefix}.f_a_proj.weight", f"{prefix}.g_a_proj.weight"],
-            data_type=self.data_type_,
-            quant_method=None,
-            tp_rank=0,
-            tp_world_size=1,
         )
         self.linear_fg_b_proj = ROWMMWeight(
             in_dim=head_dim,
@@ -113,10 +158,11 @@ class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
             data_type=torch.float32,
             weight_shape=(projection,),
         )
-        self.linear_o_norm = RMSNormWeight(
+        self.linear_o_norm = GatedRMSNormWeight(
             dim=head_dim,
             weight_name=f"{prefix}.o_norm.weight",
             data_type=self.data_type_,
+            activation="sigmoid",
         )
         self.linear_o_proj = COLMMWeight(
             in_dim=projection,

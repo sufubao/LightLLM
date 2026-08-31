@@ -33,7 +33,26 @@ class Glm5NextNsaInfer(NsaInfer):
         )
         k = layer_weight.wk_proj_.mm(hidden_states.to(q_lora.dtype))
         k = layer_weight.k_norm_(k, eps=self.eps)
-        return self._rotate_activation(q), self._rotate_activation(k), k
+        return q, k, k
+
+    def _quantize_indexer_activation(self, value: torch.Tensor):
+        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import (
+            hadamard_transform_quant_fp8,
+        )
+
+        assert self.block_size == 128 and self.scale_fmt == "ue8m0"
+        return hadamard_transform_quant_fp8(
+            value, scale=self.index_head_dim**-0.5
+        )
+
+    def _scale_indexer_weights(
+        self, weights: torch.Tensor, q_scale: torch.Tensor
+    ) -> torch.Tensor:
+        from lightllm.models.deepseek3_2.triton_kernel.indexer_weight_scale import (
+            scale_indexer_weights_,
+        )
+
+        return scale_indexer_weights_(weights, q_scale, self.index_n_heads_scale)
 
     def _get_indices(self, hidden_states, q_lora, infer_state, att_state, layer_weight):
         # GLM stores weights_proj in FP32, so its activation must match before
@@ -175,26 +194,32 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         input = input.view(-1, self.embed_dim_)
         if not infer_state.use_replicated_attention_ep:
             input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        projected = layer_weight.linear_qkvb_proj.mm(input)
+        projected = layer_weight.linear_qkvbfg_a_proj.mm(input)
         qkv_size = 3 * self.tp_linear_projection_size
-        mixed_qkv, raw_beta = projected.split(
-            [qkv_size, self.tp_linear_num_heads], dim=-1
+        mixed_qkv, raw_beta, f_a, g_a = projected.split(
+            [
+                qkv_size,
+                self.tp_linear_num_heads,
+                self.linear_head_dim,
+                self.linear_head_dim,
+            ],
+            dim=-1,
         )
-        fg_a = layer_weight.linear_fg_a_proj.mm(input)
-        f_a, g_a = fg_a.split(self.linear_head_dim, dim=-1)
         raw_gate, norm_gate = layer_weight.project_kda_fg_b(f_a, g_a)
         return mixed_qkv, raw_gate, raw_beta, norm_gate
 
     def _kda_post(self, core_output, norm_gate, infer_state, layer_weight):
         tokens = norm_gate.shape[0]
         core_output = core_output.view(-1, self.linear_head_dim)
-        norm_gate = norm_gate.contiguous().view(-1, self.linear_head_dim)
+        norm_gate = norm_gate.view(
+            tokens, self.tp_linear_num_heads, self.linear_head_dim
+        )
         output = layer_weight.linear_o_norm(
             input=core_output,
+            gate_value=norm_gate,
             eps=self.eps_,
             alloc_func=self.alloc_tensor,
         )
-        output.mul_(norm_gate.float().sigmoid().to(output.dtype))
         output = layer_weight.linear_o_proj.mm(output.view(tokens, -1))
         if infer_state.use_replicated_attention_ep:
             all_reduce(output, group=infer_state.dist_group)

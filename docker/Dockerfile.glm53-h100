@@ -108,13 +108,13 @@ LABEL org.opencontainers.image.created="${OCI_CREATED}" \
       org.opencontainers.image.revision="${OCI_REVISION}" \
       org.opencontainers.image.source="${OCI_SOURCE}" \
       org.opencontainers.image.version="${OCI_VERSION}" \
-      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100/H200 TP8 512K text" \
+      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100/H200 TP8 optimized text" \
       org.opencontainers.image.base.name="${BASE_NAME}" \
       org.opencontainers.image.base.digest="${BASE_DIGEST}" \
       ai.lightllm.model="GLM-5.3-Flash" \
       ai.lightllm.accelerator="NVIDIA H100/H200" \
       ai.lightllm.tensor-parallel-size="8" \
-      ai.lightllm.profile="text-512k-tp8-mtp4-c256-no-prompt-cache" \
+      ai.lightllm.profile="text-16k256-tp8-kpool-c256-no-prompt-cache" \
       ai.lightllm.security-profile="flattened-no-sglang-server-components"
 
 ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -137,7 +137,6 @@ ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sb
     LIGHTLLM_VOCAB_PARALLEL_GREEDY=1 \
     LIGHTLLM_SYMM_MEM_OUT_OF_PLACE=1 \
     LIGHTLLM_LOG_LEVEL=warning \
-    LIGHTLLM_ENABLE_FAST_MTP_KDA=1 \
     NCCL_CUMEM_ENABLE=1 \
     NCCL_NVLS_ENABLE=1 \
     CUDA_DEVICE_MAX_CONNECTIONS=8 \
@@ -156,9 +155,9 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
     CMD /opt/sglang/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/v1/models', timeout=3).read()" || exit 1
 
-# Exact 512K-input/1K-output text profile validated on an eight-H100 80 GB
-# node. The request queue accepts 256 clients; one 512K request is GPU-resident
-# at a time. MTP accelerates the 1K-token decode phase.
+# Exact 16K-input/256-output profile validated on an eight-H100 80 GB node.
+# The larger KV capacity keeps a 64-request prompt wave resident, and decode
+# CUDA graphs cover batches through 128.
 CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--model_dir", "/model", \
      "--model_name", "glm-5.3-flash", \
@@ -167,26 +166,23 @@ CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
      "--port", "8002", \
      "--httpserver_workers", "16", \
      "--mem_fraction", ".90", \
-     "--max_total_token_num", "560000", \
+     "--max_total_token_num", "1120000", \
      "--running_max_req_size", "256", \
      "--max_req_total_len", "532480", \
      "--batch_max_tokens", "32768", \
      "--chunked_prefill_size", "32768", \
      "--linear_att_ssm_data_type", "bfloat16", \
      "--linear_att_cache_size", "256", \
-     "--graph_max_batch_size", "1", \
-     "--disable_cudagraph", \
+     "--graph_max_batch_size", "128", \
+     "--graph_split_batch_size", "8", \
+     "--graph_grow_step_size", "8", \
+     "--graph_max_len_in_batch", "32768", \
      "--disable_flashinfer_allreduce", \
      "--enable_fused_shared_experts", \
      "--disable_dynamic_prompt_cache", \
-     "--disable_aggressive_schedule", \
      "--router_max_wait_tokens", "64", \
      "--disable_vision", \
      "--cache_capacity", "64", \
      "--schedule_time_interval", "0.001", \
-     "--prefill_coalesce_interval", "0.5", \
-     "--mtp_mode", "eagle_with_att", \
-     "--mtp_step", "4", \
-     "--mtp_draft_model_dir", "/model", \
      "--reasoning_parser", "glm45", \
      "--tool_call_parser", "glm47"]

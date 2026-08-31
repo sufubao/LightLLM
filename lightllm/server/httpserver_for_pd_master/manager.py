@@ -892,18 +892,14 @@ class PDManager:
         # total_token_usage_rate 已排除可驱逐 Radix token，因此下面两项分别表示
         # 当前可驱逐缓存量和运行中请求之外还能留给缓存的容量。
         total_tokens = int(
-            sum(
-                max(0, status.radix_cache_total_tokens - status.radix_cache_refed_tokens)
-                for status in statuses
-            )
+            sum(max(0, status.radix_cache_total_tokens - status.radix_cache_refed_tokens) for status in statuses)
             * share_ratio
         )
         capacity_tokens = int(
             sum(
                 max(
                     0,
-                    status.radix_cache_capacity_tokens
-                    * (1.0 - min(max(status.total_token_usage_rate, 0.0), 1.0)),
+                    status.radix_cache_capacity_tokens * (1.0 - min(max(status.total_token_usage_rate, 0.0), 1.0)),
                 )
                 for status in statuses
             )

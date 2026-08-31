@@ -117,12 +117,15 @@ def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
 def _tools_to_chat(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     chat_tools = []
     for tool in tools:
+        if not isinstance(tool, dict):
+            raise ValueError("tools entries must be objects")
         if tool.get("type") != "function":
-            logger.warning("Ignoring unsupported tool type: %s", tool.get("type"))
-            continue
+            raise ValueError(f"Unsupported tool type: {tool.get('type')}; only function tools are supported")
         if "function" in tool:
             chat_tools.append(tool)
             continue
+        if not tool.get("name"):
+            raise ValueError("Function tools require a name")
         chat_tools.append(
             {
                 "type": "function",
@@ -130,6 +133,7 @@ def _tools_to_chat(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "name": tool.get("name"),
                     "description": tool.get("description"),
                     "parameters": tool.get("parameters"),
+                    "strict": tool.get("strict"),
                 },
             }
         )
@@ -163,9 +167,15 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
     if truncation not in (None, "disabled"):
         raise ValueError("Only truncation='disabled' is supported")
 
-    effort = (body.get("reasoning") or {}).get("effort")
-    if effort is not None:
-        raise ValueError("reasoning.effort is not supported")
+    reasoning = body.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, dict):
+        raise ValueError("'reasoning' must be an object")
+    reasoning = reasoning or {}
+    effort = reasoning.get("effort")
+    if effort not in (None, "none", "minimal", "low", "medium", "high", "xhigh"):
+        raise ValueError("reasoning.effort must be one of: none, minimal, low, medium, high, xhigh")
+    if reasoning.get("summary") is not None or reasoning.get("generate_summary") is not None:
+        raise ValueError("reasoning summaries are not supported")
 
     messages: List[Dict[str, Any]] = []
     if body.get("instructions"):
@@ -197,6 +207,9 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         "stream": bool(body.get("stream")),
         "n": 1,
     }
+    if chat["stream"]:
+        # The Responses bridge needs the final Chat Completions usage chunk.
+        chat["stream_options"] = {"include_usage": True}
     for src, dst in (
         ("temperature", "temperature"),
         ("top_p", "top_p"),
@@ -212,9 +225,16 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
     tool_choice = body.get("tool_choice")
     if tool_choice is not None:
         if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            if not tool_choice.get("name"):
+                raise ValueError("Function tool_choice requires a name")
             chat["tool_choice"] = {"type": "function", "function": {"name": tool_choice.get("name")}}
+        elif isinstance(tool_choice, dict):
+            raise ValueError(f"Unsupported tool_choice type: {tool_choice.get('type')}")
         else:
             chat["tool_choice"] = tool_choice
+
+    if effort is not None:
+        chat["reasoning_effort"] = effort
 
     response_format = _text_format_to_response_format(body)
     if response_format:
@@ -359,6 +379,7 @@ async def _openai_sse_to_responses_events(
 
     output_index = -1
     current: Optional[tuple] = None
+    tool_state: Dict[int, Dict[str, Any]] = {}
     finish_reason = None
     usage: Dict[str, Any] = {}
     failed_error: Optional[Dict[str, Any]] = None
@@ -373,7 +394,13 @@ async def _openai_sse_to_responses_events(
             text = item["content"][0]["text"]
             yield event(
                 "response.output_text.done",
-                {"item_id": item["id"], "output_index": output_index, "content_index": 0, "text": text},
+                {
+                    "item_id": item["id"],
+                    "output_index": output_index,
+                    "content_index": 0,
+                    "text": text,
+                    "logprobs": [],
+                },
             )
             yield event(
                 "response.content_part.done",
@@ -503,30 +530,26 @@ async def _openai_sse_to_responses_events(
                         "output_index": output_index,
                         "content_index": 0,
                         "delta": content_piece,
+                        "logprobs": [],
                     },
                 )
 
             for tc in delta.get("tool_calls") or []:
                 fn = tc.get("function") or {}
-                if fn.get("name"):
-                    item = {
-                        "type": "function_call",
+                state = tool_state.setdefault(
+                    tc.get("index", 0),
+                    {
                         "id": f"fc_{uuid.uuid4().hex}",
-                        "call_id": tc.get("id") or f"call_{uuid.uuid4().hex[:24]}",
-                        "name": fn["name"],
+                        "call_id": None,
+                        "name": None,
                         "arguments": "",
-                        "status": "in_progress",
-                    }
-                    for e in open_item("function_call", item):
-                        yield e
-                args = fn.get("arguments")
-                if args and current is not None and current[0] == "function_call":
-                    item = current[1]
-                    item["arguments"] += args
-                    yield event(
-                        "response.function_call_arguments.delta",
-                        {"item_id": item["id"], "output_index": output_index, "delta": args},
-                    )
+                    },
+                )
+                if tc.get("id"):
+                    state["call_id"] = tc["id"]
+                if fn.get("name"):
+                    state["name"] = fn["name"]
+                state["arguments"] += fn.get("arguments") or ""
         if failed_error is not None:
             break
 
@@ -539,6 +562,35 @@ async def _openai_sse_to_responses_events(
 
     for e in close_current():
         yield e
+
+    if any(not state["name"] for state in tool_state.values()):
+        response["status"] = "failed"
+        response["error"] = {"code": "server_error", "message": "Received a tool call without a function name"}
+        yield event("response.failed", {"response": response})
+        return
+
+    for state in tool_state.values():
+        item = {
+            "type": "function_call",
+            "id": state["id"],
+            "call_id": state["call_id"] or f"call_{uuid.uuid4().hex[:24]}",
+            "name": state["name"],
+            "arguments": state["arguments"],
+            "status": "in_progress",
+        }
+        for e in open_item("function_call", item):
+            yield e
+        if state["arguments"]:
+            yield event(
+                "response.function_call_arguments.delta",
+                {
+                    "item_id": item["id"],
+                    "output_index": output_index,
+                    "delta": state["arguments"],
+                },
+            )
+        for e in close_current():
+            yield e
 
     response["usage"] = _usage_to_responses(usage)
     if finish_reason == "length":
@@ -571,6 +623,12 @@ async def responses_impl(raw_request: Request) -> Response:
     if body.get("background"):
         return create_error_response(
             HTTPStatus.BAD_REQUEST, "background responses are not supported", param="background"
+        )
+    if body.get("store"):
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "stored responses are not supported (this server is stateless)",
+            param="store",
         )
 
     try:

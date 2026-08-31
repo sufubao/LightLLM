@@ -164,7 +164,81 @@ def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
     assert metric_client.counters == ["lightllm_request_failure"]
 
 
-def test_safe_stream_reports_busy_error_after_first_chunk():
+def test_anthropic_value_error_uses_anthropic_envelope(monkeypatch):
+    metric_client = _MetricClient()
+    monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+    monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
+
+    async def anthropic_messages_impl(_request):
+        raise ValueError("invalid image")
+
+    monkeypatch.setattr(api_anthropic, "anthropic_messages_impl", anthropic_messages_impl)
+
+    response = asyncio.run(api_http.anthropic_messages(None))
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "invalid image"},
+    }
+    assert metric_client.counters == ["lightllm_request_failure"]
+
+
+def test_anthropic_unexpected_error_uses_anthropic_envelope(monkeypatch):
+    metric_client = _MetricClient()
+    monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+    monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
+
+    async def anthropic_messages_impl(_request):
+        raise RuntimeError("backend failed")
+
+    monkeypatch.setattr(api_anthropic, "anthropic_messages_impl", anthropic_messages_impl)
+
+    response = asyncio.run(api_http.anthropic_messages(None))
+
+    assert response.status_code == 500
+    assert json.loads(response.body) == {
+        "type": "error",
+        "error": {"type": "api_error", "message": "backend failed"},
+    }
+    assert metric_client.counters == ["lightllm_request_failure"]
+
+
+@pytest.mark.parametrize(
+    ("route_name", "impl_name", "api_request"),
+    [
+        (
+            "chat_completions",
+            "chat_completions_impl",
+            api_http.ChatCompletionRequest(messages=[{"role": "user", "content": "hi"}]),
+        ),
+        (
+            "completions",
+            "completions_impl",
+            api_http.CompletionRequest(model="m", prompt="hi"),
+        ),
+    ],
+)
+def test_openai_routes_wrap_unexpected_errors(monkeypatch, route_name, impl_name, api_request):
+    metric_client = _MetricClient()
+    monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+    monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
+
+    async def fail(_request, _raw_request):
+        raise RuntimeError("backend failed")
+
+    monkeypatch.setattr(api_http, impl_name, fail)
+    response = asyncio.run(getattr(api_http, route_name)(api_request, None))
+
+    assert response.status_code == 500
+    assert json.loads(response.body)["error"]["type"] == "InternalServerError"
+    assert metric_client.counters == ["lightllm_request_failure"]
+
+
+def test_safe_stream_reports_busy_error_after_first_chunk(monkeypatch):
+    metric_client = _MetricClient()
+    monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+
     async def run():
         async def generate():
             yield "first"
@@ -178,6 +252,7 @@ def test_safe_stream_reports_busy_error_after_first_chunk():
     assert chunks[0] == "first"
     assert error["error"]["type"] == "server_error"
     assert error["error"]["code"] == "stream_error"
+    assert metric_client.counters == ["lightllm_request_failure"]
 
 
 def test_safe_stream_propagates_busy_error_before_first_chunk():
@@ -192,3 +267,22 @@ def test_safe_stream_propagates_busy_error_before_first_chunk():
                 pass
 
     asyncio.run(run())
+
+
+def test_safe_stream_reports_unexpected_error(monkeypatch):
+    metric_client = _MetricClient()
+    monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+
+    async def run():
+        async def generate():
+            yield "first"
+            raise RuntimeError("backend failed")
+
+        return [item async for item in api_openai._safe_stream_wrapper(generate())]
+
+    chunks = asyncio.run(run())
+    error = json.loads(chunks[1].removeprefix("data: "))
+
+    assert chunks[0] == "first"
+    assert error["error"] == {"message": "backend failed", "type": "InternalServerError"}
+    assert metric_client.counters == ["lightllm_request_failure"]

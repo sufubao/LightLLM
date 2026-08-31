@@ -46,6 +46,51 @@ def test_function_call_arguments_done_includes_name():
     assert done["name"] == "get_weather"
 
 
+def test_interleaved_function_call_arguments_stay_with_their_call():
+    events = _collect_events(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_a",
+                                "function": {"name": "fn_a", "arguments": '{"a":'},
+                            },
+                            {
+                                "index": 1,
+                                "id": "call_b",
+                                "function": {"name": "fn_b", "arguments": '{"b":'},
+                            },
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 1, "function": {"arguments": "2}"}},
+                            {"index": 0, "function": {"arguments": "1}"}},
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+    )
+
+    done = {
+        event["name"]: event["arguments"]
+        for event in events
+        if event["type"] == "response.function_call_arguments.done"
+    }
+    assert done == {"fn_a": '{"a":1}', "fn_b": '{"b":2}'}
+
+
 def test_content_array_function_output_is_preserved():
     request = _responses_to_chat_request(
         {
@@ -252,8 +297,12 @@ def test_streamed_message_adds_text_content_once():
 
     item_added = next(event for event in events if event["type"] == "response.output_item.added")
     part_added = next(event for event in events if event["type"] == "response.content_part.added")
+    text_delta = next(event for event in events if event["type"] == "response.output_text.delta")
+    text_done = next(event for event in events if event["type"] == "response.output_text.done")
     assert item_added["item"]["content"] == []
     assert part_added["part"] == {"type": "output_text", "text": "", "annotations": []}
+    assert text_delta["logprobs"] == []
+    assert text_done["logprobs"] == []
 
 
 def test_route_maps_downstream_value_error_to_bad_request(monkeypatch):
@@ -270,6 +319,39 @@ def test_route_maps_downstream_value_error_to_bad_request(monkeypatch):
 
     response = asyncio.run(api_http.openai_responses(None))
     assert response.status_code == 400
+
+
+def test_route_maps_unexpected_error_to_internal_server_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from lightllm.server import api_http, api_responses
+
+    async def raise_runtime_error(raw_request):
+        raise RuntimeError("backend failed")
+
+    monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
+    monkeypatch.setattr(api_http.g_objs, "metric_client", SimpleNamespace(counter_inc=lambda *args: None))
+    monkeypatch.setattr(api_responses, "responses_impl", raise_runtime_error)
+
+    response = asyncio.run(api_http.openai_responses(None))
+    assert response.status_code == 500
+
+
+def test_store_is_rejected_instead_of_silently_ignored(monkeypatch):
+    from types import SimpleNamespace
+
+    from lightllm.server import api_http
+    from lightllm.server.api_responses import responses_impl
+
+    class RawRequest:
+        async def json(self):
+            return {"model": "m", "input": "hi", "store": True}
+
+    monkeypatch.setattr(api_http.g_objs, "metric_client", SimpleNamespace(counter_inc=lambda *args: None))
+    response = asyncio.run(responses_impl(RawRequest()))
+
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"]["param"] == "store"
 
 
 @pytest.mark.parametrize(
@@ -303,11 +385,54 @@ def test_stream_failure_does_not_complete_partial_item(partial_payload):
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "none", "minimal", "xhigh"])
-def test_reasoning_effort_is_rejected(effort):
-    with pytest.raises(ValueError, match="reasoning.effort is not supported"):
-        _responses_to_chat_request({"input": "hi", "reasoning": {"effort": effort}})
+def test_reasoning_effort_is_forwarded(effort):
+    request = _responses_to_chat_request({"input": "hi", "reasoning": {"effort": effort}})
+
+    assert request["reasoning_effort"] == effort
+    assert ChatCompletionRequest(**request).reasoning_effort == effort
+
+
+def test_invalid_reasoning_effort_is_rejected():
+    with pytest.raises(ValueError, match="reasoning.effort"):
+        _responses_to_chat_request({"input": "hi", "reasoning": {"effort": "extreme"}})
+
+
+def test_reasoning_summary_is_rejected_explicitly():
+    with pytest.raises(ValueError, match="summaries"):
+        _responses_to_chat_request({"input": "hi", "reasoning": {"summary": "auto"}})
+
+
+def test_unsupported_tool_type_is_rejected_explicitly():
+    with pytest.raises(ValueError, match="only function tools"):
+        _responses_to_chat_request({"input": "hi", "tools": [{"type": "web_search"}]})
+
+
+def test_function_tool_strict_is_preserved():
+    request = _responses_to_chat_request(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                    "strict": True,
+                }
+            ],
+        }
+    )
+
+    tool = ChatCompletionRequest(**request).tools[0]
+    assert tool.function.name == "lookup"
+    assert tool.function.strict is True
 
 
 def test_automatic_truncation_is_rejected():
     with pytest.raises(ValueError, match="truncation"):
         _responses_to_chat_request({"input": "hi", "truncation": "auto"})
+
+
+def test_streaming_bridge_requests_downstream_usage():
+    request = _responses_to_chat_request({"input": "hi", "stream": True})
+
+    assert request["stream_options"] == {"include_usage": True}

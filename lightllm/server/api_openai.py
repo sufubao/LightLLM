@@ -63,6 +63,23 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
+def _record_request_failure_metric():
+    try:
+        from .api_http import g_objs
+
+        if g_objs.metric_client is not None:
+            g_objs.metric_client.counter_inc("lightllm_request_failure")
+    except Exception:
+        logger.warning("Failed to record lightllm_request_failure metric", exc_info=True)
+
+
+def _stream_error_chunk(message: str, err_type: str, code: Optional[Union[int, str]] = None):
+    error = {"message": message, "type": err_type}
+    if code is not None:
+        error["code"] = code
+    return f"data: {json.dumps({'error': error}, ensure_ascii=False)}\n\n"
+
+
 async def _safe_stream_wrapper(stream_generator):
     """Convert generation errors to SSE events after the response has started."""
     first_chunk_sent = False
@@ -71,21 +88,24 @@ async def _safe_stream_wrapper(stream_generator):
             first_chunk_sent = True
             yield item
     except ValueError as e:
-        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
-        yield f"data: {error_data}\n\n"
+        _record_request_failure_metric()
+        yield _stream_error_chunk(str(e), "invalid_request_error")
     except ServerBusyError as e:
         if not first_chunk_sent:
             raise
         logger.error("Generation interrupted after the stream started: %s", e.message)
-        error_data = json.dumps(
-            {"error": {"message": e.message, "type": "server_error", "code": "stream_error"}},
-            ensure_ascii=False,
-        )
-        yield f"data: {error_data}\n\n"
+        _record_request_failure_metric()
+        yield _stream_error_chunk(e.message, "server_error", "stream_error")
     except ClientDisconnected as e:
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
         return
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("Generation failed after the streaming response was created: %s", e, exc_info=True)
+        _record_request_failure_metric()
+        yield _stream_error_chunk(str(e), "InternalServerError")
 
 
 def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
@@ -98,6 +118,58 @@ def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
     for field in response_nulls:
         d[field] = None
     return json.dumps(d, ensure_ascii=False)
+
+
+class _StopSequenceFilter:
+    """Hide stop strings while preserving text that only partially matches one."""
+
+    def __init__(self, stop_sequences: List[str]):
+        self.stop_sequences = [sequence for sequence in stop_sequences if sequence]
+        self.pending = ""
+        self.stopped = False
+
+    def process(self, text: str, *, final: bool = False) -> str:
+        if self.stopped:
+            return ""
+
+        self.pending += text
+        stop_index = None
+        for stop_sequence in self.stop_sequences:
+            index = self.pending.find(stop_sequence)
+            if index != -1 and (stop_index is None or index < stop_index):
+                stop_index = index
+
+        if stop_index is not None:
+            output = self.pending[:stop_index]
+            self.pending = ""
+            self.stopped = True
+            return output
+
+        if final or not self.stop_sequences:
+            output = self.pending
+            self.pending = ""
+            return output
+
+        partial_match_length = 0
+        for stop_sequence in self.stop_sequences:
+            max_length = min(len(self.pending), len(stop_sequence) - 1)
+            for length in range(max_length, 0, -1):
+                if self.pending.endswith(stop_sequence[:length]):
+                    partial_match_length = max(partial_match_length, length)
+                    break
+
+        if partial_match_length == 0:
+            output = self.pending
+            self.pending = ""
+            return output
+
+        output = self.pending[:-partial_match_length]
+        self.pending = self.pending[-partial_match_length:]
+        return output
+
+
+def _remove_stop_sequences(text: str, stop_sequences: List[str]) -> str:
+    return _StopSequenceFilter(stop_sequences).process(text, final=True)
 
 
 def _process_tool_call_id(
@@ -396,12 +468,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         prompt_tokens = prompt_tokens_dict[sub_ids[0]]
         completion_tokens = sum(count_output_tokens_dict[sub_req_id] for sub_req_id in sub_ids)
         cached_tokens = prompt_cache_len_dict.get(sub_ids[0], 0)
-        reasoning_tokens = sum(reasoning_parser_dict[sub_req_id].reasoning_tokens for sub_req_id in sub_ids)
+        reasoning_tokens = (
+            sum(reasoning_parser_dict[sub_req_id].reasoning_tokens for sub_req_id in sub_ids) if reasoning_parser else 0
+        )
 
         for i in range(request.n):
             sub_req_id = sub_ids[i]
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
+            if finish_reason == "stop":
+                text = _remove_stop_sequences(text, sampling_params.stop_sequences.to_strings())
 
             # Handle reasoning content
             reasoning_text = None
@@ -486,13 +562,19 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     _choice_nulls = ("logprobs", "token_ids", "finish_reason")
     _first_choice_nulls = ("logprobs", "finish_reason")
     _final_choice_nulls = ("logprobs", "token_ids", "stop_reason")
-    _first_resp_nulls = ("prompt_token_ids",)
+    include_usage = bool(request.stream_options and request.stream_options.include_usage)
+    _stream_resp_nulls = ("usage",) if include_usage else ()
+    _first_resp_nulls = ("prompt_token_ids",) + _stream_resp_nulls
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
         has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
+        stop_sequences = sampling_params.stop_sequences.to_strings()
+        stop_filters: Dict[int, _StopSequenceFilter] = collections.defaultdict(
+            lambda: _StopSequenceFilter(stop_sequences)
+        )
         from .req_id_generator import convert_sub_id_to_group_id
 
         prompt_tokens = 0
@@ -505,8 +587,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
 
-            delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
+            delta = stop_filters[sub_req_id].process(request_output, final=current_finish_reason is not None)
 
             # Emit the initial role-only chunk once per choice, as required by the
             # OpenAI SSE spec: role appears only in the first delta with content="".
@@ -543,7 +625,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             choices=[choice_data],
                             model=request.model,
                         )
-                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, _stream_resp_nulls)}\n\n"
                     else:
                         delta = reasoning_text + (delta or "")
 
@@ -566,7 +648,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+                    yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, _stream_resp_nulls)}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
@@ -629,7 +711,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             choices=[head_choice],
                             model=request.model,
                         )
-                        yield f"data: {_serialize_sse_chunk(head_chunk, _choice_nulls)}\n\n"
+                        yield f"data: {_serialize_sse_chunk(head_chunk, _choice_nulls, _stream_resp_nulls)}\n\n"
 
                         for arg_delta in _split_tool_argument_delta(call_item.parameters):
                             arg_tool_call = ToolCall(
@@ -647,7 +729,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 choices=[arg_choice],
                                 model=request.model,
                             )
-                            yield f"data: {_serialize_sse_chunk(arg_chunk, _choice_nulls)}\n\n"
+                            yield f"data: {_serialize_sse_chunk(arg_chunk, _choice_nulls, _stream_resp_nulls)}\n\n"
                     else:
                         tool_call = ToolCall(
                             id=tool_call_id if is_tool_head else None,
@@ -673,7 +755,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             choices=[choice_data],
                             model=request.model,
                         )
-                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, _stream_resp_nulls)}\n\n"
             else:
                 if delta:
                     # If this is the final token, merge content with finish_reason
@@ -690,7 +772,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             model=request.model,
                             choices=[stream_choice],
                         )
-                        yield f"data: {_serialize_sse_chunk(stream_resp, _final_choice_nulls)}\n\n"
+                        yield f"data: {_serialize_sse_chunk(stream_resp, _final_choice_nulls, _stream_resp_nulls)}\n\n"
                         # Skip the separate final-chunk logic below
                         continue
                     else:
@@ -704,7 +786,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             model=request.model,
                             choices=[stream_choice],
                         )
-                        yield f"data: {_serialize_sse_chunk(stream_resp, _choice_nulls)}\n\n"
+                        yield f"data: {_serialize_sse_chunk(stream_resp, _choice_nulls, _stream_resp_nulls)}\n\n"
 
             # Emit a per-choice final chunk with finish_reason (for tool_calls path
             # or when no delta was emitted alongside finish_reason).
@@ -735,7 +817,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 model=request.model,
                                 choices=[flush_choice],
                             )
-                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
+                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls, _stream_resp_nulls)}\n\n"
                         if flush_text:
                             flush_choice = ChatCompletionStreamResponseChoice(
                                 index=choice_index,
@@ -748,7 +830,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 model=request.model,
                                 choices=[flush_choice],
                             )
-                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
+                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls, _stream_resp_nulls)}\n\n"
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 final_choice = ChatCompletionStreamResponseChoice(
@@ -762,7 +844,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     model=request.model,
                     choices=[final_choice],
                 )
-                yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls)}\n\n"
+                yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls, _stream_resp_nulls)}\n\n"
 
         reasoning_parser = get_env_start_args().reasoning_parser
         completion_tokens_details = None
@@ -776,14 +858,15 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
             completion_tokens_details=completion_tokens_details,
         )
-        usage_chunk = ChatCompletionStreamResponse(
-            id=chat_completion_id,
-            created=created_time,
-            choices=[],  # Empty choices array as per OpenAI spec
-            model=request.model,
-            usage=usage,
-        )
-        yield f"data: {json.dumps(usage_chunk.model_dump(exclude_none=True), ensure_ascii=False)}\n\n"
+        if include_usage:
+            usage_chunk = ChatCompletionStreamResponse(
+                id=chat_completion_id,
+                created=created_time,
+                choices=[],  # Empty choices array as per OpenAI spec
+                model=request.model,
+                usage=usage,
+            )
+            yield f"data: {json.dumps(usage_chunk.model_dump(exclude_none=True), ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n".encode("utf-8")
 
@@ -934,6 +1017,7 @@ async def _handle_streaming_completion(
 ) -> Response:
     from .api_http import g_objs
 
+    include_usage = bool(request.stream_options and request.stream_options.include_usage)
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
@@ -944,6 +1028,10 @@ async def _handle_streaming_completion(
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
+        stop_sequences = sampling_params.stop_sequences.to_strings()
+        stop_filters: Dict[int, _StopSequenceFilter] = collections.defaultdict(
+            lambda: _StopSequenceFilter(stop_sequences)
+        )
 
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -955,7 +1043,7 @@ async def _handle_streaming_completion(
             if finish_status.is_finished():
                 current_finish_reason = finish_status.get_finish_reason()
 
-            output_text = request_output
+            output_text = stop_filters[sub_req_id].process(request_output, final=current_finish_reason is not None)
             if request.echo and metadata.get("is_first_token", False):
                 prompt_str = prompt
                 if isinstance(prompt, list):
@@ -974,7 +1062,10 @@ async def _handle_streaming_completion(
                 model=request.model,
                 choices=[stream_choice],
             )
-            yield f"data: {json.dumps(stream_resp.model_dump(), ensure_ascii=False)}\n\n"
+            stream_data = stream_resp.model_dump()
+            if not include_usage:
+                stream_data.pop("usage", None)
+            yield f"data: {json.dumps(stream_data, ensure_ascii=False)}\n\n"
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
@@ -982,14 +1073,15 @@ async def _handle_streaming_completion(
             total_tokens=prompt_tokens + completion_tokens,
             prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
         )
-        usage_chunk = CompletionStreamResponse(
-            id=group_request_id,
-            created=created_time,
-            choices=[],  # Empty choices array as per OpenAI spec
-            model=request.model,
-            usage=usage,
-        )
-        yield f"data: {json.dumps(usage_chunk.model_dump(), ensure_ascii=False)}\n\n"
+        if include_usage:
+            usage_chunk = CompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                choices=[],  # Empty choices array as per OpenAI spec
+                model=request.model,
+                usage=usage,
+            )
+            yield f"data: {json.dumps(usage_chunk.model_dump(), ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
 
@@ -1039,16 +1131,7 @@ async def _collect_generation_results(
         finish_reason = finish_reasons.get(sub_req_id)
 
         if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
-            for stop_str in sampling_params.stop_sequences.to_strings():
-                stop_index = final_text.rfind(
-                    stop_str,
-                    max(0, len(final_text) - len(stop_str) - 20),
-                    len(final_text),
-                )
-                if stop_index != -1:
-                    logger.debug("removed stop sequence in tail: '%s'", final_text[stop_index:])
-                    final_text = final_text[:stop_index]
-                    break
+            final_text = _remove_stop_sequences(final_text, sampling_params.stop_sequences.to_strings())
 
         results.append(
             {

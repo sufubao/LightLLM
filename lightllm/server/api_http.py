@@ -37,6 +37,7 @@ from typing import AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
@@ -152,6 +153,35 @@ class _AccessLogMiddleware:
 
 
 app.add_middleware(_AccessLogMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    if not errors:
+        return create_error_response(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            str(exc),
+            err_type="invalid_request_error",
+        )
+
+    error = errors[0]
+    location = error.get("loc", ())
+    param_parts = [str(part) for part in location if part != "body"]
+    param = ".".join(param_parts) or None
+    if error.get("type") == "missing" and param is not None:
+        message = f"Missing required parameter: '{param}'."
+    elif param is not None:
+        message = f"Invalid value for '{param}': {error.get('msg', 'Request validation failed')}"
+    else:
+        message = error.get("msg", "Request validation failed")
+
+    return create_error_response(
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        message,
+        err_type="invalid_request_error",
+        param=param,
+    )
 
 
 @app.exception_handler(ServerBusyError)
@@ -378,6 +408,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except Exception as e:
+        logger.error("Chat completion failed: %s", e, exc_info=True)
+        return create_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
     return resp
 
 
@@ -398,6 +431,9 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except Exception as e:
+        logger.error("Completion failed: %s", e, exc_info=True)
+        return create_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
     return resp
 
 
@@ -411,6 +447,9 @@ async def anthropic_messages(raw_request: Request) -> Response:
 
     try:
         return await anthropic_messages_impl(raw_request)
+    except ValueError as e:
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
         logger.warning(str(e))
         g_objs.metric_client.counter_inc("lightllm_request_failure")
@@ -418,6 +457,10 @@ async def anthropic_messages(raw_request: Request) -> Response:
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except Exception as e:
+        logger.error("Anthropic message request failed: %s", e, exc_info=True)
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
 
 @app.post("/v1/messages/count_tokens")
@@ -454,7 +497,7 @@ async def openai_responses(raw_request: Request) -> Response:
         return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+        return create_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
 
 @app.get("/v1/models", response_model=ModelListResponse)

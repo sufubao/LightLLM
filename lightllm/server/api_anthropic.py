@@ -115,21 +115,55 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     """
     adapter = get_anthropic_messages_adapter()
 
-    # LiteLLM's Anthropic request schema does not accept the native
-    # ``thinking`` parameter.  Translate it to the LightLLM controls before
-    # handing the request to LiteLLM, then remove the Anthropic-only field.
-    # This also makes the native Anthropic spelling behave the same as the
-    # existing ``extra_body.chat_template_kwargs`` escape hatch.
+    # Translate Anthropic-native generation controls before handing the request
+    # to LiteLLM. Older supported LiteLLM versions do not consistently map them.
     anthropic_body = dict(anthropic_body)
     thinking = anthropic_body.pop("thinking", None)
-    if isinstance(thinking, dict) and thinking.get("type") in {"enabled", "disabled"}:
+    output_config = anthropic_body.pop("output_config", None)
+    thinking_enabled = None
+    if thinking is not None:
+        if not isinstance(thinking, dict):
+            raise ValueError("thinking must be an object")
+        thinking_type = thinking.get("type")
+        if thinking_type not in {"adaptive", "enabled", "disabled"}:
+            raise ValueError(f"Unsupported thinking.type: {thinking_type}")
+        if thinking.get("display") == "omitted":
+            raise ValueError("thinking.display='omitted' is not supported")
+        thinking_enabled = thinking_type != "disabled"
+
+    if output_config is not None and not isinstance(output_config, dict):
+        raise ValueError("output_config must be an object")
+
+    if thinking_enabled is not None or output_config:
         extra_body = dict(anthropic_body.get("extra_body") or {})
         chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
-        chat_template_kwargs["enable_thinking"] = thinking["type"] == "enabled"
-        extra_body["chat_template_kwargs"] = chat_template_kwargs
-        # Anthropic has a separate thinking content block, so make sure the
-        # downstream response keeps reasoning separate from normal text.
-        extra_body["separate_reasoning"] = True
+        if thinking_enabled is not None:
+            chat_template_kwargs["enable_thinking"] = thinking_enabled
+            extra_body["chat_template_kwargs"] = chat_template_kwargs
+            # Anthropic has a separate thinking content block, so keep reasoning
+            # separate from normal text in the downstream response.
+            extra_body["separate_reasoning"] = True
+
+        if output_config:
+            effort = output_config.get("effort")
+            if effort not in (None, "low", "medium", "high", "xhigh", "max"):
+                raise ValueError("output_config.effort must be one of: low, medium, high, xhigh, max")
+            if effort is not None:
+                if thinking_enabled is False:
+                    raise ValueError("output_config.effort cannot be used when thinking is disabled")
+                extra_body["reasoning_effort"] = effort
+
+            output_format = output_config.get("format")
+            if output_format is not None:
+                if not isinstance(output_format, dict) or output_format.get("type") != "json_schema":
+                    raise ValueError("output_config.format.type must be 'json_schema'")
+                schema = output_format.get("schema")
+                if not isinstance(schema, dict):
+                    raise ValueError("output_config.format.schema must be an object")
+                extra_body["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "response", "schema": schema, "strict": True},
+                }
         anthropic_body["extra_body"] = extra_body
 
     _replace_anthropic_pdf_documents(anthropic_body)
@@ -914,16 +948,14 @@ async def _openai_sse_to_anthropic_events(
     openai_body_iterator,
     requested_model: str,
     message_id: str,
+    tool_name_mapping: Dict[str, str] | None = None,
 ):
     """Async generator: consume OpenAI-format SSE bytes and yield
     Anthropic-format SSE event bytes.
 
-    Handles both text deltas (emitted as text_delta content blocks) and
-    tool-call deltas (emitted as tool_use content blocks whose arguments
-    stream as input_json_delta events). Anthropic's protocol opens one
-    content block at a time — when switching between a text block and a
-    tool_use block (or between tool_use blocks) the current block is
-    closed before the next is opened.
+    Handles text deltas as they arrive. Tool calls are buffered and emitted
+    after generation because OpenAI may interleave arguments for parallel
+    calls, while Anthropic content blocks must be emitted sequentially.
     """
     message_started = False
     next_content_index = 0
@@ -936,7 +968,6 @@ async def _openai_sse_to_anthropic_events(
     text_block_index = None  # Anthropic index of the active text block.
 
     # Per-tool-call state keyed by OpenAI streaming tool_calls[i].index.
-    # Each entry: {anthropic_index, id, name, started, buffered_args}
     tool_state: Dict[int, Dict[str, Any]] = {}
 
     final_stop_reason = "end_turn"
@@ -1093,96 +1124,16 @@ async def _openai_sse_to_anthropic_events(
                 state = tool_state.setdefault(
                     tc_idx,
                     {
-                        "anthropic_index": None,
                         "id": None,
                         "name": None,
-                        "started": False,
                         "buffered_args": "",
                     },
                 )
                 if tc.get("id"):
                     state["id"] = tc["id"]
                 if fn.get("name"):
-                    state["name"] = fn["name"]
-                new_args = fn.get("arguments") or ""
-
-                if not state["started"]:
-                    # Buffer args until we know the tool name (required for
-                    # content_block_start).
-                    state["buffered_args"] += new_args
-                    if not state["name"]:
-                        continue
-                    # Close whatever block is currently open (text or a
-                    # previous tool_use) before opening this one.
-                    if current_open is not None:
-                        for event in _content_block_close_events(current_open):
-                            yield event
-                    state["anthropic_index"] = next_content_index
-                    next_content_index += 1
-                    current_open = ("tool_use", state["anthropic_index"])
-                    state["started"] = True
-                    yield _sse_event(
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": state["anthropic_index"],
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": state["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
-                                "name": state["name"],
-                                "input": {},
-                            },
-                        },
-                    )
-                    if state["buffered_args"]:
-                        yield _sse_event(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": state["anthropic_index"],
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": state["buffered_args"],
-                                },
-                            },
-                        )
-                        state["buffered_args"] = ""
-                else:
-                    # Already started. A delta for this tool-call index may
-                    # arrive after a later tool-call has opened its own block.
-                    # Anthropic's protocol forbids emitting deltas against a
-                    # non-open index, so close whatever is currently open and
-                    # reopen THIS block before emitting.
-                    if new_args:
-                        if current_open is None or current_open != ("tool_use", state["anthropic_index"]):
-                            if current_open is not None:
-                                for event in _content_block_close_events(current_open):
-                                    yield event
-                            current_open = ("tool_use", state["anthropic_index"])
-                            yield _sse_event(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": state["anthropic_index"],
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": state["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
-                                        "name": state["name"],
-                                        "input": {},
-                                    },
-                                },
-                            )
-                        yield _sse_event(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": state["anthropic_index"],
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": new_args,
-                                },
-                            },
-                        )
+                    state["name"] = (tool_name_mapping or {}).get(fn["name"], fn["name"])
+                state["buffered_args"] += fn.get("arguments") or ""
 
             if finish_reason:
                 final_stop_reason = _OPENAI_TO_ANTHROPIC_STOP.get(finish_reason, "end_turn")
@@ -1191,6 +1142,49 @@ async def _openai_sse_to_anthropic_events(
     if current_open is not None:
         for event in _content_block_close_events(current_open):
             yield event
+
+    if any(not state["name"] for state in tool_state.values()):
+        yield _sse_event(
+            "error",
+            {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Received a tool call without a function name",
+                },
+            },
+        )
+        return
+
+    for state in tool_state.values():
+        block_index = next_content_index
+        next_content_index += 1
+        yield _sse_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": state["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": state["name"],
+                    "input": {},
+                },
+            },
+        )
+        if state["buffered_args"]:
+            yield _sse_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": state["buffered_args"],
+                    },
+                },
+            )
+        yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": block_index})
 
     # message_delta carries the final stop_reason and cumulative output_tokens.
     if message_started:
@@ -1281,6 +1275,9 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
 
     # Force the downstream path to stream if the client asked for stream.
     chat_dict["stream"] = is_stream
+    if is_stream:
+        # The Anthropic bridge needs the final Chat Completions usage chunk.
+        chat_dict["stream_options"] = {"include_usage": True}
 
     try:
         chat_request = ChatCompletionRequest(**chat_dict)
@@ -1301,7 +1298,10 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
 
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         anthropic_stream = _openai_sse_to_anthropic_events(
-            downstream.body_iterator, requested_model=requested_model, message_id=message_id
+            downstream.body_iterator,
+            requested_model=requested_model,
+            message_id=message_id,
+            tool_name_mapping=tool_name_mapping,
         )
         return CustomStreamingResponse(anthropic_stream, media_type="text/event-stream")
 

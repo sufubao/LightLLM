@@ -139,6 +139,50 @@ def test_native_thinking_parameter_is_forwarded():
     assert "thinking" not in chat_dict
 
 
+@pytest.mark.parametrize(
+    ("thinking", "output_config", "expected_enabled", "expected_effort"),
+    [
+        ({"type": "adaptive"}, None, True, None),
+        ({"type": "enabled", "budget_tokens": 1024}, {"effort": "low"}, True, "low"),
+        ({"type": "disabled"}, None, False, None),
+    ],
+)
+def test_anthropic_thinking_controls(thinking, output_config, expected_enabled, expected_effort):
+    body = _base_body()
+    body["thinking"] = thinking
+    if output_config is not None:
+        body["output_config"] = output_config
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["chat_template_kwargs"]["enable_thinking"] is expected_enabled
+    assert chat_dict.get("reasoning_effort") == expected_effort
+
+
+def test_anthropic_output_format_is_forwarded():
+    body = _base_body()
+    body["output_config"] = {"format": {"type": "json_schema", "schema": {"type": "object", "properties": {}}}}
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "response",
+            "schema": {"type": "object", "properties": {}},
+            "strict": True,
+        },
+    }
+
+
+def test_anthropic_invalid_thinking_type_is_rejected():
+    body = _base_body()
+    body["thinking"] = {"type": "sometimes"}
+
+    with pytest.raises(ValueError, match="thinking.type"):
+        _anthropic_to_chat_request(body)
+
+
 def test_replayed_thinking_is_preserved_through_request_validation():
     body = _tool_result_body("file contents")
     body["messages"][1]["content"].insert(
@@ -691,6 +735,41 @@ def test_anthropic_messages_impl_runs_translation_in_thread(monkeypatch):
     assert response.body == b"ok"
 
 
+def test_anthropic_streaming_bridge_requests_downstream_usage(monkeypatch):
+    captured = {}
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    def fake_translate(_body):
+        return {"model": "test-model", "messages": [{"role": "user", "content": "hi"}]}, {}
+
+    async def fake_chat_completions_impl(request, _raw_request):
+        from fastapi.responses import Response
+
+        captured["request"] = request
+        return Response("ok")
+
+    class FakeRequest:
+        async def json(self):
+            return {
+                "model": "test-model",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            }
+
+    import lightllm.server.api_openai as api_openai
+
+    monkeypatch.setattr(api_anthropic.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(api_anthropic, "_anthropic_to_chat_request", fake_translate)
+    monkeypatch.setattr(api_openai, "chat_completions_impl", fake_chat_completions_impl)
+
+    asyncio.run(api_anthropic.anthropic_messages_impl(FakeRequest()))
+
+    assert captured["request"].stream_options.include_usage is True
+
+
 def test_tool_result_image_blocks_survive_as_image_url_parts():
     body = _tool_result_body(
         [
@@ -818,12 +897,15 @@ def test_interleaved_tool_calls_do_not_emit_against_closed_block():
 
     events = asyncio.run(run())
     index_of_delta = []
+    started_indexes = set()
     currently_open = None
     for raw in events:
         lines = raw.strip().split("\n")
         etype = lines[0].split(": ", 1)[1]
         data = json.loads(lines[1].split(": ", 1)[1])
         if etype == "content_block_start":
+            assert data["index"] not in started_indexes
+            started_indexes.add(data["index"])
             currently_open = data["index"]
         elif etype == "content_block_stop":
             currently_open = None
@@ -833,6 +915,43 @@ def test_interleaved_tool_calls_do_not_emit_against_closed_block():
             ), f"delta for index {data['index']} but open block is {currently_open}"
             index_of_delta.append(data["index"])
     assert index_of_delta, "no deltas observed"
+    assert len(started_indexes) == 2
+
+
+def test_streaming_tool_name_mapping_restores_original_name():
+    async def chunks():
+        yield _chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_a",
+                        "function": {"name": "truncated_name", "arguments": "{}"},
+                    }
+                ]
+            },
+            finish_reason="tool_calls",
+        )
+        yield _chunk({}, usage={"prompt_tokens": 3, "completion_tokens": 1})
+
+    async def run():
+        return [
+            event.decode("utf-8")
+            async for event in _openai_sse_to_anthropic_events(
+                chunks(),
+                "m",
+                "msg_x",
+                {"truncated_name": "original_tool_name"},
+            )
+        ]
+
+    starts = []
+    for raw in asyncio.run(run()):
+        lines = raw.strip().split("\n")
+        if lines[0] == "event: content_block_start":
+            starts.append(json.loads(lines[1].split(": ", 1)[1])["content_block"])
+
+    assert starts[0]["name"] == "original_tool_name"
 
 
 def test_streaming_reasoning_uses_anthropic_thinking_events():

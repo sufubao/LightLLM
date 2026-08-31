@@ -47,6 +47,10 @@ class ObjType(enum.Enum):
 @dataclass
 class _PD_Client_RunStatus:
     total_token_usage_rate: float = 0.0  # pd 节点上的 token 使用率
+    radix_cache_total_tokens: int = 0
+    radix_cache_refed_tokens: int = 0
+    radix_cache_capacity_tokens: int = 0
+    report_time: float = 0.0
 
 
 @dataclass
@@ -57,6 +61,9 @@ class PD_Client_Obj:
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
+    # 节点租给当前 PD Master 的请求槽位；多 Master 之间的份额互不重叠。
+    capacity_share: Optional[int] = None
+    capacity_epoch: int = 0
     # cache-aware 选点用：当前派发到该节点且尚未产出首 token 的 prompt 字符数。
     dispatched_prompt_chars: int = 0
     # 当前派发到该节点且尚未产出首 token 的请求数。
@@ -67,6 +74,10 @@ class PD_Client_Obj:
             error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""
             logger.error(error_info)
             raise ValueError(error_info)
+        if self.capacity_share is not None and self.capacity_share < 0:
+            raise ValueError("capacity_share must be non-negative")
+        if self.capacity_epoch < 0:
+            raise ValueError("capacity_epoch must be non-negative")
         return
 
     def to_llm_url(self):

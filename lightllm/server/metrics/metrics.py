@@ -32,6 +32,9 @@ MONITOR_INFO = {
     "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
     "lightllm_gen_throughput": "Generation throughput of latest completed request (tokens/s)",
     "lightllm_num_running_reqs": "Number of running requests",
+    "lightllm_pd_master_admission_queue_size": "Number of requests waiting at the PD master admission queue",
+    "lightllm_pd_master_admission_active_slots": "Number of decode slots leased by the PD master",
+    "lightllm_pd_master_admission_cold_capacity": "Current cold-request slot capacity at the PD master",
 }
 
 
@@ -111,6 +114,9 @@ class Monitor:
         self.create_gauge("lightllm_cache_hit_rate")
         self.create_gauge("lightllm_gen_throughput")
         self.create_gauge("lightllm_num_running_reqs")
+        self.create_gauge("lightllm_pd_master_admission_queue_size")
+        self.create_gauge("lightllm_pd_master_admission_active_slots")
+        self.create_gauge("lightllm_pd_master_admission_cold_capacity")
 
     def create_histogram(self, name, buckets, labelnames=None):
         all_labels = ["model_name"] + (labelnames or [])

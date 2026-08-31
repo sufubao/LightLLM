@@ -6,8 +6,14 @@ import pytest
 from easydict import EasyDict
 
 from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.server.httpserver.pd_loop import _allocate_capacity_share, _update_pd_master_membership
+from lightllm.server.httpserver_for_pd_master.admission import (
+    AdmissionPolicy,
+    AdmissionPriority,
+    PDAdmissionController,
+    SessionTracker,
+)
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
-from lightllm.utils.error_utils import ServerBusyError
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
@@ -185,6 +191,134 @@ def test_pd_manager_without_connected_nodes_is_healthy():
     assert asyncio.run(manager.check_pd_nodes_health()) is True
 
 
+def test_pd_node_capacity_is_partitioned_without_overlap():
+    master_ids = [30, 10, 20]
+    shares = [_allocate_capacity_share(8, master_ids, node_id) for node_id in sorted(master_ids)]
+
+    assert shares == [3, 3, 2]
+    assert sum(shares) == 8
+    assert _allocate_capacity_share(8, master_ids, 99) == 0
+
+
+def test_pd_master_membership_change_advances_epoch_and_wakes_heartbeats(monkeypatch):
+    async def run():
+        manager = SimpleNamespace()
+        timestamps = iter([100, 200])
+        monkeypatch.setattr("lightllm.server.httpserver.pd_loop.time.time_ns", lambda: next(timestamps))
+
+        _update_pd_master_membership(manager, {20: object(), 10: object()})
+        assert manager.pd_master_ids == (10, 20)
+        assert manager.pd_master_capacity_epoch == 100
+        assert manager.pd_master_membership_changed.is_set()
+
+        manager.pd_master_membership_changed.clear()
+        _update_pd_master_membership(manager, {10: object(), 20: object()})
+        assert manager.pd_master_membership_changed.is_set() is False
+
+        _update_pd_master_membership(manager, {10: object()})
+        assert manager.pd_master_capacity_epoch == 200
+        assert manager.pd_master_membership_changed.is_set()
+
+    asyncio.run(run())
+
+
+def test_pd_manager_uses_latest_decode_capacity_lease_and_cache_telemetry():
+    args = StartArgs()
+    manager = PDManager(args)
+    client_ip_port = "10.0.0.2:8000"
+    manager.register_pd(
+        {
+            "node_id": 2,
+            "client_ip_port": client_ip_port,
+            "mode": "decode",
+            "start_args": {
+                "max_req_total_len": args.max_req_total_len,
+                "running_max_req_size": 8,
+            },
+            "capacity_share": 3,
+            "capacity_epoch": 100,
+        },
+        websocket=object(),
+    )
+
+    assert manager.get_decode_capacity() == 3
+
+    manager.update_node_load_info(
+        {
+            "client_ip_port": client_ip_port,
+            "total_token_usage_rate": 0.25,
+            "capacity_share": 1,
+            "capacity_epoch": 99,
+        }
+    )
+    assert manager.get_decode_capacity() == 3
+
+    manager.update_node_load_info(
+        {
+            "client_ip_port": client_ip_port,
+            "total_token_usage_rate": 0.5,
+            "capacity_share": 2,
+            "capacity_epoch": 101,
+            "radix_cache_total_tokens": 700,
+            "radix_cache_refed_tokens": 200,
+            "radix_cache_capacity_tokens": 1000,
+        }
+    )
+    node = manager.decode_nodes[0]
+    assert manager.get_decode_capacity() == 2
+    assert node.run_status.total_token_usage_rate == 0.5
+    assert node.run_status.radix_cache_total_tokens == 700
+    assert node.run_status.radix_cache_refed_tokens == 200
+    assert node.run_status.radix_cache_capacity_tokens == 1000
+
+
+def test_prefill_cache_headroom_is_scaled_to_the_master_decode_lease():
+    args = StartArgs()
+    manager = PDManager(args)
+    manager.register_pd(
+        {
+            "node_id": 1,
+            "client_ip_port": "10.0.0.1:8000",
+            "mode": "prefill",
+            "start_args": {
+                "max_req_total_len": args.max_req_total_len,
+                "running_max_req_size": 8,
+                "max_image_pixels": args.max_image_pixels,
+                "disable_image_resize": args.disable_image_resize,
+            },
+        },
+        websocket=object(),
+    )
+    manager.register_pd(
+        {
+            "node_id": 2,
+            "client_ip_port": "10.0.0.2:8000",
+            "mode": "decode",
+            "start_args": {
+                "max_req_total_len": args.max_req_total_len,
+                "running_max_req_size": 8,
+            },
+            "capacity_share": 4,
+        },
+        websocket=object(),
+    )
+    manager.update_node_load_info(
+        {
+            "client_ip_port": "10.0.0.1:8000",
+            "total_token_usage_rate": 0.25,
+            "radix_cache_total_tokens": 800,
+            "radix_cache_refed_tokens": 100,
+            "radix_cache_capacity_tokens": 1000,
+        }
+    )
+
+    snapshot = manager.get_prefill_cache_capacity()
+    assert snapshot is not None
+    assert snapshot.total_tokens == 350
+    assert snapshot.capacity_tokens == 375
+    assert snapshot.free_tokens == 25
+
+
 def test_prefill_registration_preserves_existing_inflight_prompt_chars():
     args = StartArgs()
     manager = PDManager(args)
@@ -263,61 +397,72 @@ def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):
     assert HttpServerManagerForPDMaster.is_healthy(manager) is True
 
 
-@pytest.mark.parametrize(
-    ("decode_capacity", "estimated_cache_hit_rate", "running_request_count", "is_rejected"),
-    [
-        (8, None, 11, False),
-        (8, None, 12, True),
-        (3, None, 4, False),
-        (3, None, 5, True),
-        (8, 0.0, 12, True),
-        (8, 0.5, 13, False),
-        (8, 0.5, 14, True),
-        (8, 1.0, 15, False),
-        (8, 1.0, 16, True),
-    ],
-)
-def test_pd_master_admission_adapts_to_capacity_and_cache_hit_rate(
-    decode_capacity, estimated_cache_hit_rate, running_request_count, is_rejected
-):
+def test_pd_master_waits_before_dispatching_beyond_decode_capacity():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = StartArgs()
+        manager.pd_manager = SimpleNamespace(
+            selector=SimpleNamespace(estimate_prompt_cache_hit_rate=lambda _prompt: 0.0),
+        )
+        manager.admission_policy = AdmissionPolicy()
+        manager.admission_controller = PDAdmissionController(lambda: 1, policy=manager.admission_policy)
+        manager.session_tracker = SessionTracker(
+            ttl_seconds=manager.admission_policy.active_session_ttl_seconds,
+            max_sessions=manager.admission_policy.max_tracked_sessions,
+        )
+        manager.metric_client = SimpleNamespace(histogram_observe=lambda *_args: None)
+        manager.running_request_count = 0
+        manager.latest_success_infer_time = 0
+        dispatched_prompts = []
+
+        async def fake_generate(prompt, *_args):
+            dispatched_prompts.append(prompt)
+            yield prompt
+
+        manager._generate = fake_generate
+        first = manager.generate("first", None, None, None)
+        assert await first.__anext__() == "first"
+
+        second = manager.generate("second", None, None, None)
+        second_result = asyncio.create_task(second.__anext__())
+        await asyncio.sleep(0)
+        assert dispatched_prompts == ["first"]
+        assert manager.admission_controller.queued_request_count == 1
+
+        await first.aclose()
+        assert await second_result == "second"
+        assert dispatched_prompts == ["first", "second"]
+        await second.aclose()
+        assert manager.admission_controller.active_slots == 0
+
+    asyncio.run(run())
+
+
+def test_pd_master_admission_classifies_session_cache_and_multi_choice_cost():
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = StartArgs()
-    estimate_calls = []
-
-    def estimate_prompt_cache_hit_rate(prompt):
-        estimate_calls.append(prompt)
-        return estimated_cache_hit_rate
-
     manager.pd_manager = SimpleNamespace(
-        decode_nodes=[SimpleNamespace(start_args={"running_max_req_size": decode_capacity})],
-        selector=SimpleNamespace(estimate_prompt_cache_hit_rate=estimate_prompt_cache_hit_rate),
+        selector=SimpleNamespace(estimate_prompt_cache_hit_rate=lambda _prompt: 0.75),
     )
-    manager.running_request_count = running_request_count
-    manager.latest_success_infer_time = 0
+    manager.admission_policy = AdmissionPolicy()
+    manager.session_tracker = SessionTracker(ttl_seconds=60, max_sessions=10)
+    sampling_params = SimpleNamespace(n=3)
 
-    async def fake_generate(*_args):
-        yield "result"
+    probable = manager._build_admission_request(
+        "abcdefghij",
+        sampling_params,
+        session_key="session-a",
+    )
+    assert probable.priority == AdmissionPriority.PROBABLE_CACHE_HIT
+    assert probable.decode_slots == 3
+    assert probable.estimated_uncached_work == 9
 
-    manager._generate = fake_generate
-
-    async def consume_one_result():
-        generator = manager.generate("multi-turn prompt", None, None, None)
-        try:
-            assert await generator.__anext__() == "result"
-        finally:
-            await generator.aclose()
-
-    if is_rejected:
-        with pytest.raises(ServerBusyError):
-            asyncio.run(consume_one_result())
-        assert manager.running_request_count == running_request_count
-    else:
-        asyncio.run(consume_one_result())
-        assert manager.running_request_count == running_request_count
-
-    general_admission_limit = decode_capacity + (decode_capacity + 1) // 2
-    should_estimate_cache = general_admission_limit <= running_request_count < 2 * decode_capacity
-    assert len(estimate_calls) == int(should_estimate_cache)
+    manager.session_tracker.mark_success("session-a")
+    continuation = manager._build_admission_request(
+        "abcdefghij",
+        sampling_params,
+        session_key="session-a",
+    )
+    assert continuation.priority == AdmissionPriority.CONTINUATION
 
 
 def test_pd_master_restores_request_count_when_preload_fails():

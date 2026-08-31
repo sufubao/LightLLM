@@ -9,21 +9,85 @@ import weakref
 import os
 import signal
 import sys
+import time
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_unique_server_name
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 
 logger = init_logger(__name__)
+
+_radix_cache_client = None
+_radix_cache_client_key = None
+
+
+def _update_pd_master_membership(manager: HttpServerManager, pd_master_ids) -> None:
+    pd_master_ids = tuple(sorted(pd_master_ids))
+    if getattr(manager, "pd_master_ids", ()) == pd_master_ids:
+        return
+    manager.pd_master_ids = pd_master_ids
+    manager.pd_master_capacity_epoch = max(
+        getattr(manager, "pd_master_capacity_epoch", 0) + 1,
+        time.time_ns(),
+    )
+    membership_changed = getattr(manager, "pd_master_membership_changed", None)
+    if membership_changed is None:
+        membership_changed = manager.pd_master_membership_changed = asyncio.Event()
+    membership_changed.set()
+
+
+def _allocate_capacity_share(total_capacity: int, pd_master_ids, pd_master_node_id: int) -> int:
+    """把节点容量确定性地切成互不重叠的 PD Master 租约池。"""
+    pd_master_ids = tuple(sorted(pd_master_ids))
+    if not pd_master_ids or pd_master_node_id not in pd_master_ids:
+        return 0
+    base, remainder = divmod(max(0, total_capacity), len(pd_master_ids))
+    return base + int(pd_master_ids.index(pd_master_node_id) < remainder)
+
+
+def _get_radix_cache_info():
+    global _radix_cache_client, _radix_cache_client_key
+
+    from lightllm.server.api_http import g_objs
+
+    args = g_objs.args
+    if args.disable_dynamic_prompt_cache:
+        return 0, 0, 0
+
+    max_total_token_num = g_objs.httpserver_manager.shm_max_total_token_num.get_value()
+    if max_total_token_num <= 0:
+        return 0, 0, 0
+
+    node_world_size = args.tp // args.nnodes
+    dp_world_size = args.tp // args.dp
+    client_key = (get_unique_server_name(), max_total_token_num, node_world_size, dp_world_size)
+    try:
+        if _radix_cache_client is None or _radix_cache_client_key != client_key:
+            _radix_cache_client = RadixCacheReadOnlyClient(
+                get_unique_server_name(),
+                max_total_token_num,
+                node_world_size=node_world_size,
+                dp_world_size=dp_world_size,
+            )
+            _radix_cache_client_key = client_key
+
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        total_tokens = sum(_radix_cache_client.get_tree_total_tokens_num(i) for i in range(dp_size_in_node))
+        refed_tokens = sum(_radix_cache_client.get_refed_tokens_num(i) for i in range(dp_size_in_node))
+        return int(total_tokens), int(refed_tokens), int(max_total_token_num * dp_size_in_node)
+    except Exception as exc:
+        logger.debug(f"read radix cache load failed: {str(exc)}")
+        return 0, 0, 0
 
 
 async def timer_log(manager: HttpServerManager):
@@ -56,7 +120,8 @@ async def pd_handle_loop(manager: HttpServerManager):
             logger.info(f"get pd_master_objs {id_to_pd_master_obj}")
 
             if id_to_pd_master_obj is not None:
-                for node_id, pd_master_obj in id_to_handle_task.items():
+                _update_pd_master_membership(manager, id_to_pd_master_obj)
+                for node_id, pd_master_obj in list(id_to_handle_task.items()):
                     if node_id not in id_to_pd_master_obj:
                         id_to_handle_task[node_id].cancel()
                         id_to_handle_task.pop(node_id, None)
@@ -106,14 +171,24 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     "client_ip_port": f"{manager.host_ip}:{get_shm_port_args().port}",
                     "mode": manager.pd_mode.value,
                     "start_args": args_dict,
+                    "capacity_share": _allocate_capacity_share(
+                        manager.args.running_max_req_size,
+                        manager.pd_master_ids,
+                        pd_master_obj.node_id,
+                    ),
+                    "capacity_epoch": manager.pd_master_capacity_epoch,
                 }
 
                 await websocket.send(json.dumps(regist_json))
                 logger.info(f"Sent registration JSON: {regist_json}")
 
                 # 转发任务
-                forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
-                heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket))
+                forwarding_tokens_task = asyncio.create_task(
+                    _up_tokens_to_pd_master(forwarding_queue, websocket, pd_master_obj.node_id)
+                )
+                heartbeat_task = asyncio.create_task(
+                    _send_heartbeat_to_pd_master(manager, websocket, pd_master_obj.node_id)
+                )
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
@@ -264,24 +339,38 @@ async def _pd_process_generate(
 
 
 # 转发token的task
-async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
+async def _up_tokens_to_pd_master(
+    forwarding_queue: AsyncQueue,
+    websocket: ClientConnection,
+    pd_master_node_id: int,
+):
     while True:
         handle_list = await forwarding_queue.wait_to_get_all_data()
 
         if handle_list:
-            load_info: dict = _get_load_info()
+            load_info: dict = _get_load_info(pd_master_node_id)
             await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
 
 
-async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
+async def _send_heartbeat_to_pd_master(
+    manager: HttpServerManager,
+    websocket: ClientConnection,
+    pd_master_node_id: int,
+):
     heartbeat_interval_seconds = 15
+    membership_changed = manager.pd_master_membership_changed
     while True:
-        await websocket.send(pickle.dumps((ObjType.HEARTBEAT,)))
-        await asyncio.sleep(heartbeat_interval_seconds)
+        membership_changed.clear()
+        await websocket.send(pickle.dumps((ObjType.HEARTBEAT, _get_load_info(pd_master_node_id))))
+        try:
+            # Master 集合变化时立即重报份额，缩短新旧容量租约并存的窗口。
+            await asyncio.wait_for(membership_changed.wait(), timeout=heartbeat_interval_seconds)
+        except asyncio.TimeoutError:
+            pass
 
 
 # 获取节点负载信息
-def _get_load_info() -> dict:
+def _get_load_info(pd_master_node_id: int) -> dict:
 
     from lightllm.server.api_http import g_objs
 
@@ -295,8 +384,15 @@ def _get_load_info() -> dict:
         float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in range(dp_size_in_node)
     ]
     mean_node_load = sum(current_load) / len(current_load)
+    radix_cache_total_tokens, radix_cache_refed_tokens, radix_cache_capacity_tokens = _get_radix_cache_info()
+    pd_master_ids = getattr(g_objs.httpserver_manager, "pd_master_ids", (pd_master_node_id,))
     load_info = {
         "total_token_usage_rate": mean_node_load,
         "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}",
+        "capacity_share": _allocate_capacity_share(args.running_max_req_size, pd_master_ids, pd_master_node_id),
+        "capacity_epoch": getattr(g_objs.httpserver_manager, "pd_master_capacity_epoch", 0),
+        "radix_cache_total_tokens": radix_cache_total_tokens,
+        "radix_cache_refed_tokens": radix_cache_refed_tokens,
+        "radix_cache_capacity_tokens": radix_cache_capacity_tokens,
     }
     return load_info

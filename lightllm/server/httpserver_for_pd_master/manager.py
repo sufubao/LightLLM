@@ -27,6 +27,14 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
+from .admission import (
+    AdmissionPolicy,
+    AdmissionPriority,
+    AdmissionRequest,
+    CacheCapacitySnapshot,
+    PDAdmissionController,
+    SessionTracker,
+)
 
 logger = init_logger(__name__)
 
@@ -43,6 +51,18 @@ class HttpServerManagerForPDMaster:
         self.id_gen = ReqIDGenerator()
 
         self.pd_manager = PDManager(args)
+
+        self.admission_policy = AdmissionPolicy()
+        self.session_tracker = SessionTracker(
+            ttl_seconds=self.admission_policy.active_session_ttl_seconds,
+            max_sessions=self.admission_policy.max_tracked_sessions,
+        )
+        self.admission_controller = PDAdmissionController(
+            decode_capacity_provider=self.pd_manager.get_decode_capacity,
+            cache_capacity_provider=self.pd_manager.get_prefill_cache_capacity,
+            policy=self.admission_policy,
+            state_change_callback=self._record_admission_state,
+        )
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
@@ -76,10 +96,12 @@ class HttpServerManagerForPDMaster:
 
     async def register_pd(self, pd_info_json, websocket):
         self.pd_manager.register_pd(pd_info_json, websocket)
+        self.admission_controller.on_capacity_change()
         return
 
     async def remove_pd(self, pd_info_json):
         self.pd_manager.remove_pd(pd_info_json)
+        self.admission_controller.on_capacity_change()
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -91,6 +113,25 @@ class HttpServerManagerForPDMaster:
         except:
             pass
         return
+
+    def update_node_load_info(self, load_info: Optional[dict]) -> None:
+        self.pd_manager.update_node_load_info(load_info)
+        # Decode 租约或 Prefill cache 余量变化后都需要重新尝试队列。
+        self.admission_controller.on_capacity_change()
+
+    def _record_admission_state(self, controller: PDAdmissionController) -> None:
+        self.metric_client.gauge_set(
+            "lightllm_pd_master_admission_queue_size",
+            controller.queued_request_count,
+        )
+        self.metric_client.gauge_set(
+            "lightllm_pd_master_admission_active_slots",
+            controller.active_slots,
+        )
+        self.metric_client.gauge_set(
+            "lightllm_pd_master_admission_cold_capacity",
+            controller.cold_capacity,
+        )
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
@@ -130,27 +171,19 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
+        admission_lease = None
+        admission_request = None
+        observed_prefill_ids = set()
+        session_key = self._get_session_key(request)
         if not self.args.disable_pd_master_decode_capacity_limit:
-            decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
-            # 每个请求默认获得半个解码波次的缓冲容量；可复用的提示词缓存会逐步开放另外半个波次，
-            # 同时以两个完整解码波次作为硬上限。
-            general_waiting_capacity = (decode_capacity + 1) // 2
-            cache_waiting_capacity = decode_capacity // 2
-            hard_admission_limit = decode_capacity + general_waiting_capacity + cache_waiting_capacity
-            if self.running_request_count >= hard_admission_limit:
-                raise ServerBusyError()
-
-            general_admission_limit = decode_capacity + general_waiting_capacity
-            if self.running_request_count >= general_admission_limit:
-                estimated_cache_hit_rate = self.pd_manager.selector.estimate_prompt_cache_hit_rate(prompt)
-                if estimated_cache_hit_rate is None or not math.isfinite(estimated_cache_hit_rate):
-                    estimated_cache_hit_rate = 0.0
-                estimated_cache_hit_rate = min(max(estimated_cache_hit_rate, 0.0), 1.0)
-                cache_aware_admission_limit = general_admission_limit + math.ceil(
-                    cache_waiting_capacity * estimated_cache_hit_rate
-                )
-                if self.running_request_count >= cache_aware_admission_limit:
-                    raise ServerBusyError()
+            admission_request = self._build_admission_request(prompt, sampling_params, session_key)
+            admission_lease = await self.admission_controller.acquire(admission_request)
+            self.metric_client.histogram_observe(
+                "lightllm_request_queue_duration_bucket", admission_lease.waited_seconds
+            )
+            if admission_lease.waited_seconds > 0:
+                # 排队期间节点和缓存内容可能变化；派发前重新匹配，避免复用过期快照。
+                self.pd_manager.selector.estimate_prompt_cache_hit_rate(prompt)
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
@@ -159,9 +192,62 @@ class HttpServerManagerForPDMaster:
         try:
             async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
                 async for result in generator:
+                    if (
+                        admission_request is not None
+                        and isinstance(result, tuple)
+                        and len(result) >= 3
+                        and result[0] not in observed_prefill_ids
+                        and isinstance(result[2], dict)
+                        and "prompt_tokens" in result[2]
+                    ):
+                        observed_prefill_ids.add(result[0])
+                        self.admission_controller.record_prefill_result(
+                            admission_request,
+                            result[2]["prompt_tokens"],
+                            result[2].get("prompt_cache_len", 0),
+                        )
+                    if session_key is not None and not self.session_tracker.is_continuation(session_key):
+                        self.session_tracker.mark_success(session_key)
+                        self.admission_controller.promote_session(session_key)
                     yield result
         finally:
             self.running_request_count -= 1
+            if admission_lease is not None:
+                admission_lease.release()
+
+    def _get_session_key(self, request: Optional[Request]) -> Optional[str]:
+        if request is None:
+            return None
+        session_key = request.headers.get("X-Session-Id", "").strip()
+        return session_key or None
+
+    def _build_admission_request(
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: Optional[SamplingParams],
+        session_key: Optional[str],
+    ) -> AdmissionRequest:
+        estimated_cache_hit_rate = self.pd_manager.selector.estimate_prompt_cache_hit_rate(prompt)
+        if estimated_cache_hit_rate is None or not math.isfinite(estimated_cache_hit_rate):
+            estimated_cache_hit_rate = 0.0
+        estimated_cache_hit_rate = min(max(estimated_cache_hit_rate, 0.0), 1.0)
+
+        if self.session_tracker.is_continuation(session_key):
+            priority = AdmissionPriority.CONTINUATION
+        elif estimated_cache_hit_rate >= self.admission_policy.probable_cache_hit_threshold:
+            priority = AdmissionPriority.PROBABLE_CACHE_HIT
+        else:
+            priority = AdmissionPriority.COLD
+
+        decode_slots = max(1, int(getattr(sampling_params, "n", 1) or 1))
+        prompt_size = len(prompt) if prompt is not None else 0
+        estimated_uncached_work = math.ceil(prompt_size * (1.0 - estimated_cache_hit_rate)) * decode_slots
+        return AdmissionRequest(
+            session_key=session_key,
+            priority=priority,
+            decode_slots=decode_slots,
+            estimated_uncached_work=estimated_uncached_work,
+        )
 
     async def _generate(
         self,
@@ -660,7 +746,7 @@ class HttpServerManagerForPDMaster:
                 for obj in objs:
                     if obj[0] == ObjType.TOKEN_PACKS:
                         token_list, node_load_info = obj[1], obj[2]
-                        self.pd_manager.update_node_load_info(node_load_info)
+                        self.update_node_load_info(node_load_info)
 
                         for sub_req_id, text, metadata, finish_status in token_list:
                             finish_status: FinishStatus = finish_status
@@ -780,6 +866,54 @@ class PDManager:
         self.selector = create_selector(args.select_p_d_node_strategy, self)
         return
 
+    def get_decode_capacity(self) -> int:
+        return sum(
+            node.capacity_share if node.capacity_share is not None else node.start_args["running_max_req_size"]
+            for node in self.decode_nodes
+        )
+
+    def get_prefill_cache_capacity(self) -> Optional[CacheCapacitySnapshot]:
+        """汇总当前 Master 对应的 Prefill cache 份额；遥测不完整时不参与限流。"""
+        if not self.prefill_nodes:
+            return None
+
+        statuses = [node.run_status for node in self.prefill_nodes]
+        if any(status.radix_cache_capacity_tokens <= 0 or status.report_time <= 0 for status in statuses):
+            return None
+
+        full_decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.decode_nodes)
+        local_decode_capacity = self.get_decode_capacity()
+        if full_decode_capacity <= 0 or local_decode_capacity <= 0:
+            return None
+
+        # 所有 Master 都能看到同一组 P 节点，因此按本 Master 的 Decode 租约比例
+        # 切分缓存余量，避免每个 Master 重复消费整份 headroom。
+        share_ratio = min(1.0, local_decode_capacity / full_decode_capacity)
+        # total_token_usage_rate 已排除可驱逐 Radix token，因此下面两项分别表示
+        # 当前可驱逐缓存量和运行中请求之外还能留给缓存的容量。
+        total_tokens = int(
+            sum(
+                max(0, status.radix_cache_total_tokens - status.radix_cache_refed_tokens)
+                for status in statuses
+            )
+            * share_ratio
+        )
+        capacity_tokens = int(
+            sum(
+                max(
+                    0,
+                    status.radix_cache_capacity_tokens
+                    * (1.0 - min(max(status.total_token_usage_rate, 0.0), 1.0)),
+                )
+                for status in statuses
+            )
+            * share_ratio
+        )
+        return CacheCapacitySnapshot(
+            total_tokens=total_tokens,
+            capacity_tokens=capacity_tokens,
+        )
+
     def is_pd_nodes_ready(self):
         prefill_node_count = len(self.prefill_nodes)
         decode_node_count = len(self.decode_nodes)
@@ -894,10 +1028,25 @@ class PDManager:
             if load_info is None:
                 return
             client_ip_port = load_info["client_ip_port"]
-            total_token_usage_rate = load_info["total_token_usage_rate"]
             pd_client = self.url_to_pd_nodes.get(client_ip_port)
-            pd_client.run_status.total_token_usage_rate = total_token_usage_rate
-        except BaseException as e:
+            if pd_client is None:
+                return
+            pd_client.run_status.total_token_usage_rate = load_info["total_token_usage_rate"]
+            pd_client.run_status.radix_cache_total_tokens = load_info.get("radix_cache_total_tokens", 0)
+            pd_client.run_status.radix_cache_refed_tokens = load_info.get("radix_cache_refed_tokens", 0)
+            pd_client.run_status.radix_cache_capacity_tokens = load_info.get("radix_cache_capacity_tokens", 0)
+            pd_client.run_status.report_time = time.monotonic()
+
+            capacity_epoch = int(load_info.get("capacity_epoch", pd_client.capacity_epoch))
+            if capacity_epoch >= pd_client.capacity_epoch:
+                fallback_capacity = (
+                    pd_client.capacity_share
+                    if pd_client.capacity_share is not None
+                    else pd_client.start_args["running_max_req_size"]
+                )
+                pd_client.capacity_share = max(0, int(load_info.get("capacity_share", fallback_capacity)))
+                pd_client.capacity_epoch = capacity_epoch
+        except Exception as e:
             logger.warning(f"udpate node load info failed, load_info: {load_info} error: {str(e)}")
         return
 

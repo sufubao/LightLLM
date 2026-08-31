@@ -115,9 +115,7 @@ def hadamard_transform(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     return _hadamard_transform_triton(x, scale)
 
 
-def hadamard_transform_quant_fp8(
-    x: torch.Tensor, scale: float = 1.0
-) -> tuple[torch.Tensor, torch.Tensor]:
+def hadamard_transform_quant_fp8(x: torch.Tensor, scale: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse Hadamard-128 with the following ue8m0 FP8 quantization."""
 
     assert x.is_cuda, "hadamard_transform_quant_fp8 only supports CUDA tensors"
@@ -129,9 +127,7 @@ def hadamard_transform_quant_fp8(
     original_shape = x.shape
     rows = x.numel() // 128
     output = torch.empty_like(x, dtype=torch.float8_e4m3fn)
-    output_scale = torch.empty(
-        (*original_shape[:-1], 1), dtype=torch.float32, device=x.device
-    )
+    output_scale = torch.empty((*original_shape[:-1], 1), dtype=torch.float32, device=x.device)
     if rows == 0:
         return output, output_scale
 

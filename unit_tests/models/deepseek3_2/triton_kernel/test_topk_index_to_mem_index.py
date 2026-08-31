@@ -12,18 +12,14 @@ def test_trans_topk_index_to_mem_index(topk):
 
     # Create topk_index tensor with some valid indices and some -1 (padding)
     topk_index = torch.zeros((batch_size, topk), dtype=torch.int32, device="cuda")
-    topk_index[:, 0 : topk - 1] = torch.arange(
-        0, topk - 1, dtype=torch.int32, device="cuda"
-    )
+    topk_index[:, 0 : topk - 1] = torch.arange(0, topk - 1, dtype=torch.int32, device="cuda")
     topk_index[:, -1] = -1
     ragged_start_index = torch.tensor([2], dtype=torch.int32, device="cuda")
 
     # Create ragged_mem_index lookup table
     ragged_mem_index = torch.arange(0, topk + 2, dtype=torch.int32, device="cuda") + 10
 
-    topk_mem_index = trans_topk_index_to_mem_index(
-        topk_index, ragged_start_index, ragged_mem_index
-    )
+    topk_mem_index = trans_topk_index_to_mem_index(topk_index, ragged_start_index, ragged_mem_index)
 
     expected_index = torch.cat(
         (

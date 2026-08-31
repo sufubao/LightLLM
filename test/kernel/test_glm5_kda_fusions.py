@@ -95,12 +95,12 @@ def test_fused_hadamard_fp8_quant_matches_two_kernel_chain(shape):
     torch.manual_seed(1)
     value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     expected_value, expected_scale = act_quant(
-        hadamard_transform(value, scale=128**-0.5),
+        hadamard_transform(value, scale=128 ** -0.5),
         block_size=128,
         scale_fmt="ue8m0",
     )
 
-    actual_value, actual_scale = hadamard_transform_quant_fp8(value, scale=128**-0.5)
+    actual_value, actual_scale = hadamard_transform_quant_fp8(value, scale=128 ** -0.5)
 
     assert torch.equal(actual_value, expected_value)
     torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
@@ -110,7 +110,7 @@ def test_fused_indexer_weight_scale_matches_torch_chain():
     torch.manual_seed(2)
     weights = torch.randn(257, 32, device="cuda", dtype=torch.float32)
     q_scale = torch.rand(257, 32, 1, device="cuda", dtype=torch.float32)
-    scale = 128**-0.5 * 32**-0.5
+    scale = 128 ** -0.5 * 32 ** -0.5
     expected = (weights * scale).unsqueeze(-1).mul(q_scale).squeeze(-1)
 
     actual = scale_indexer_weights_(weights.clone(), q_scale, scale)

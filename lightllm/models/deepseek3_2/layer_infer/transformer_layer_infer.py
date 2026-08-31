@@ -59,12 +59,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         q = layer_weight.q_b_proj_.mm(q)
         cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
-        q = q.view(
-            -1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim
-        )
-        q_nope, q_rope = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
+        q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
+        q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         rmsnorm_forward(
             cache_kv[:, :, : self.kv_lora_rank],
             weight=layer_weight.kv_a_layernorm_.weight,
@@ -89,9 +85,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         out=None,
     ) -> torch.Tensor:
         # Model-specific q projection (uses layer weights)
-        q_nope, q_rope = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
+        q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         q_all = torch.cat([q_nope, q_rope], dim=-1)
 
@@ -192,14 +186,16 @@ class NsaInfer:
         self.scale_fmt = network_config["quantization_config"]["scale_fmt"]
         self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
-        self.index_n_heads_scale = (self.index_n_heads**-0.5) * self.softmax_scale
+        self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
         self.index_kpool = network_config.get("index_kpool", 1)
         self.index_kpool_compress = network_config.get("index_kpool_compress", False)
-        self.enable_kpool_decode_fastpath = os.getenv(
-            "LIGHTLLM_ENABLE_KPOOL_DECODE_FASTPATH", "0"
-        ).upper() in {"1", "ON", "TRUE"}
+        self.enable_kpool_decode_fastpath = os.getenv("LIGHTLLM_ENABLE_KPOOL_DECODE_FASTPATH", "0").upper() in {
+            "1",
+            "ON",
+            "TRUE",
+        }
         self._kpool_tail_k = None
         self._kpool_tail_score = None
         # Most NSA models only instantiate the target model, so their decode
@@ -236,9 +232,7 @@ class NsaInfer:
                 async_op=False,
             )
             q = (
-                q_merge.view(
-                    self.tp_world_size_, q.shape[0], self.tp_index_n_heads, q.shape[2]
-                )
+                q_merge.view(self.tp_world_size_, q.shape[0], self.tp_index_n_heads, q.shape[2])
                 .transpose(0, 1)
                 .contiguous()
                 .view(q.shape[0], self.index_n_heads, q.shape[2])
@@ -255,9 +249,7 @@ class NsaInfer:
             O_buffer=indexer_k_buffer,
         )
 
-        weights = self._scale_indexer_weights(
-            layer_weight.weights_proj_.mm(hidden_states), q_scale
-        )
+        weights = self._scale_indexer_weights(layer_weight.weights_proj_.mm(hidden_states), q_scale)
 
         ks = att_state.ks
         ke = att_state.ke
@@ -280,13 +272,7 @@ class NsaInfer:
         )
         use_kpool = use_kpool_prefill or use_kpool_decode
         if use_kpool_prefill:
-            (
-                k_fp8_,
-                k_scale_,
-                score_ks,
-                score_ke,
-                score_lengths,
-            ) = self._prepare_kpool_scoring(
+            (k_fp8_, k_scale_, score_ks, score_ke, score_lengths,) = self._prepare_kpool_scoring(
                 raw_k=raw_k,
                 hidden_states=hidden_states,
                 q_lora=q_lora,
@@ -299,13 +285,7 @@ class NsaInfer:
             )
             use_kpool = k_fp8_ is not None
         elif use_kpool_decode:
-            (
-                k_fp8_,
-                k_scale_,
-                score_ks,
-                score_ke,
-                score_lengths,
-            ) = self._prepare_kpool_decode_scoring(
+            (k_fp8_, k_scale_, score_ks, score_ke, score_lengths,) = self._prepare_kpool_decode_scoring(
                 raw_k=raw_k,
                 hidden_states=hidden_states,
                 q_lora=q_lora,
@@ -321,19 +301,11 @@ class NsaInfer:
         elif infer_state.is_prefill:
             mtp_step = 0
         else:
-            mtp_step = (
-                get_env_start_args().mtp_step
-                if self.decode_mtp_step is None
-                else self.decode_mtp_step
-            )
+            mtp_step = get_env_start_args().mtp_step if self.decode_mtp_step is None else self.decode_mtp_step
         # LightSpec compacts each request to a variable number of contiguous
         # verify rows. Its sparse-index K packing must follow request boundaries
         # instead of assuming the fixed process-wide MTP width.
-        use_dynamic_layout = (
-            not infer_state.is_prefill
-            and mtp_step > 0
-            and get_env_start_args().mtp_dynamic_verify
-        )
+        use_dynamic_layout = not infer_state.is_prefill and mtp_step > 0 and get_env_start_args().mtp_dynamic_verify
         if use_kpool:
             pass
         elif use_dynamic_layout:
@@ -352,8 +324,7 @@ class NsaInfer:
                 b_seq_len=infer_state.b_seq_len,
                 b_req_idx=infer_state.b_req_idx,
                 req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-                out_token_num=infer_state.b_seq_len.shape[0]
-                * infer_state.max_kv_seq_len,
+                out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
                 max_kv_seq_len=infer_state.max_kv_seq_len,
                 mtp_step=mtp_step,
             )
@@ -374,13 +345,7 @@ class NsaInfer:
 
         if use_kpool:
             output_topk = (
-                (
-                    self.index_topk
-                    + self.index_kpool
-                    - 1
-                    + self._FLASHMLA_SPARSE_TOPK_ALIGNMENT
-                    - 1
-                )
+                (self.index_topk + self.index_kpool - 1 + self._FLASHMLA_SPARSE_TOPK_ALIGNMENT - 1)
                 // self._FLASHMLA_SPARSE_TOPK_ALIGNMENT
                 * self._FLASHMLA_SPARSE_TOPK_ALIGNMENT
             )
@@ -450,12 +415,8 @@ class NsaInfer:
     def _quantize_indexer_activation(self, value: torch.Tensor):
         return act_quant(value, self.block_size, self.scale_fmt)
 
-    def _scale_indexer_weights(
-        self, weights: torch.Tensor, q_scale: torch.Tensor
-    ) -> torch.Tensor:
-        return (
-            weights.mul(self.index_n_heads_scale).unsqueeze(-1).mul(q_scale)
-        ).squeeze(-1)
+    def _scale_indexer_weights(self, weights: torch.Tensor, q_scale: torch.Tensor) -> torch.Tensor:
+        return (weights.mul(self.index_n_heads_scale).unsqueeze(-1).mul(q_scale)).squeeze(-1)
 
     def _prepare_kpool_scoring(
         self,
@@ -478,23 +439,15 @@ class NsaInfer:
         if infer_state.max_cache_len > 0 and not self.enable_kpool_decode_fastpath:
             return None, None, None, None, None
 
-        gate_score = layer_weight.index_kpool_compress_gate.mm(
-            hidden_states.to(q_lora.dtype)
-        )
+        gate_score = layer_weight.index_kpool_compress_gate.mm(hidden_states.to(q_lora.dtype))
         closed_pool_num = query_token_num // pool_size
         compressed_k = None
         compressed_scale = None
         if closed_pool_num:
             closed_token_num = closed_pool_num * pool_size
-            slot_k = raw_k[:closed_token_num].view(
-                closed_pool_num, pool_size, self.index_head_dim
-            )
-            slot_score = gate_score[:closed_token_num].view(
-                closed_pool_num, pool_size, self.index_head_dim
-            )
-            write_locs = infer_state.mem_index[:closed_token_num].view(
-                closed_pool_num, pool_size
-            )[:, -1]
+            slot_k = raw_k[:closed_token_num].view(closed_pool_num, pool_size, self.index_head_dim)
+            slot_score = gate_score[:closed_token_num].view(closed_pool_num, pool_size, self.index_head_dim)
+            write_locs = infer_state.mem_index[:closed_token_num].view(closed_pool_num, pool_size)[:, -1]
             compressed_k, compressed_scale = self._compress_kpool_keys(
                 slot_k=slot_k,
                 slot_score=slot_score,
@@ -511,9 +464,7 @@ class NsaInfer:
         if infer_state.max_cache_len == 0:
             if compressed_k is None:
                 return None, None, None, None, None
-            pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(
-                torch.int32
-            )
+            pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(torch.int32)
             score_ks = torch.div(ks, pool_size, rounding_mode="floor").to(torch.int32)
             score_ke = score_ks + pool_lengths
             return compressed_k, compressed_scale, score_ks, score_ke, pool_lengths
@@ -533,19 +484,10 @@ class NsaInfer:
         )
         mem_indices = ragged_mem_index[pooled_ragged_positions].to(torch.int64)
         packed_k = indexer_k_buffer[mem_indices, 0]
-        k_fp8 = (
-            packed_k[:, : self.index_head_dim].contiguous().view(torch.float8_e4m3fn)
-        )
-        k_scale = (
-            packed_k[:, self.index_head_dim : self.index_head_dim + 4]
-            .contiguous()
-            .view(torch.float32)
-            .view(-1)
-        )
+        k_fp8 = packed_k[:, : self.index_head_dim].contiguous().view(torch.float8_e4m3fn)
+        k_scale = packed_k[:, self.index_head_dim : self.index_head_dim + 4].contiguous().view(torch.float32).view(-1)
 
-        pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(
-            torch.int32
-        )
+        pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(torch.int32)
         score_ks = torch.div(ks, pool_size, rounding_mode="floor").to(torch.int32)
         score_ke = score_ks + pool_lengths
         return k_fp8, k_scale, score_ks, score_ke, pool_lengths
@@ -578,17 +520,13 @@ class NsaInfer:
                 pool_size,
                 self.index_head_dim,
             )
-            self._kpool_tail_k = torch.empty(
-                tail_shape, dtype=torch.bfloat16, device=raw_k.device
-            )
+            self._kpool_tail_k = torch.empty(tail_shape, dtype=torch.bfloat16, device=raw_k.device)
             self._kpool_tail_score = torch.empty_like(self._kpool_tail_k)
 
         req_idx = infer_state.b_req_idx.to(torch.int64)
         positions = infer_state.b_seq_len.to(torch.int64) - 1
         tail_slots = torch.remainder(positions, pool_size)
-        gate_score = layer_weight.index_kpool_compress_gate.mm(
-            hidden_states.to(q_lora.dtype)
-        )
+        gate_score = layer_weight.index_kpool_compress_gate.mm(hidden_states.to(q_lora.dtype))
         self._kpool_tail_k[req_idx, tail_slots] = raw_k
         self._kpool_tail_score[req_idx, tail_slots] = gate_score
 
@@ -607,40 +545,17 @@ class NsaInfer:
         max_pool_len = infer_state.max_kv_seq_len // pool_size
         if max_pool_len == 0:
             return None, None, None, None, None
-        pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(
-            torch.int32
-        )
+        pool_lengths = torch.div(lengths, pool_size, rounding_mode="floor").to(torch.int32)
         endpoint_positions = (
-            torch.arange(max_pool_len, dtype=torch.int64, device=raw_k.device)
-            * pool_size
-            + pool_size
-            - 1
+            torch.arange(max_pool_len, dtype=torch.int64, device=raw_k.device) * pool_size + pool_size - 1
         )
-        last_endpoint = torch.clamp(
-            pool_lengths.to(torch.int64) * pool_size - 1, min=0
-        )
-        safe_positions = torch.minimum(
-            endpoint_positions.unsqueeze(0), last_endpoint.unsqueeze(1)
-        )
-        mem_indices = infer_state.req_manager.req_to_token_indexs[
-            req_idx.unsqueeze(1), safe_positions
-        ].to(torch.int64)
+        last_endpoint = torch.clamp(pool_lengths.to(torch.int64) * pool_size - 1, min=0)
+        safe_positions = torch.minimum(endpoint_positions.unsqueeze(0), last_endpoint.unsqueeze(1))
+        mem_indices = infer_state.req_manager.req_to_token_indexs[req_idx.unsqueeze(1), safe_positions].to(torch.int64)
         packed_k = indexer_k_buffer[mem_indices.reshape(-1), 0]
-        k_fp8 = (
-            packed_k[:, : self.index_head_dim]
-            .contiguous()
-            .view(torch.float8_e4m3fn)
-        )
-        k_scale = (
-            packed_k[:, self.index_head_dim : self.index_head_dim + 4]
-            .contiguous()
-            .view(torch.float32)
-            .view(-1)
-        )
-        score_ks = (
-            torch.arange(batch_size, dtype=torch.int32, device=raw_k.device)
-            * max_pool_len
-        )
+        k_fp8 = packed_k[:, : self.index_head_dim].contiguous().view(torch.float8_e4m3fn)
+        k_scale = packed_k[:, self.index_head_dim : self.index_head_dim + 4].contiguous().view(torch.float32).view(-1)
+        score_ks = torch.arange(batch_size, dtype=torch.int32, device=raw_k.device) * max_pool_len
         score_ke = score_ks + pool_lengths
         return k_fp8, k_scale, score_ks, score_ke, pool_lengths
 
@@ -680,9 +595,7 @@ class NsaInfer:
         return compressed_k, compressed_scale
 
     @classmethod
-    def _get_mqa_logits_chunk_size(
-        cls, query_token_num: int, kv_token_num: int, device: torch.device
-    ) -> int:
+    def _get_mqa_logits_chunk_size(cls, query_token_num: int, kv_token_num: int, device: torch.device) -> int:
         score_element_num = query_token_num * kv_token_num
         if score_element_num < cls._MQA_LOGITS_STATIC_SKIP_ELEMS:
             return query_token_num
@@ -714,10 +627,8 @@ class NsaInfer:
         )
 
         hidden_size = x.size(-1)
-        assert (
-            hidden_size & (hidden_size - 1)
-        ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
-        return hadamard_transform(x, scale=hidden_size**-0.5)
+        assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
+        return hadamard_transform(x, scale=hidden_size ** -0.5)
 
     def _get_q_k_bf16(
         self,
@@ -726,9 +637,7 @@ class NsaInfer:
         infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-        q = layer_weight.wq_b_proj_.mm(q_lora).view(
-            -1, self.tp_index_n_heads, self.index_head_dim
-        )
+        q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.tp_index_n_heads, self.index_head_dim)
         k = layer_weight.wk_proj_.mm(hidden_states)
 
         k = layer_weight.k_norm_(k, eps=self.eps)

@@ -20,9 +20,7 @@ def _trans_topk_index_to_mem_index(
     cur_index = tl.program_id(0)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     mask = offs_d < topk_width
-    topk_index_ptrs = (
-        topk_index + cur_index * topk_index_stride_b + offs_d * topk_index_stride_k
-    )
+    topk_index_ptrs = topk_index + cur_index * topk_index_stride_b + offs_d * topk_index_stride_k
     topk_indices = tl.load(topk_index_ptrs, mask=mask, other=-1)
     ragged_start = tl.load(ragged_start_index + cur_index)
     topk_indices = tl.where(topk_indices != -1, topk_indices + ragged_start, -1)
@@ -31,9 +29,7 @@ def _trans_topk_index_to_mem_index(
     dest_mem_index = ragged_mem_index + topk_indices
     mem_index = tl.load(dest_mem_index, mask=mask & (topk_indices != -1), other=-1)
     tl.store(
-        topk_mem_index
-        + cur_index * topk_mem_index_stride_b
-        + offs_d * topk_mem_index_stride_k,
+        topk_mem_index + cur_index * topk_mem_index_stride_b + offs_d * topk_mem_index_stride_k,
         mem_index,
         mask=mask,
     )

@@ -26,9 +26,7 @@ def _install_prompt_cache() -> None:
             with cache_path.open("rb") as cache_file:
                 cached = pickle.load(cache_file)
             if cached["metadata"] != expected:
-                raise ValueError(
-                    f"Long-prompt cache metadata mismatch: {cached['metadata']} != {expected}"
-                )
+                raise ValueError(f"Long-prompt cache metadata mismatch: {cached['metadata']} != {expected}")
             row = cached["row"]
             print(f"Loaded long prompt from {cache_path}", flush=True)
         else:

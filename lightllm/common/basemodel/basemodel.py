@@ -415,8 +415,7 @@ class TpPartBaseModel:
             pool_size = int(self.config.get("index_kpool", 1) or 1)
             model_input.kpool_decode_aligned = bool(
                 pool_size > 1
-                and os.getenv("LIGHTLLM_ENABLE_KPOOL_DECODE_FASTPATH", "0").upper()
-                in {"1", "ON", "TRUE"}
+                and os.getenv("LIGHTLLM_ENABLE_KPOOL_DECODE_FASTPATH", "0").upper() in {"1", "ON", "TRUE"}
                 and self.args.mtp_mode is None
                 and self.args.disable_dynamic_prompt_cache
                 and self.args.chunked_prefill_size % pool_size == 0

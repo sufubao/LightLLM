@@ -67,9 +67,7 @@ class Glm5NextMergedKdaProjection(MMWeightTpl):
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
-        self.sharded_slicer = get_row_slice_mixin(
-            "none", tp_rank=tp_rank, tp_world_size=tp_world_size
-        )
+        self.sharded_slicer = get_row_slice_mixin("none", tp_rank=tp_rank, tp_world_size=tp_world_size)
         self.replicated_slicer = get_row_slice_mixin("none", tp_rank=0, tp_world_size=1)
 
     def _get_param_slicer(self, sub_child_index: int):

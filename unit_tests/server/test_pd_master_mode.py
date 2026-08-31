@@ -5,8 +5,10 @@ from types import SimpleNamespace
 import pytest
 from easydict import EasyDict
 
+from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+from lightllm.utils.error_utils import ServerBusyError
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
@@ -83,6 +85,22 @@ def test_pd_master_models_endpoint_has_created_timestamp(monkeypatch):
 
     response = asyncio.run(api_http.get_models(None))
     assert response.data[0].created == 1234
+
+
+def test_pd_master_decode_waiting_queue_ratio_cli_default_and_override():
+    default_args = make_argument_parser().parse_args([])
+    assert default_args.pd_master_decode_waiting_queue_ratio == 0.5
+    assert default_args.pd_master_cache_aware_queue_reserved_ratio == 0.5
+    configured_args = make_argument_parser().parse_args(
+        [
+            "--pd_master_decode_waiting_queue_ratio",
+            "0.25",
+            "--pd_master_cache_aware_queue_reserved_ratio",
+            "0.75",
+        ]
+    )
+    assert configured_args.pd_master_decode_waiting_queue_ratio == 0.25
+    assert configured_args.pd_master_cache_aware_queue_reserved_ratio == 0.75
 
 
 def test_elastic_pd_nodes_are_ready_with_at_least_one_node_of_each_role():
@@ -262,12 +280,106 @@ def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):
     assert HttpServerManagerForPDMaster.is_healthy(manager) is True
 
 
+@pytest.mark.parametrize(
+    ("waiting_queue_ratio", "running_request_count", "is_rejected"),
+    [
+        (0.5, 11, False),
+        (0.5, 12, True),
+        (0.25, 9, False),
+        (0.25, 10, True),
+        (0.0, 7, False),
+        (0.0, 8, True),
+    ],
+)
+def test_pd_master_admission_limit_includes_configurable_waiting_queue(
+    waiting_queue_ratio, running_request_count, is_rejected
+):
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = StartArgs(pd_master_decode_waiting_queue_ratio=waiting_queue_ratio)
+    manager.pd_manager = SimpleNamespace(
+        decode_nodes=[
+            SimpleNamespace(start_args={"running_max_req_size": 3}),
+            SimpleNamespace(start_args={"running_max_req_size": 5}),
+        ],
+        selector=SimpleNamespace(estimate_prompt_cache_hit_rate=lambda _prompt: None),
+    )
+    manager.running_request_count = running_request_count
+    manager.latest_success_infer_time = 0
+
+    async def fake_generate(*_args):
+        yield "result"
+
+    manager._generate = fake_generate
+
+    async def consume_one_result():
+        generator = manager.generate(None, None, None, None)
+        try:
+            assert await generator.__anext__() == "result"
+        finally:
+            await generator.aclose()
+
+    if is_rejected:
+        with pytest.raises(ServerBusyError):
+            asyncio.run(consume_one_result())
+        assert manager.running_request_count == running_request_count
+    else:
+        asyncio.run(consume_one_result())
+        assert manager.running_request_count == running_request_count
+
+
+@pytest.mark.parametrize(
+    ("estimated_cache_hit_rate", "running_request_count", "is_rejected"),
+    [
+        (0.0, 9, False),
+        (0.0, 10, True),
+        (0.5, 10, False),
+        (0.5, 11, True),
+        (1.0, 11, False),
+        (1.0, 12, True),
+        (None, 11, False),
+        (None, 12, True),
+    ],
+)
+def test_pd_master_admission_reserves_queue_for_cache_friendly_requests(
+    estimated_cache_hit_rate, running_request_count, is_rejected
+):
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = StartArgs()
+    manager.pd_manager = SimpleNamespace(
+        decode_nodes=[SimpleNamespace(start_args={"running_max_req_size": 8})],
+        selector=SimpleNamespace(estimate_prompt_cache_hit_rate=lambda _prompt: estimated_cache_hit_rate),
+    )
+    manager.running_request_count = running_request_count
+    manager.latest_success_infer_time = 0
+
+    async def fake_generate(*_args):
+        yield "result"
+
+    manager._generate = fake_generate
+
+    async def consume_one_result():
+        generator = manager.generate("multi-turn prompt", None, None, None)
+        try:
+            assert await generator.__anext__() == "result"
+        finally:
+            await generator.aclose()
+
+    if is_rejected:
+        with pytest.raises(ServerBusyError):
+            asyncio.run(consume_one_result())
+        assert manager.running_request_count == running_request_count
+    else:
+        asyncio.run(consume_one_result())
+        assert manager.running_request_count == running_request_count
+
+
 def test_pd_master_restores_request_count_when_preload_fails():
     class FailingMultimodalParams:
         async def verify_and_preload(self, request):
             raise RuntimeError("preload failed")
 
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = StartArgs(disable_pd_master_decode_capacity_limit=True)
     manager.running_request_count = 0
 
     async def consume_generate():
@@ -282,6 +394,7 @@ def test_pd_master_restores_request_count_when_preload_fails():
 
 def test_pd_master_request_count_covers_async_generator_lifecycle():
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = StartArgs(disable_pd_master_decode_capacity_limit=True)
     manager.running_request_count = 0
     inner_generator_closed = False
 

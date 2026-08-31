@@ -15,6 +15,7 @@ def _make_manager(monkeypatch):
     )
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
+    mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True)
     mgr.running_request_count = 0
     counter = [0]
 

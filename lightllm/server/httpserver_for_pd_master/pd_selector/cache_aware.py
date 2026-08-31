@@ -156,6 +156,18 @@ class CacheAwarePolicy:
         self.balance_rel_threshold_controller.append(cache_hit_rate)
         self.balance_rel_threshold_controller.update_config(self.config)
 
+    def estimate_cache_hit_rate(self, workers: List[PD_Client_Obj], request_text: str) -> float:
+        """Estimate reusable prompt cache on currently connected prefill workers."""
+        if not workers or not request_text:
+            return 0.0
+
+        result = self.prompt_cache_tree.prefix_match(request_text)
+        if result.prefill_node is None or not any(worker.client_ip_port == result.prefill_node for worker in workers):
+            return 0.0
+        if result.input_char_count == 0:
+            return 0.0
+        return min(max(result.matched_char_count / result.input_char_count, 0.0), 1.0)
+
     def _get_cache_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
         """在指定候选节点中返回达到匹配阈值的 cache 节点。"""
         result = self.prompt_cache_tree.prefix_match(request_text)

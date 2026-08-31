@@ -4,6 +4,7 @@ import asyncio
 import uvloop
 import time
 import datetime
+import math
 import ujson as json
 import pickle
 import httpx
@@ -36,6 +37,13 @@ class HttpServerManagerForPDMaster:
         args: StartArgs,
     ):
         self.args = args
+        if (
+            not math.isfinite(args.pd_master_decode_waiting_queue_ratio)
+            or args.pd_master_decode_waiting_queue_ratio < 0
+        ):
+            raise ValueError("pd_master_decode_waiting_queue_ratio must be a non-negative finite number")
+        if not 0 <= args.pd_master_cache_aware_queue_reserved_ratio <= 1:
+            raise ValueError("pd_master_cache_aware_queue_reserved_ratio must be between 0 and 1")
         self.max_req_total_len = args.max_req_total_len
         assert self.max_req_total_len is not None
         self.metric_client = MetricClient(get_shm_port_args().metric_port)
@@ -131,8 +139,26 @@ class HttpServerManagerForPDMaster:
     ):
         if not self.args.disable_pd_master_decode_capacity_limit:
             decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
-            if self.running_request_count >= decode_capacity:
+            waiting_queue_capacity = math.ceil(decode_capacity * self.args.pd_master_decode_waiting_queue_ratio)
+            hard_admission_limit = decode_capacity + waiting_queue_capacity
+            if self.running_request_count >= hard_admission_limit:
                 raise ServerBusyError()
+
+            reserved_ratio = self.args.pd_master_cache_aware_queue_reserved_ratio
+            general_waiting_capacity = math.ceil(waiting_queue_capacity * (1.0 - reserved_ratio))
+            general_admission_limit = decode_capacity + general_waiting_capacity
+            if self.running_request_count >= general_admission_limit:
+                estimate_cache_hit_rate = getattr(self.pd_manager.selector, "estimate_prompt_cache_hit_rate", None)
+                estimated_cache_hit_rate = estimate_cache_hit_rate(prompt) if estimate_cache_hit_rate else None
+                if estimated_cache_hit_rate is not None:
+                    if not math.isfinite(estimated_cache_hit_rate):
+                        estimated_cache_hit_rate = 0.0
+                    estimated_cache_hit_rate = min(max(estimated_cache_hit_rate, 0.0), 1.0)
+                    request_waiting_capacity = math.ceil(
+                        waiting_queue_capacity * (1.0 - reserved_ratio * (1.0 - estimated_cache_hit_rate))
+                    )
+                    if self.running_request_count >= decode_capacity + request_waiting_capacity:
+                        raise ServerBusyError()
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1

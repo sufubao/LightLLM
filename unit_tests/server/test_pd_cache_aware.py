@@ -73,6 +73,17 @@ def test_cache_aware_updates_threshold_from_inference_cache_hit_rate():
     assert policy.config.balance_rel_threshold == pytest.approx(1.55)
 
 
+def test_cache_aware_estimates_hit_rate_only_for_connected_worker():
+    policy = CacheAwarePolicy(CacheAwareConfig(sample_stride=1))
+    cached_worker = _worker("10.0.0.1:8000")
+    prompt = "shared conversation history and a new user turn"
+    policy.prompt_cache_tree.insert(prompt[:-10], cached_worker.client_ip_port)
+
+    expected_hit_rate = len(prompt[:-10]) / len(prompt)
+    assert policy.estimate_cache_hit_rate([cached_worker], prompt) == pytest.approx(expected_hit_rate)
+    assert policy.estimate_cache_hit_rate([_worker("10.0.0.2:8000")], prompt) == 0.0
+
+
 def test_cache_aware_keeps_cache_worker_when_inflight_load_is_balanced():
     policy = CacheAwarePolicy()
     cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=110, dispatched_req_num=2)

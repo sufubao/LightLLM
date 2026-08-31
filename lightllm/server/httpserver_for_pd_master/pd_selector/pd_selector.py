@@ -1,5 +1,5 @@
 import random
-from typing import Union, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
@@ -29,6 +29,10 @@ class PDSelector:
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         """记录推理侧返回的 prompt cache 命中率；非 cache-aware 策略无需处理。"""
         return
+
+    def estimate_prompt_cache_hit_rate(self, prompt: Union[str, List[int]]) -> Optional[float]:
+        """Return None when this selector cannot estimate reusable prompt cache."""
+        return None
 
 
 class RandomSelector(PDSelector):
@@ -100,3 +104,8 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         self.policy.record_prompt_cache_hit_rate(cache_hit_rate)
+
+    def estimate_prompt_cache_hit_rate(self, prompt: Union[str, List[int]]) -> Optional[float]:
+        if not isinstance(prompt, str):
+            return 0.0
+        return self.policy.estimate_cache_hit_rate(self.prefill_nodes, prompt)

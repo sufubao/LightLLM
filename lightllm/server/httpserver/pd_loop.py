@@ -32,6 +32,7 @@ _radix_cache_client_key = None
 
 
 def _update_pd_master_membership(manager: HttpServerManager, pd_master_ids) -> None:
+    """更新 Master 成员和容量版本，并立即唤醒心跳。"""
     pd_master_ids = tuple(sorted(pd_master_ids))
     if getattr(manager, "pd_master_ids", ()) == pd_master_ids:
         return
@@ -56,6 +57,7 @@ def _allocate_capacity_share(total_capacity: int, pd_master_ids, pd_master_node_
 
 
 def _get_radix_cache_info():
+    """读取本节点各 DP 的 Radix cache token 统计。"""
     global _radix_cache_client, _radix_cache_client_key
 
     from lightllm.server.api_http import g_objs
@@ -344,6 +346,7 @@ async def _up_tokens_to_pd_master(
     websocket: ClientConnection,
     pd_master_node_id: int,
 ):
+    """批量向 PD Master 转发生成结果和最新负载。"""
     while True:
         handle_list = await forwarding_queue.wait_to_get_all_data()
 
@@ -357,6 +360,7 @@ async def _send_heartbeat_to_pd_master(
     websocket: ClientConnection,
     pd_master_node_id: int,
 ):
+    """定时或在成员变化时向 PD Master 上报心跳。"""
     heartbeat_interval_seconds = 15
     membership_changed = manager.pd_master_membership_changed
     while True:
@@ -371,6 +375,7 @@ async def _send_heartbeat_to_pd_master(
 
 # 获取节点负载信息
 def _get_load_info(pd_master_node_id: int) -> dict:
+    """汇总当前 Master 对应的容量、负载和缓存遥测。"""
 
     from lightllm.server.api_http import g_objs
 

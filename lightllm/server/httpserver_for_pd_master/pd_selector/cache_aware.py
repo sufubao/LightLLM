@@ -186,6 +186,7 @@ class CacheAwarePolicy:
         return min(max(result.matched_char_count / result.input_char_count, 0.0), 1.0)
 
     def _match_prompt_cache(self, request_text: str) -> PromptCacheMatchResult:
+        """优先复用当前请求保存的前缀匹配结果。"""
         match_context = _prompt_cache_match_context.get()
         # 准入和选点共享同一个提示词对象。通过对象身份判断可以避免比较可能很长的字符串，
         # ContextVar 则会将快照安全地传递给每个 n-choice 子任务。

@@ -115,11 +115,13 @@ class HttpServerManagerForPDMaster:
         return
 
     def update_node_load_info(self, load_info: Optional[dict]) -> None:
+        """更新节点遥测并重新驱动准入队列。"""
         self.pd_manager.update_node_load_info(load_info)
         # Decode 租约或 Prefill cache 余量变化后都需要重新尝试队列。
         self.admission_controller.on_capacity_change()
 
     def _record_admission_state(self, controller: PDAdmissionController) -> None:
+        """把当前准入队列状态写入监控指标。"""
         self.metric_client.gauge_set(
             "lightllm_pd_master_admission_queue_size",
             controller.queued_request_count,
@@ -217,6 +219,7 @@ class HttpServerManagerForPDMaster:
                 admission_lease.release()
 
     def _get_session_key(self, request: Optional[Request]) -> Optional[str]:
+        """从请求头中提取规范化的 Session 标识。"""
         if request is None:
             return None
         session_key = request.headers.get("X-Session-Id", "").strip()
@@ -228,6 +231,7 @@ class HttpServerManagerForPDMaster:
         sampling_params: Optional[SamplingParams],
         session_key: Optional[str],
     ) -> AdmissionRequest:
+        """根据会话、缓存估算和 choice 数构造准入请求。"""
         estimated_cache_hit_rate = self.pd_manager.selector.estimate_prompt_cache_hit_rate(prompt)
         if estimated_cache_hit_rate is None or not math.isfinite(estimated_cache_hit_rate):
             estimated_cache_hit_rate = 0.0
@@ -868,6 +872,7 @@ class PDManager:
         return
 
     def get_decode_capacity(self) -> int:
+        """汇总所有 Decode 节点租给当前 Master 的槽位。"""
         return sum(
             node.capacity_share if node.capacity_share is not None else node.start_args["running_max_req_size"]
             for node in self.decode_nodes

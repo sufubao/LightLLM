@@ -38,6 +38,7 @@ class AdmissionPolicy:
     max_tracked_sessions: int = 100_000
 
     def __post_init__(self) -> None:
+        """校验准入策略中的权重、超时和容量参数。"""
         if (
             min(
                 self.continuation_weight,
@@ -66,6 +67,7 @@ class AdmissionPolicy:
             raise ValueError("max_tracked_sessions must be positive")
 
     def weight(self, priority: AdmissionPriority) -> int:
+        """返回指定优先级在轮转调度中的权重。"""
         if priority == AdmissionPriority.CONTINUATION:
             return self.continuation_weight
         if priority == AdmissionPriority.PROBABLE_CACHE_HIT:
@@ -73,6 +75,7 @@ class AdmissionPolicy:
         return self.cold_weight
 
     def max_wait_seconds(self, priority: AdmissionPriority) -> float:
+        """返回指定优先级允许的最长排队时间。"""
         if priority == AdmissionPriority.CONTINUATION:
             return self.continuation_max_wait_seconds
         if priority == AdmissionPriority.PROBABLE_CACHE_HIT:
@@ -88,6 +91,7 @@ class AdmissionRequest:
     estimated_uncached_work: int = 0
 
     def __post_init__(self) -> None:
+        """校验请求槽位数和预计未命中工作量。"""
         if self.decode_slots < 1:
             raise ValueError("decode_slots must be positive")
         if self.estimated_uncached_work < 0:
@@ -102,11 +106,13 @@ class CacheCapacitySnapshot:
     capacity_tokens: int
 
     def __post_init__(self) -> None:
+        """校验缓存 token 统计值均为非负数。"""
         if self.total_tokens < 0 or self.capacity_tokens < 0:
             raise ValueError("cache token counts must be non-negative")
 
     @property
     def free_tokens(self) -> int:
+        """返回当前还能容纳的缓存 token 数。"""
         return max(0, self.capacity_tokens - self.total_tokens)
 
 
@@ -119,12 +125,14 @@ class SessionTracker:
         max_sessions: int,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """初始化带 TTL 和数量上限的 Session 记录器。"""
         self.ttl_seconds = ttl_seconds
         self.max_sessions = max_sessions
         self._clock = clock
         self._last_success: OrderedDict[str, float] = OrderedDict()
 
     def is_continuation(self, session_key: Optional[str]) -> bool:
+        """判断 Session 是否在有效期内成功返回过结果。"""
         if not session_key:
             return False
         now = self._clock()
@@ -138,6 +146,7 @@ class SessionTracker:
         return True
 
     def mark_success(self, session_key: Optional[str]) -> None:
+        """记录 Session 最近一次成功返回结果的时间。"""
         if not session_key:
             return
         self._last_success[session_key] = self._clock()
@@ -166,6 +175,7 @@ class AdmissionLease:
         waited_seconds: float,
         cold_slots: int,
     ) -> None:
+        """保存本次租约占用的总槽位和冷请求槽位。"""
         self._controller = controller
         self.request = request
         self.waited_seconds = waited_seconds
@@ -173,12 +183,15 @@ class AdmissionLease:
         self._released = False
 
     async def __aenter__(self) -> "AdmissionLease":
+        """进入异步上下文并返回当前租约。"""
         return self
 
     async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+        """退出异步上下文时自动释放租约。"""
         self.release()
 
     def release(self) -> None:
+        """幂等释放本次占用的准入槽位。"""
         if self._released:
             return
         self._released = True
@@ -202,6 +215,7 @@ class PDAdmissionController:
         clock: Callable[[], float] = time.monotonic,
         state_change_callback: Optional[Callable[["PDAdmissionController"], None]] = None,
     ) -> None:
+        """初始化容量提供器、优先级队列和调度状态。"""
         self.policy = policy or AdmissionPolicy()
         self._decode_capacity_provider = decode_capacity_provider
         self._cache_capacity_provider = cache_capacity_provider
@@ -223,10 +237,12 @@ class PDAdmissionController:
 
     @property
     def active_slots(self) -> int:
+        """返回当前已经发放的 Decode 槽位数。"""
         return self._active_slots
 
     @property
     def active_cold_slots(self) -> int:
+        """返回当前由冷请求占用的槽位数。"""
         return self._active_cold_slots
 
     @property
@@ -252,16 +268,20 @@ class PDAdmissionController:
 
     @property
     def queued_slots(self) -> int:
+        """返回等待队列中的 Decode 槽位总数。"""
         return self._queued_slots
 
     @property
     def queued_request_count(self) -> int:
+        """返回三个优先级队列中的请求总数。"""
         return sum(len(queue) for queue in self._queues.values())
 
     def _capacity(self) -> int:
+        """读取并规范化当前可用的 Decode 容量。"""
         return max(0, int(self._decode_capacity_provider()))
 
     def _build_schedule(self) -> tuple[AdmissionPriority, ...]:
+        """按策略权重生成一个完整的轮转调度周期。"""
         remaining = {priority: self.policy.weight(priority) for priority in self._PRIORITY_ORDER}
         schedule = []
         while any(remaining.values()):
@@ -272,6 +292,7 @@ class PDAdmissionController:
         return tuple(schedule)
 
     async def acquire(self, request: AdmissionRequest) -> AdmissionLease:
+        """立即发放租约或等待队列调度后再返回租约。"""
         capacity = self._capacity()
         if capacity <= 0 or request.decode_slots > capacity:
             raise ServerBusyError("PD decode capacity is unavailable")
@@ -313,6 +334,7 @@ class PDAdmissionController:
             raise
 
     def on_capacity_change(self) -> None:
+        """容量或缓存余量变化后重新尝试驱动队列。"""
         self._drain()
 
     def record_prefill_result(
@@ -367,6 +389,7 @@ class PDAdmissionController:
         self._drain()
 
     def _update_average(self, current: Optional[float], sample: float) -> float:
+        """按一个 Decode 波次大小更新指数移动平均。"""
         # 一个 Decode 波次作为自适应窗口：容量越大，单个样本对均值的影响越小。
         sample_window = max(1, self._capacity())
         alpha = 2.0 / (sample_window + 1.0)
@@ -375,6 +398,7 @@ class PDAdmissionController:
         return current + alpha * (sample - current)
 
     def _requires_cold_capacity(self, request: AdmissionRequest) -> bool:
+        """判断请求是否需要消耗冷请求容量。"""
         if request.priority == AdmissionPriority.COLD:
             return True
         return (
@@ -384,11 +408,13 @@ class PDAdmissionController:
         )
 
     def _has_cold_capacity(self, request: AdmissionRequest) -> bool:
+        """判断剩余冷请求容量能否容纳当前请求。"""
         if not self._requires_cold_capacity(request):
             return True
         return self._active_cold_slots + request.decode_slots <= self.cold_capacity
 
     def _can_activate(self, request: AdmissionRequest) -> bool:
+        """检查总容量、冷容量和 Session 串行约束。"""
         if self._active_slots + request.decode_slots > self._capacity():
             return False
         if not self._has_cold_capacity(request):
@@ -396,6 +422,7 @@ class PDAdmissionController:
         return request.session_key is None or request.session_key not in self._active_sessions
 
     def _activate(self, request: AdmissionRequest, waited_seconds: float) -> AdmissionLease:
+        """占用所需槽位并创建对应的准入租约。"""
         self._active_slots += request.decode_slots
         cold_slots = request.decode_slots if self._requires_cold_capacity(request) else 0
         self._active_cold_slots += cold_slots
@@ -404,6 +431,7 @@ class PDAdmissionController:
         return AdmissionLease(self, request, waited_seconds, cold_slots)
 
     def _release(self, lease: AdmissionLease) -> None:
+        """归还租约槽位并继续调度等待请求。"""
         request = lease.request
         self._active_slots -= request.decode_slots
         self._active_cold_slots -= lease._cold_slots
@@ -416,9 +444,11 @@ class PDAdmissionController:
         self._drain()
 
     def _waiting_capacity(self) -> int:
+        """返回等待队列允许容纳的槽位总数。"""
         return self._capacity() * self.policy.waiting_decode_waves
 
     def _make_queue_room(self, incoming: _WaitingRequest) -> bool:
+        """必要时淘汰低优先级请求，为新请求腾出队列空间。"""
         waiting_capacity = self._waiting_capacity()
         if incoming.request.decode_slots > waiting_capacity:
             return False
@@ -450,12 +480,14 @@ class PDAdmissionController:
         return True
 
     def _enqueue(self, waiter: _WaitingRequest) -> None:
+        """把等待项加入优先级队列和 Session 队列。"""
         self._queues[waiter.request.priority].append(waiter)
         self._queued_slots += waiter.request.decode_slots
         if waiter.request.session_key is not None:
             self._session_queues.setdefault(waiter.request.session_key, deque()).append(waiter)
 
     def _remove_waiter(self, waiter: _WaitingRequest) -> bool:
+        """从所有索引中移除等待项并归还排队槽位。"""
         try:
             self._queues[waiter.request.priority].remove(waiter)
         except ValueError:
@@ -471,6 +503,7 @@ class PDAdmissionController:
         return True
 
     def _cancel_waiter_or_take_lease(self, waiter: _WaitingRequest) -> Optional[AdmissionLease]:
+        """取消等待项，或取回已并发发放的租约用于释放。"""
         if self._remove_waiter(waiter):
             waiter.future.cancel()
             self._drain()
@@ -485,6 +518,7 @@ class PDAdmissionController:
         return None
 
     async def _wait_for_lease(self, waiter: _WaitingRequest) -> AdmissionLease:
+        """等待租约、优先级提升后的新截止时间或超时。"""
         while True:
             deadline_changed_task = asyncio.create_task(waiter.deadline_changed.wait())
             try:
@@ -505,6 +539,7 @@ class PDAdmissionController:
             raise asyncio.TimeoutError
 
     def _session_is_grantable(self, waiter: _WaitingRequest) -> bool:
+        """判断等待项是否满足同 Session 串行和 FIFO 约束。"""
         session_key = waiter.request.session_key
         if session_key is None:
             return True
@@ -513,6 +548,7 @@ class PDAdmissionController:
         return self._session_queues[session_key][0] is waiter
 
     def _first_grantable(self, priority: AdmissionPriority) -> Optional[_WaitingRequest]:
+        """返回指定优先级中当前最合适的可调度等待项。"""
         candidates = []
         available_decode_slots = self._capacity() - self._active_slots
         for waiter in self._queues[priority]:
@@ -538,6 +574,7 @@ class PDAdmissionController:
         )
 
     def _first_fitting_higher_priority(self, blocked_priority: AdmissionPriority) -> Optional[_WaitingRequest]:
+        """查找能绕过受阻请求的更高优先级等待项。"""
         for priority in self._PRIORITY_ORDER:
             if priority <= blocked_priority:
                 continue
@@ -547,6 +584,7 @@ class PDAdmissionController:
         return None
 
     def _select_next(self) -> Optional[_WaitingRequest]:
+        """按照加权轮转顺序选择下一个等待项。"""
         schedule_size = len(self._schedule)
         for offset in range(schedule_size):
             index = (self._schedule_index + offset) % schedule_size
@@ -557,6 +595,7 @@ class PDAdmissionController:
         return None
 
     def _drain(self) -> None:
+        """持续发放当前容量允许的等待请求。"""
         while self._active_slots < self._capacity():
             schedule_index = self._schedule_index
             waiter = self._select_next()
@@ -581,5 +620,6 @@ class PDAdmissionController:
         self._notify_state_change()
 
     def _notify_state_change(self) -> None:
+        """通知外部记录最新的准入状态。"""
         if self._state_change_callback is not None:
             self._state_change_callback(self)

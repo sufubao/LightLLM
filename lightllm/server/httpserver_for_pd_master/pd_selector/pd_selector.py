@@ -106,6 +106,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         self.policy.record_prompt_cache_hit_rate(cache_hit_rate)
 
     def estimate_prompt_cache_hit_rate(self, prompt: Union[str, List[int]]) -> Optional[float]:
+        """返回 cache-aware 策略对当前提示词的命中估算。"""
         if not isinstance(prompt, str):
             return 0.0
         return self.policy.estimate_cache_hit_rate(self.prefill_nodes, prompt)

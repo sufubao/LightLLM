@@ -178,6 +178,7 @@ class HttpServerManagerForPDMaster:
         if not self.args.disable_pd_master_decode_capacity_limit:
             admission_request = self._build_admission_request(prompt, sampling_params, session_key)
             admission_lease = await self.admission_controller.acquire(admission_request)
+            admission_request = admission_lease.request
             self.metric_client.histogram_observe(
                 "lightllm_request_queue_duration_bucket", admission_lease.waited_seconds
             )

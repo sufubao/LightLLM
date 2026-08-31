@@ -151,6 +151,8 @@ class _WaitingRequest:
     sequence_id: int
     request: AdmissionRequest
     enqueue_time: float
+    deadline: float
+    deadline_changed: asyncio.Event
     future: asyncio.Future
 
 
@@ -162,10 +164,12 @@ class AdmissionLease:
         controller: "PDAdmissionController",
         request: AdmissionRequest,
         waited_seconds: float,
+        cold_slots: int,
     ) -> None:
         self._controller = controller
         self.request = request
         self.waited_seconds = waited_seconds
+        self._cold_slots = cold_slots
         self._released = False
 
     async def __aenter__(self) -> "AdmissionLease":
@@ -206,6 +210,7 @@ class PDAdmissionController:
         self._active_slots = 0
         self._active_cold_slots = 0
         self._average_cold_uncached_tokens: Optional[float] = None
+        self._probable_actual_hit_rate: Optional[float] = None
         self._active_sessions = set()
         self._queues: Dict[AdmissionPriority, Deque[_WaitingRequest]] = {
             priority: deque() for priority in self._PRIORITY_ORDER
@@ -277,10 +282,13 @@ class PDAdmissionController:
             return lease
 
         loop = asyncio.get_running_loop()
+        enqueue_time = self._clock()
         waiter = _WaitingRequest(
             sequence_id=self._sequence_id,
             request=request,
-            enqueue_time=self._clock(),
+            enqueue_time=enqueue_time,
+            deadline=enqueue_time + self.policy.max_wait_seconds(request.priority),
+            deadline_changed=asyncio.Event(),
             future=loop.create_future(),
         )
         self._sequence_id += 1
@@ -292,10 +300,7 @@ class PDAdmissionController:
         self._drain()
 
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(waiter.future),
-                timeout=self.policy.max_wait_seconds(request.priority),
-            )
+            return await self._wait_for_lease(waiter)
         except asyncio.TimeoutError as exc:
             lease = self._cancel_waiter_or_take_lease(waiter)
             if lease is not None:
@@ -316,21 +321,27 @@ class PDAdmissionController:
         prompt_tokens: int,
         cached_tokens: int,
     ) -> None:
-        """用冷请求的真实未命中量更新下一轮冷容量。"""
-        if request.priority != AdmissionPriority.COLD:
+        """用真实命中结果更新预计命中的可信度和冷请求容量。"""
+        if request.priority == AdmissionPriority.CONTINUATION:
             return
 
         prompt_tokens = max(0, int(prompt_tokens))
         cached_tokens = min(prompt_tokens, max(0, int(cached_tokens)))
         uncached_tokens = prompt_tokens - cached_tokens
 
-        # 一个 Decode 波次作为自适应窗口：容量越大，单个样本对均值的影响越小。
-        sample_window = max(1, self._capacity())
-        alpha = 2.0 / (sample_window + 1.0)
-        if self._average_cold_uncached_tokens is None:
-            self._average_cold_uncached_tokens = float(uncached_tokens)
-        else:
-            self._average_cold_uncached_tokens += alpha * (uncached_tokens - self._average_cold_uncached_tokens)
+        if request.priority == AdmissionPriority.PROBABLE_CACHE_HIT:
+            actual_hit_rate = cached_tokens / max(prompt_tokens, 1)
+            self._probable_actual_hit_rate = self._update_average(
+                self._probable_actual_hit_rate,
+                actual_hit_rate,
+            )
+
+        # 预计命中的真实命中率低于承诺阈值时，让后续同类请求也消费冷槽位。
+        if self._requires_cold_capacity(request):
+            self._average_cold_uncached_tokens = self._update_average(
+                self._average_cold_uncached_tokens,
+                float(uncached_tokens),
+            )
         self._drain()
 
     def promote_session(self, session_key: Optional[str]) -> None:
@@ -347,11 +358,33 @@ class PDAdmissionController:
                 continue
             self._queues[old_priority].remove(waiter)
             waiter.request = replace(waiter.request, priority=AdmissionPriority.CONTINUATION)
+            waiter.deadline = max(
+                waiter.deadline,
+                waiter.enqueue_time + self.policy.continuation_max_wait_seconds,
+            )
+            waiter.deadline_changed.set()
             self._queues[AdmissionPriority.CONTINUATION].append(waiter)
         self._drain()
 
+    def _update_average(self, current: Optional[float], sample: float) -> float:
+        # 一个 Decode 波次作为自适应窗口：容量越大，单个样本对均值的影响越小。
+        sample_window = max(1, self._capacity())
+        alpha = 2.0 / (sample_window + 1.0)
+        if current is None:
+            return sample
+        return current + alpha * (sample - current)
+
+    def _requires_cold_capacity(self, request: AdmissionRequest) -> bool:
+        if request.priority == AdmissionPriority.COLD:
+            return True
+        return (
+            request.priority == AdmissionPriority.PROBABLE_CACHE_HIT
+            and self._probable_actual_hit_rate is not None
+            and self._probable_actual_hit_rate < self.policy.probable_cache_hit_threshold
+        )
+
     def _has_cold_capacity(self, request: AdmissionRequest) -> bool:
-        if request.priority != AdmissionPriority.COLD:
+        if not self._requires_cold_capacity(request):
             return True
         return self._active_cold_slots + request.decode_slots <= self.cold_capacity
 
@@ -364,17 +397,16 @@ class PDAdmissionController:
 
     def _activate(self, request: AdmissionRequest, waited_seconds: float) -> AdmissionLease:
         self._active_slots += request.decode_slots
-        if request.priority == AdmissionPriority.COLD:
-            self._active_cold_slots += request.decode_slots
+        cold_slots = request.decode_slots if self._requires_cold_capacity(request) else 0
+        self._active_cold_slots += cold_slots
         if request.session_key is not None:
             self._active_sessions.add(request.session_key)
-        return AdmissionLease(self, request, waited_seconds)
+        return AdmissionLease(self, request, waited_seconds, cold_slots)
 
     def _release(self, lease: AdmissionLease) -> None:
         request = lease.request
         self._active_slots -= request.decode_slots
-        if request.priority == AdmissionPriority.COLD:
-            self._active_cold_slots -= request.decode_slots
+        self._active_cold_slots -= lease._cold_slots
         if self._active_slots < 0:
             raise RuntimeError("PD admission active slot count became negative")
         if self._active_cold_slots < 0:
@@ -452,14 +484,39 @@ class PDAdmissionController:
                 return result
         return None
 
+    async def _wait_for_lease(self, waiter: _WaitingRequest) -> AdmissionLease:
+        while True:
+            deadline_changed_task = asyncio.create_task(waiter.deadline_changed.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (waiter.future, deadline_changed_task),
+                    timeout=max(0.0, waiter.deadline - self._clock()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                if not deadline_changed_task.done():
+                    deadline_changed_task.cancel()
+
+            if waiter.future in done:
+                return waiter.future.result()
+            if deadline_changed_task in done:
+                waiter.deadline_changed.clear()
+                continue
+            raise asyncio.TimeoutError
+
+    def _session_is_grantable(self, waiter: _WaitingRequest) -> bool:
+        session_key = waiter.request.session_key
+        if session_key is None:
+            return True
+        if session_key in self._active_sessions:
+            return False
+        return self._session_queues[session_key][0] is waiter
+
     def _first_grantable(self, priority: AdmissionPriority) -> Optional[_WaitingRequest]:
         candidates = []
         available_decode_slots = self._capacity() - self._active_slots
         for waiter in self._queues[priority]:
-            session_key = waiter.request.session_key
-            if session_key is not None and session_key in self._active_sessions:
-                continue
-            if session_key is not None and self._session_queues[session_key][0] is not waiter:
+            if not self._session_is_grantable(waiter):
                 continue
             if priority != AdmissionPriority.COLD:
                 return waiter
@@ -480,6 +537,15 @@ class PDAdmissionController:
             ),
         )
 
+    def _first_fitting_higher_priority(self, blocked_priority: AdmissionPriority) -> Optional[_WaitingRequest]:
+        for priority in self._PRIORITY_ORDER:
+            if priority <= blocked_priority:
+                continue
+            for waiter in self._queues[priority]:
+                if self._session_is_grantable(waiter) and self._can_activate(waiter.request):
+                    return waiter
+        return None
+
     def _select_next(self) -> Optional[_WaitingRequest]:
         schedule_size = len(self._schedule)
         for offset in range(schedule_size):
@@ -496,13 +562,12 @@ class PDAdmissionController:
             waiter = self._select_next()
             if waiter is None:
                 break
-            if self._active_slots + waiter.request.decode_slots > self._capacity():
-                # 为需要多个 choice slot 的老请求保留逐步释放出来的容量，避免永久饥饿。
+            if not self._can_activate(waiter.request):
+                # 为被选中的多 choice 请求积累槽位，但不因此阻塞当前可以执行的更高优先级请求。
                 self._schedule_index = schedule_index
-                break
-            if not self._has_cold_capacity(waiter.request):
-                self._schedule_index = schedule_index
-                break
+                waiter = self._first_fitting_higher_priority(waiter.request.priority)
+                if waiter is None:
+                    break
             if not self._remove_waiter(waiter):
                 continue
             lease = self._activate(

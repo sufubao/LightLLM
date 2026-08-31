@@ -136,6 +136,40 @@ def test_multi_choice_request_reserves_capacity_across_individual_releases():
     asyncio.run(run())
 
 
+def test_multi_choice_reservation_does_not_block_fitting_higher_priority_request():
+    async def run():
+        controller = PDAdmissionController(lambda: 3)
+        active = [await controller.acquire(_request()) for _ in range(3)]
+
+        # 先消费调度表中的 continuation 和 probable 配额，使下一次轮到 cold。
+        first_continuation_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        first_probable_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.PROBABLE_CACHE_HIT)))
+        await asyncio.sleep(0)
+        active[0].release()
+        first_continuation = await first_continuation_task
+        active[1].release()
+        first_probable = await first_probable_task
+
+        large_cold_task = asyncio.create_task(controller.acquire(_request(decode_slots=2)))
+        later_continuation_task = asyncio.create_task(controller.acquire(_request(AdmissionPriority.CONTINUATION)))
+        await asyncio.sleep(0)
+
+        active[2].release()
+        later_continuation = await later_continuation_task
+        assert controller.active_slots == 3
+        assert large_cold_task.done() is False
+
+        first_continuation.release()
+        assert large_cold_task.done() is False
+        first_probable.release()
+        large_cold = await large_cold_task
+
+        later_continuation.release()
+        large_cold.release()
+
+    asyncio.run(run())
+
+
 def test_same_session_is_fifo_while_other_sessions_can_make_progress():
     async def run():
         controller = PDAdmissionController(lambda: 2)
@@ -267,6 +301,30 @@ def test_successful_session_promotes_its_waiting_requests():
     asyncio.run(run())
 
 
+def test_session_promotion_extends_the_wait_deadline():
+    async def run():
+        policy = AdmissionPolicy(
+            continuation_max_wait_seconds=0.2,
+            probable_cache_hit_max_wait_seconds=0.1,
+            cold_max_wait_seconds=0.02,
+        )
+        controller = PDAdmissionController(lambda: 1, policy=policy)
+        active = await controller.acquire(_request())
+        waiting_task = asyncio.create_task(controller.acquire(_request(session_key="session-a")))
+        await asyncio.sleep(0.005)
+
+        controller.promote_session("session-a")
+        await asyncio.sleep(0.025)
+        assert waiting_task.done() is False
+
+        active.release()
+        promoted = await waiting_task
+        assert promoted.request.priority == AdmissionPriority.CONTINUATION
+        promoted.release()
+
+    asyncio.run(run())
+
+
 def test_cold_capacity_tracks_live_cache_headroom_and_actual_miss_size():
     snapshot = [CacheCapacitySnapshot(total_tokens=200, capacity_tokens=1000)]
     controller = PDAdmissionController(
@@ -309,6 +367,42 @@ def test_cache_friendly_request_bypasses_cold_capacity():
         first_cold.release()
         second_cold = await second_cold_task
         second_cold.release()
+
+    asyncio.run(run())
+
+
+def test_probable_cache_hits_consume_cold_capacity_when_actual_hits_are_low():
+    async def run():
+        snapshot = CacheCapacitySnapshot(total_tokens=1000, capacity_tokens=1000)
+        controller = PDAdmissionController(
+            lambda: 3,
+            cache_capacity_provider=lambda: snapshot,
+        )
+        probable_request = _request(AdmissionPriority.PROBABLE_CACHE_HIT)
+
+        initially_trusted = await controller.acquire(probable_request)
+        assert controller.active_cold_slots == 0
+        controller.record_prefill_result(
+            probable_request,
+            prompt_tokens=100,
+            cached_tokens=0,
+        )
+        assert controller.cold_capacity == 1
+
+        first_gated = await controller.acquire(probable_request)
+        assert controller.active_cold_slots == 1
+        second_gated_task = asyncio.create_task(controller.acquire(probable_request))
+        await asyncio.sleep(0)
+        assert second_gated_task.done() is False
+
+        # 可信度变化不能让已经取得的租约在释放时误扣冷槽位。
+        initially_trusted.release()
+        assert controller.active_cold_slots == 1
+        assert second_gated_task.done() is False
+
+        first_gated.release()
+        second_gated = await second_gated_task
+        second_gated.release()
 
     asyncio.run(run())
 

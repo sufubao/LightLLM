@@ -7,6 +7,8 @@ from lightllm.models.draft_registry import DraftModelRegistry
 class Qwen3_5DSparkModel(Qwen3DSparkModel):
     """Adapter for the current Qwen3 DSpark checkpoint with a Qwen3.5 target."""
 
+    supports_startup_weight_load_overlap = True
+
     def _init_config(self):
         super()._init_config()
         self.config.update(self.config.get("dflash_config", {}))

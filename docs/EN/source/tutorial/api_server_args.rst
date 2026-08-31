@@ -469,6 +469,19 @@ Performance Optimization Parameters
 
     Disable cudagraph in the decoding phase
 
+.. option:: --startup_weight_load_mode
+
+    Startup weight-loading mode: ``serial`` (default) or ``overlap``.
+
+    ``overlap`` fills the final GPU weight storage with capture-safe values, stages local safetensors files into the
+    OS page cache while CUDA graphs are captured, and then commits the real weights in place. It is currently limited
+    to the explicitly validated dense Qwen3.5 and Qwen3.5 DSpark models with unquantized or
+    ``fp8w8a8-pt-sgl`` weights.
+
+.. option:: --weight_loader_prefetch_num_threads
+
+    Number of checkpoint page-cache prefetch threads per local rank in startup overlap mode, default is ``4``.
+
 .. option:: --graph_max_batch_size
 
     Maximum batch size that can be captured by cuda graph in the decoding phase, default is ``256``

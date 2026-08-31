@@ -11,6 +11,7 @@ from typing import final, List
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
+from lightllm.common.basemodel.layer_weights.startup_weight_load import StartupWeightLoadManager
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
@@ -24,7 +25,7 @@ from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_node, get_dp_world_size, get_node_world_size
 from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
 from lightllm.utils.envs_utils import (
     get_env_start_args,
@@ -58,6 +59,7 @@ torch.backends.cudnn.enabled = True
 
 class TpPartBaseModel:
     is_mtp_draft_model = False
+    supports_startup_weight_load_overlap = False
 
     # weight class
     pre_and_post_weight_class = None
@@ -128,26 +130,35 @@ class TpPartBaseModel:
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self.load_weights(self.weight_dict)
-        for event in self.wait_events:
-            event.wait()
+        startup_weight_manager = self._prepare_startup_weight_load_overlap()
+        if startup_weight_manager is None:
+            self.load_weights(self.weight_dict)
 
-        self._init_att_backend()
-        self._init_att_backend1()
+        try:
+            for event in self.wait_events:
+                event.wait()
 
-        logger.info(f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}")
-        logger.info(f"use decode att backend: {self.decode_att_backend.__class__.__name__}")
-        if self.prefill_att_backend1 is not None:
-            logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
-            logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
+            self._init_att_backend()
+            self._init_att_backend1()
 
-        self._init_hidden_collector()
-        self._autotune_warmup()
-        self._full_att_decode_autotune()
-        self._init_padded_req()
-        self._init_cudagraph()
-        self._init_prefill_cuda_graph()
-        self._check_max_len_infer()
+            logger.info(f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}")
+            logger.info(f"use decode att backend: {self.decode_att_backend.__class__.__name__}")
+            if self.prefill_att_backend1 is not None:
+                logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
+                logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
+
+            self._init_hidden_collector()
+            self._autotune_warmup()
+            self._full_att_decode_autotune()
+            self._init_padded_req()
+            self._init_cudagraph()
+            self._init_prefill_cuda_graph()
+            self._check_max_len_infer()
+            if startup_weight_manager is not None:
+                startup_weight_manager.commit(lambda: self.load_weights(self.weight_dict))
+        finally:
+            if startup_weight_manager is not None:
+                startup_weight_manager.stop_prefetch()
         torch.cuda.empty_cache()
         set_model_init_status(True)
         return
@@ -202,6 +213,47 @@ class TpPartBaseModel:
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
         return
+
+    def _prepare_startup_weight_load_overlap(self):
+        mode = getattr(self.args, "startup_weight_load_mode", "serial")
+        if mode == "serial":
+            return None
+        if mode != "overlap":
+            raise ValueError(f"Unknown startup_weight_load_mode: {mode}")
+        if not self.__class__.__dict__.get("supports_startup_weight_load_overlap", False):
+            raise ValueError(
+                f"startup weight overlap is not supported for {self.__class__.__name__}; "
+                "only explicitly validated model classes may opt in"
+            )
+        if self.weight_dict is not None:
+            raise ValueError("startup weight overlap does not support in-memory weight_dict loading")
+        if self.disable_cudagraph and not self.args.enable_prefill_cudagraph:
+            raise ValueError("startup weight overlap requires decode or prefill CUDA Graph capture")
+        if self.args.enable_torch_memory_saver or self.args.enable_weight_cpu_backup:
+            raise ValueError("startup weight overlap does not support weight memory saver or CPU backup")
+        if self.data_type not in (torch.float16, torch.bfloat16):
+            raise ValueError("startup weight overlap supports FP16 and BF16 model dtypes only")
+
+        quant_types = {self.quant_cfg.quant_type}
+        for layer_config in self.quant_cfg.quant_cfg.values():
+            quant_types.update(layer_config.values())
+        unsupported_quant_types = quant_types - {"none", "fp8w8a8-pt-sgl"}
+        if unsupported_quant_types:
+            raise ValueError(
+                "startup weight overlap supports unquantized and fp8w8a8-pt-sgl weights only; "
+                f"got {sorted(unsupported_quant_types)}"
+            )
+
+        manager = StartupWeightLoadManager(
+            pre_post_layer=self.pre_post_weight,
+            transformer_layer_list=self.trans_layers_weight,
+            weight_dir=self.weight_dir_,
+            num_threads=self.args.weight_loader_prefetch_num_threads,
+            rank_in_node=get_current_rank_in_node(),
+            node_world_size=get_node_world_size(),
+        )
+        manager.prepare()
+        return manager
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
@@ -294,11 +346,10 @@ class TpPartBaseModel:
             )
         )
         if self.graph is not None:
-            initial_batch_sizes = self.graph.cuda_graph_batch_sizes[:1]
             if get_env_start_args().enable_decode_microbatch_overlap:
-                self.graph.warmup_overlap(self, batch_sizes=initial_batch_sizes)
+                self.graph.warmup_overlap(self)
             else:
-                self.graph.warmup(self, batch_sizes=initial_batch_sizes)
+                self.graph.warmup(self)
 
     def _init_prefill_cuda_graph(self):
         self.prefill_graph = (

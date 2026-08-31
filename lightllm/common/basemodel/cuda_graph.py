@@ -243,15 +243,14 @@ class CudaGraph:
             return self._replay(infer_state)
 
     @torch.no_grad()
-    def warmup(self, model, batch_sizes=None):
+    def warmup(self, model):
         logger.info("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
         # decode cuda graph init
-        batch_sizes = self.cuda_graph_batch_sizes if batch_sizes is None else batch_sizes
-        for batch_size in batch_sizes[::-1]:
+        for batch_size in self.cuda_graph_batch_sizes[::-1]:
             seq_len = 2
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
@@ -297,17 +296,19 @@ class CudaGraph:
                     del locals()[var_name]
             torch.cuda.empty_cache()
 
-        logger.info(f"Captured initial CUDA graphs for batch sizes {batch_sizes}; remaining sizes capture on demand.")
+        logger.info(
+            f"Capture cudagraph success, batch_size <={self.max_batch_size} "
+            f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
+        )
 
     @torch.no_grad()
-    def warmup_overlap(self, model, batch_sizes=None):
+    def warmup_overlap(self, model):
         logger.info("Begin capture overlap cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
-        batch_sizes = self.cuda_graph_batch_sizes if batch_sizes is None else batch_sizes
-        for batch_size in batch_sizes[::-1]:
+        for batch_size in self.cuda_graph_batch_sizes[::-1]:
             decode_batches = []
             for micro_batch_index in [0, 1]:
                 # dummy decoding, capture the cudagraph
@@ -363,5 +364,6 @@ class CudaGraph:
             torch.cuda.empty_cache()
 
         logger.info(
-            f"Captured initial overlap CUDA graphs for batch sizes {batch_sizes}; remaining sizes capture on demand."
+            f"Capture overlap cudagraph success, batch_size <={self.max_batch_size} "
+            f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
         )

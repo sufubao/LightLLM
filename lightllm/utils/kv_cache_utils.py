@@ -393,9 +393,7 @@ def register_shm_ptr_to_pin_async(
 
 
 @lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(
-    shm_ptr: int, size: int, ranges: Optional[Tuple[Tuple[int, int], ...]] = None
-) -> int:
+def register_shm_ptr_to_pin(shm_ptr: int, size: int, ranges: Optional[Tuple[Tuple[int, int], ...]] = None) -> int:
     """Synchronously cudaHostRegister selected ranges of a shared-memory allocation."""
     return _register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=size, ranges=ranges)
 

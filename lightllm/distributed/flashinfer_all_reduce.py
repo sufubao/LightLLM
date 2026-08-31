@@ -17,7 +17,7 @@ try:
     _FI_OK = hasattr(flashinfer_comm, "allreduce_fusion") and hasattr(
         flashinfer_comm, "create_allreduce_fusion_workspace"
     )
-except ImportError:
+except Exception:
     flashinfer_comm = None
     TorchDistBackend = None
     _FI_OK = False
@@ -92,6 +92,7 @@ class FlashInferAllReduce:
                 pass
             self._workspace = None
         rng_state = random.getstate()
+        init_error = None
         try:
             random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
             self._workspace = flashinfer_comm.create_allreduce_fusion_workspace(
@@ -104,12 +105,27 @@ class FlashInferAllReduce:
                 comm_backend=TorchDistBackend(group=self.group),
             )
         except Exception as e:
-            logger.warning("FlashInferAllReduce workspace init failed: %s. Disabling.", e)
-            self.disabled = True
+            init_error = e
             self._workspace = None
-            return False
         finally:
             random.setstate(rng_state)
+
+        workspace_ready = torch.tensor([int(self._workspace is not None)], dtype=torch.int32)
+        dist.all_reduce(workspace_ready, op=dist.ReduceOp.MIN, group=self.group)
+        if not workspace_ready.item():
+            if self._workspace is not None:
+                try:
+                    self._workspace.destroy()
+                except Exception:
+                    pass
+            self.disabled = True
+            self._workspace = None
+            if init_error is not None:
+                logger.warning("FlashInferAllReduce workspace init failed: %s. Disabling on every rank.", init_error)
+            else:
+                logger.warning("FlashInferAllReduce workspace init failed on another rank. Disabling on every rank.")
+            return False
+
         self._ws_hidden_dim = hidden_dim
         self._ws_dtype = dtype
         self._ws_max_token_num = max_token_num

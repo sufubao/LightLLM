@@ -316,12 +316,6 @@ def _run_in_subprocess(backend_name, pipe):
 
 def _quick_validate(backend_name: str):
     """Use static capability checks where they are sufficient for backend selection."""
-    if backend_name == "fa3":
-        from lightllm.utils.device_utils import is_hopper
-        from lightllm.utils.sgl_utils import flash_attn_varlen_func
-
-        return is_hopper() and flash_attn_varlen_func is not None
-
     if backend_name in ("flashinfer", "flashqla"):
         from lightllm.utils.device_utils import has_cuda_compiler
 

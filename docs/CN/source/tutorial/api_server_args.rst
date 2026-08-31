@@ -464,6 +464,18 @@ PD 分离模式参数
 
     禁用解码阶段的 cudagraph
 
+.. option:: --startup_weight_load_mode
+
+    启动权重加载模式：``serial``（默认）或 ``overlap``。
+
+    ``overlap`` 先用可安全捕获的值填充最终 GPU 权重存储，在 CUDA Graph 捕获期间将本地 safetensors 文件
+    预读到操作系统 page cache，随后将真实权重原地写入。当前仅支持经过显式验证的 Qwen3.5 dense 与
+    Qwen3.5 DSpark 模型，以及非量化或 ``fp8w8a8-pt-sgl`` 权重。
+
+.. option:: --weight_loader_prefetch_num_threads
+
+    启动重叠模式下每个本地 rank 的 checkpoint page-cache 预取线程数，默认为 ``4``。
+
 .. option:: --graph_max_batch_size
 
     解码阶段可以被 cuda graph 捕获的最大批次大小，默认为 ``256``

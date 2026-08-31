@@ -589,6 +589,18 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
     parser.add_argument(
+        "--startup_weight_load_mode",
+        choices=["serial", "overlap"],
+        default="serial",
+        help="Overlap checkpoint page-cache staging with CUDA Graph capture before committing real weights.",
+    )
+    parser.add_argument(
+        "--weight_loader_prefetch_num_threads",
+        type=int,
+        default=4,
+        help="Number of checkpoint page-cache prefetch threads per local rank in startup overlap mode.",
+    )
+    parser.add_argument(
         "--enable_prefill_cudagraph",
         action="store_true",
         help="Enable the cudagraph of the prefill stage,"

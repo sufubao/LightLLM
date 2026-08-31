@@ -59,6 +59,9 @@ class CustomProcessGroup:
         self.flashinfer_reduce = None
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
+        self.optional_allreduce_group = (
+            create_new_group_for_current_dp("gloo") if self.dp_world_size in [2, 4, 6, 8] else None
+        )
         if get_env_start_args().enable_dp_prefill_balance:
             self.dp_prefill_balance_group = create_dp_special_inter_group("nccl")
         else:
@@ -66,8 +69,17 @@ class CustomProcessGroup:
 
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
+    def _all_ranks_agree(self, local_enabled: bool) -> bool:
+        """Enable an optional collective only when every rank can use it."""
+        assert self.optional_allreduce_group is not None
+        enabled = torch.tensor([int(local_enabled)], dtype=torch.int32)
+        dist.all_reduce(enabled, op=dist.ReduceOp.MIN, group=self.optional_allreduce_group)
+        return bool(enabled.item())
+
     def _support_custom_allreduce(self) -> bool:
-        return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
+        if self.optional_allreduce_group is None:
+            return False
+        return self._all_ranks_agree(has_nvlink())
 
     def init_symm_mem_reduce(self) -> None:
         if not self._support_custom_allreduce():
@@ -75,21 +87,34 @@ class CustomProcessGroup:
         from .symm_mem_all_reduce import SymmMemAllreduce
 
         data_type = get_torch_dtype(get_env_start_args().data_type)
-        symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device(), dtype=data_type)
-        if not symm.disabled:
+        try:
+            symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device(), dtype=data_type)
+        except Exception as error:
+            logger.warning("SymmMem ALLReduce initialization failed: %s", error)
+            symm = None
+        local_enabled = symm is not None and not symm.disabled
+        if self._all_ranks_agree(local_enabled):
             self.symm_mem_reduce = symm
             logger.info("Enable SymmMem ALLReduce.")
+        elif local_enabled:
+            logger.warning("Disable SymmMem ALLReduce because at least one rank could not initialize it.")
 
     def init_flashinfer_reduce(self) -> None:
         if not self._support_custom_allreduce():
             return
         from .flashinfer_all_reduce import FlashInferAllReduce
 
-        fi_cpu_group = create_new_group_for_current_dp("gloo")
-        fi = FlashInferAllReduce(fi_cpu_group, torch.cuda.current_device())
-        if not fi.disabled:
+        try:
+            fi = FlashInferAllReduce(self.optional_allreduce_group, torch.cuda.current_device())
+        except Exception as error:
+            logger.warning("FlashInfer ALLReduce initialization failed: %s", error)
+            fi = None
+        local_enabled = fi is not None and not fi.disabled
+        if self._all_ranks_agree(local_enabled):
             self.flashinfer_reduce = fi
             logger.info("Enable FlashInfer ALLReduce.")
+        elif local_enabled:
+            logger.warning("Disable FlashInfer ALLReduce because at least one rank could not initialize it.")
 
     def all_reduce(self, input_: torch.Tensor) -> None:
         # Dispatch chain: FlashInfer -> SymmMem -> NCCL.

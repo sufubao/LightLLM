@@ -5,11 +5,14 @@ from lightllm.utils.kv_cache_utils import _normalize_registration_ranges
 
 
 def test_normalize_registration_ranges_aligns_and_merges():
-    assert _normalize_registration_ranges(
-        size=32 * 1024,
-        ranges=((4097, 4095), (8192, 4096), (20 * 1024, 1)),
-        page_size=4096,
-    ) == ((4096, 8192), (20 * 1024, 4096))
+    assert (
+        _normalize_registration_ranges(
+            size=32 * 1024,
+            ranges=((4097, 4095), (8192, 4096), (20 * 1024, 1)),
+            page_size=4096,
+        )
+        == ((4096, 8192), (20 * 1024, 4096))
+    )
     assert _normalize_registration_ranges(size=5000, ranges=((4999, 1),), page_size=4096) == ((4096, 904),)
 
     with pytest.raises(ValueError, match="invalid registration range"):

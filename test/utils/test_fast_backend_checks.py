@@ -9,6 +9,7 @@ def test_jit_backends_are_skipped_without_cuda_compiler(monkeypatch):
 
     assert backend_validator._quick_validate("flashinfer") is False
     assert backend_validator._quick_validate("flashqla") is False
+    assert backend_validator._quick_validate("fa3") is None
     assert backend_validator._quick_validate("triton") is None
 
 

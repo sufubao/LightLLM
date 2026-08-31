@@ -58,6 +58,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
     infer_state_class = Qwen35InferStateInfo
+    supports_startup_weight_load_overlap = True
 
     def _init_config(self):
         config_path = os.path.join(self.weight_dir_, "config.json")

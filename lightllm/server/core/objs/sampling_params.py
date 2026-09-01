@@ -333,10 +333,7 @@ class SamplingParams(ctypes.Structure):
         self.top_k = kwargs.get("top_k", SamplingParams._top_k)
         self.ignore_eos = kwargs.get("ignore_eos", False)
         self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
-        try:
-            max_request_output_tokens = get_env_start_args().max_request_output_tokens
-        except KeyError:  # SamplingParams is also used without a running server in libraries/tests.
-            max_request_output_tokens = 65536
+        max_request_output_tokens = get_env_start_args().max_request_output_tokens
         self.max_new_tokens = min(kwargs.get("max_new_tokens", max_request_output_tokens), max_request_output_tokens)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)

@@ -1,9 +1,21 @@
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
+import lightllm.server.core.objs.sampling_params as sampling_params_module
 from lightllm.server.api_models import ChatCompletionRequest, CompletionRequest, MAX_SEED
 from lightllm.server.core.objs.py_sampling_params import SamplingParams as PySamplingParams
 from lightllm.server.core.objs.sampling_params import SamplingParams
+
+
+@pytest.fixture(autouse=True)
+def mock_start_args(monkeypatch):
+    monkeypatch.setattr(
+        sampling_params_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(max_request_output_tokens=65536),
+    )
 
 
 @pytest.mark.parametrize(

@@ -40,6 +40,7 @@ class StartArgs:
     max_total_token_num: Optional[int] = field(default=None)
     mem_fraction: float = field(default=0.8)
     batch_max_tokens: Optional[int] = field(default=None)
+    max_request_output_tokens: int = field(default=65536)
     eos_id: Optional[List[int]] = field(default=None)
     tool_call_parser: Optional[str] = field(
         default=None,

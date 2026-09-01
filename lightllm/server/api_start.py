@@ -120,6 +120,8 @@ def _launch_subprocesses(args: StartArgs):
     assert (
         args.mem_fraction > 0 and args.mem_fraction < 1
     ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1."
+    if args.max_request_output_tokens < 1:
+        raise ValueError("max_request_output_tokens must be a positive integer.")
 
     if args.graph_max_len_in_batch == 0:
         args.graph_max_len_in_batch = args.max_req_total_len

@@ -175,6 +175,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM",
     )
     parser.add_argument(
+        "--max-request-output-tokens",
+        "--max_request_output_tokens",
+        dest="max_request_output_tokens",
+        type=int,
+        default=65536,
+        help="default and hard limit for the number of output tokens per request",
+    )
+    parser.add_argument(
         "--eos_id", nargs="+", type=int, default=None, help="eos stop token id, if None, will load from config.json"
     )
     parser.add_argument(

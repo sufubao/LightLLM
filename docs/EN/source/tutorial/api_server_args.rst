@@ -147,6 +147,11 @@ Memory and Batch Processing Parameters
 
     Maximum token count for new batches, controls prefill batch size to prevent OOM
 
+.. option:: --max-request-output-tokens
+
+    Default and hard limit for output tokens per request, default is ``65536``.
+    Requests with a larger ``max_new_tokens`` or ``max_tokens`` value are capped at this limit.
+
 .. option:: --running_max_req_size
 
     Maximum number of requests for simultaneous forward inference, default is ``1000``

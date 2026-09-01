@@ -145,6 +145,11 @@ PD 分离模式参数
 
     新批次的最大 token 数量，控制预填充批次大小以防止 OOM
 
+.. option:: --max-request-output-tokens
+
+    单请求输出 token 的默认值和硬上限，默认为 ``65536``。
+    请求中更大的 ``max_new_tokens`` 或 ``max_tokens`` 会被截断到该值。
+
 .. option:: --running_max_req_size
 
     同时进行前向推理的最大请求数量，默认为 ``1000``

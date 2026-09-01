@@ -19,14 +19,13 @@ PD Master 的 cache-aware prefill 选点策略。
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.log_utils import init_logger
 
-from .prompt_cache_tree import PromptCacheMatchResult, PromptCacheTree
+from .prompt_cache_tree import PromptCacheTree
 
 
 logger = init_logger(__name__)
@@ -55,18 +54,6 @@ class CacheAwareConfig:
     sample_stride: int = 512
     # 初始化前缀树时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
     recursion_limit: int = 4000
-
-
-@dataclass(frozen=True, slots=True)
-class _PromptCacheMatchContext:
-    policy: "CacheAwarePolicy"
-    request_text: str
-    match_result: PromptCacheMatchResult
-
-
-_prompt_cache_match_context: ContextVar[Optional[_PromptCacheMatchContext]] = ContextVar(
-    "prompt_cache_match_context", default=None
-)
 
 
 class BalanceRelThresholdController:
@@ -169,36 +156,9 @@ class CacheAwarePolicy:
         self.balance_rel_threshold_controller.append(cache_hit_rate)
         self.balance_rel_threshold_controller.update_config(self.config)
 
-    def estimate_cache_hit_rate(self, workers: List[PD_Client_Obj], request_text: str) -> float:
-        """估算可复用缓存的命中率，并在当前异步请求上下文中保留匹配结果。"""
-        if not workers or not request_text:
-            _prompt_cache_match_context.set(None)
-            return 0.0
-
-        result = self.prompt_cache_tree.prefix_match(request_text)
-        _prompt_cache_match_context.set(
-            _PromptCacheMatchContext(policy=self, request_text=request_text, match_result=result)
-        )
-        if result.prefill_node is None or not any(worker.client_ip_port == result.prefill_node for worker in workers):
-            return 0.0
-        if result.input_char_count == 0:
-            return 0.0
-        return min(max(result.matched_char_count / result.input_char_count, 0.0), 1.0)
-
-    def _match_prompt_cache(self, request_text: str) -> PromptCacheMatchResult:
-        """优先复用当前请求保存的前缀匹配结果。"""
-        match_context = _prompt_cache_match_context.get()
-        # 准入和选点共享同一个提示词对象。通过对象身份判断可以避免比较可能很长的字符串，
-        # ContextVar 则会将快照安全地传递给每个 n-choice 子任务。
-        if match_context is not None and match_context.policy is self and match_context.request_text is request_text:
-            _prompt_cache_match_context.set(None)
-            return match_context.match_result
-        _prompt_cache_match_context.set(None)
-        return self.prompt_cache_tree.prefix_match(request_text)
-
     def _get_cache_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
         """在指定候选节点中返回达到匹配阈值的 cache 节点。"""
-        result = self._match_prompt_cache(request_text)
+        result = self.prompt_cache_tree.prefix_match(request_text)
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
         logger.info(

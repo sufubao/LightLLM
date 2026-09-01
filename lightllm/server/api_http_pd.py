@@ -41,8 +41,6 @@ async def register_and_keep_alive(websocket: WebSocket):
             data = await asyncio.wait_for(websocket.receive_bytes(), timeout=heartbeat_timeout_seconds)
             obj = pickle.loads(data)
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
-                load_info = obj[1] if len(obj) > 1 else None
-                g_objs.httpserver_manager.update_node_load_info(load_info)
                 continue
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 

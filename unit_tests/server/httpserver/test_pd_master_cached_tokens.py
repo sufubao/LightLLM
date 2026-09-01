@@ -15,7 +15,6 @@ def _make_manager(monkeypatch):
     )
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
-    mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True)
     mgr.running_request_count = 0
     counter = [0]
 
@@ -40,7 +39,7 @@ def _make_manager(monkeypatch):
 def _collect(mgr, sampling_params, monkeypatch, split):
     mgr._split_max_new_tokens = lambda *a, **k: list(split)
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, decode_reservation=None):
         sub_req_id = sp.group_request_id
         hit = sp.max_new_tokens * 10
         yield sub_req_id, "x", {"prompt_tokens": 100, "prompt_cache_len": hit}, FinishStatus()

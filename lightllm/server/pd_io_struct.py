@@ -10,12 +10,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
-
-# Keep per-Master capacity metadata inside ``start_args`` so a new P/D node can
-# still register with an older Master whose PD_Client_Obj rejects unknown
-# top-level fields. New Masters extract these reserved protocol keys.
-PD_MASTER_CAPACITY_SHARE_KEY = "__pd_master_capacity_share"
-PD_MASTER_CAPACITY_EPOCH_KEY = "__pd_master_capacity_epoch"
+PD_DECODE_ADMISSION_CAPABILITY_KEY = "__pd_decode_admission_v1"
 
 
 # 节点的行为
@@ -49,6 +44,9 @@ class ObjType(enum.Enum):
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
     PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
+    PD_UPLOAD_SERVER_BUSY = 8  # P/D 节点向 pd master 上报本地准入拒绝。
+    PD_RESERVE_DECODE_SLOTS = 9  # PD master 在 Decode 节点原子预留一组请求槽。
+    PD_DECODE_SLOTS_RESERVED = 10  # Decode 节点确认一组请求槽已预留。
 
 
 @dataclass
@@ -64,9 +62,6 @@ class PD_Client_Obj:
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
-    # 节点租给当前 PD Master 的请求槽位；多 Master 之间的份额互不重叠。
-    capacity_share: Optional[int] = None
-    capacity_epoch: int = 0
     # cache-aware 选点用：当前派发到该节点且尚未产出首 token 的 prompt 字符数。
     dispatched_prompt_chars: int = 0
     # 当前派发到该节点且尚未产出首 token 的请求数。
@@ -77,10 +72,6 @@ class PD_Client_Obj:
             error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""
             logger.error(error_info)
             raise ValueError(error_info)
-        if self.capacity_share is not None and self.capacity_share < 0:
-            raise ValueError("capacity_share must be non-negative")
-        if self.capacity_epoch < 0:
-            raise ValueError("capacity_epoch must be non-negative")
         return
 
     def to_llm_url(self):
@@ -106,7 +97,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)

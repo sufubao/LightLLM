@@ -7,12 +7,11 @@ from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSpar
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
-def test_argmax_restores_global_token_ids_and_exact_probabilities():
+def test_argmax_restores_global_token_ids_and_uses_candidate_probability():
     backend = ModeBackend.__new__(ModeBackend)
     output = ModelOutput(
-        logits=torch.tensor([[3.0, 1.0], [0.0, 5.0]]),
-        logits_token_ids=torch.tensor([[30, 10], [100, 500]]),
-        logits_logsumexp=torch.tensor([4.0, 5.25]),
+        logits=torch.tensor([[3.0, 1.0, 2.0], [0.0, 5.0, 4.0]]),
+        logits_token_ids=torch.tensor([[30, 10, 20], [100, 500, 400]]),
     )
 
     token_ids = backend._gen_argmax_token_ids(output)
@@ -20,7 +19,7 @@ def test_argmax_restores_global_token_ids_and_exact_probabilities():
 
     torch.testing.assert_close(token_ids, torch.tensor([30, 500]))
     torch.testing.assert_close(token_ids_with_prob, token_ids)
-    torch.testing.assert_close(probs, torch.exp(torch.tensor([-1.0, -0.25])))
+    torch.testing.assert_close(probs, torch.softmax(output.logits, dim=-1).max(dim=-1).values)
 
 
 def test_dense_argmax_keeps_column_index_semantics():
@@ -30,13 +29,13 @@ def test_dense_argmax_keeps_column_index_semantics():
     torch.testing.assert_close(backend._gen_argmax_token_ids(output), torch.tensor([1]))
 
 
-def test_dspark_confidence_path_receives_global_token_ids():
+def test_dspark_confidence_path_receives_mapped_sparse_token_ids():
     post = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
     post.block_size_ = 2
     post.markov_rank_ = 0
     post._slice_get_last_input = lambda input_embeddings, infer_state: (input_embeddings, 4)
-    sparse_logits = torch.tensor([[4.0], [5.0], [7.0], [9.0]])
-    sparse_token_ids = torch.tensor([[40], [50], [70], [90]])
+    sparse_logits = torch.tensor([[1.0, 4.0], [5.0, 2.0], [3.0, 7.0], [9.0, 8.0]])
+    sparse_token_ids = torch.tensor([[10, 40], [50, 20], [30, 70], [90, 80]])
 
     def gather_vocab_parallel(*args, **kwargs):
         infer_state = args[3]
@@ -56,12 +55,11 @@ def test_dspark_confidence_path_receives_global_token_ids():
         def add_mtp_outputs(self, **kwargs):
             self.outputs = kwargs
 
-    collector = Collector()
     infer_state = SimpleNamespace(
         is_prefill=False,
         input_ids=torch.tensor([1, 0, 2, 0]),
         logits_token_ids=None,
-        hidden_collector=collector,
+        hidden_collector=Collector(),
     )
 
     returned_logits = post.token_forward(

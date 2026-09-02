@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.functional as F
 import torch.distributed as dist
@@ -7,8 +6,9 @@ from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerW
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
-from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
-    vocab_parallel_greedy,
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_topk import (
+    get_vocab_parallel_topk_size,
+    vocab_parallel_topk,
 )
 from lightllm.distributed.communication_op import all_gather
 
@@ -19,10 +19,16 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def __init__(self, network_config):
         super().__init__(network_config)
         self.eps_ = network_config["rms_norm_eps"]
+        self.vocab_parallel_topk_ = get_vocab_parallel_topk_size()
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
         return layer_weight.final_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+
+    def _apply_logit_postprocessing(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply model-specific transforms while the tensor still contains logits."""
+
+        return logits
 
     def _slice_get_last_input(self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo):
         embed_dim_ = input_embdings.shape[1]
@@ -85,17 +91,20 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         logic_batch = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
         normed = None
 
-        vocab_size = layer_weight.lm_head_weight_.vocab_size
-        if infer_state.use_vocab_parallel_greedy and not force_full_logits:
-            logits, token_ids, logsumexp = vocab_parallel_greedy(
+        lm_head = layer_weight.lm_head_weight_
+        vocab_size = lm_head.vocab_size
+        if infer_state.use_vocab_parallel_topk and not force_full_logits:
+            logic_batch = self._apply_logit_postprocessing(logic_batch)
+            logits, token_ids = vocab_parallel_topk(
                 logic_batch,
                 vocab_size=vocab_size,
+                vocab_start_id=lm_head.tp_vocab_start_id,
+                topk=self.vocab_parallel_topk_,
                 tp_world_size=self.tp_world_size_,
                 group=infer_state.dist_group,
                 alloc_func=self.alloc_tensor,
             )
             infer_state.logits_token_ids = token_ids
-            infer_state.logits_logsumexp = logsumexp
             return logits
 
         if self.tp_world_size_ == 1:
@@ -114,12 +123,11 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
-        return ans_logics
+        return self._apply_logit_postprocessing(ans_logics)
 
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
-
         return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
@@ -130,7 +138,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
     ):
-
         logics = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
         logics1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)

@@ -23,7 +23,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
-from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
+from lightllm.utils.envs_utils import get_pd_high_priority_request_timeout_seconds, get_pd_split_max_new_tokens
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
 
@@ -48,6 +48,9 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
+        # 高优先级请求仍可比普通请求等待更久，但通过请求参数向开启本地限流的
+        # P/D 节点传递有限的等待时间，避免资源异常时永久占用请求链路。
+        self.pd_high_priority_request_time_out_seconds = get_pd_high_priority_request_timeout_seconds()
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -119,8 +122,12 @@ class HttpServerManagerForPDMaster:
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
         return self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
+
+    async def _wait_for_pd_master_request_slot(self) -> None:
+        """PD Master 请求准入的预留接口，当前不执行限流。"""
+        return
 
     async def generate(
         self,
@@ -129,10 +136,7 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
-        if not self.args.disable_pd_master_decode_capacity_limit:
-            decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
-            if self.running_request_count >= decode_capacity:
-                raise ServerBusyError()
+        await self._wait_for_pd_master_request_slot()
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
@@ -192,9 +196,14 @@ class HttpServerManagerForPDMaster:
                 )
             )
 
+        request_finished_successfully = True
         async for result in self._merge_choice_generators(generators):
+            finish_status = result[3]
+            if finish_status.is_error_finished():
+                request_finished_successfully = False
             yield result
-        self.metric_client.counter_inc("lightllm_request_success")
+        if request_finished_successfully:
+            self.metric_client.counter_inc("lightllm_request_success")
         return
 
     async def _generate_one(
@@ -219,7 +228,9 @@ class HttpServerManagerForPDMaster:
         pending_prefill_load_chars = None
 
         try:
-            p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
+            p_node, d_node, estimated_cache_hit_rate = await self.select_p_d_node(
+                prompt, origin_sampling_params, multimodal_params
+            )
             if not p_node or not d_node:
                 logger.error(f"{origin_request_id}: No p_node or d_node found")
                 raise Exception(f"{origin_request_id}: No p_node or d_node found")
@@ -233,6 +244,16 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = block_max_new_tokens
+                # 预计输入 cache 命中率高于 0.8 时，将首段也标记为 PD 高优先级请求，
+                # 使其优先进入 Router 调度队列，尽快复用已命中的 KV cache。第二段及后续
+                # 分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
+                sampling_params.pd_high_priority_request = iter_index > 0 or estimated_cache_hit_rate > 0.8
+                # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
+                # 本地限流时使用该值，未开启限流时仍保持无限等待。
+                if sampling_params.pd_high_priority_request:
+                    sampling_params.pd_high_priority_request_time_out_seconds = (
+                        self.pd_high_priority_request_time_out_seconds
+                    )
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
@@ -263,6 +284,10 @@ class HttpServerManagerForPDMaster:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
                         self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
+                        if not finish_status.is_error_finished():
+                            # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
+                            # 推理或已失败的请求被后续请求误判为可复用 cache。
+                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     if pending_prefill_load_chars is not None:
                         p_node.dispatched_prompt_chars = max(
@@ -677,6 +702,16 @@ class HttpServerManagerForPDMaster:
                             )
                         else:
                             await req_status.set_error(error_info)
+                    elif obj[0] == ObjType.PD_UPLOAD_SERVER_BUSY:
+                        _, group_req_id, error_info = obj
+                        logger.warning(
+                            f"received PD node server busy, group_req_id: {group_req_id}, reason: {error_info}"
+                        )
+                        req_status = self.req_id_to_out_inf.get(group_req_id)
+                        if req_status is None:
+                            logger.error(f"PD_UPLOAD_SERVER_BUSY fail find req status for group_req_id: {group_req_id}")
+                        else:
+                            await req_status.set_error(error_info, is_server_busy=True)
                     else:
                         logger.error(f"recevie error obj {obj}")
             except BaseException as e:
@@ -703,6 +738,7 @@ class ReqStatus:
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
         self.error_info: Optional[str] = None
+        self.is_server_busy = False
 
     async def wait_to_ready(self):
         try:
@@ -710,9 +746,10 @@ class ReqStatus:
         except asyncio.TimeoutError:
             pass
 
-    async def set_error(self, error_info: str):
+    async def set_error(self, error_info: str, is_server_busy: bool = False):
         async with self.lock:
             self.error_info = error_info
+            self.is_server_busy = is_server_busy
             # 请求可能正在等待 Prefill prompt ids、Decode KV 资源或输出 token，
             # 设置全部事件，让请求自己的执行循环立即醒来并抛出异常。
             self.event.set()
@@ -721,6 +758,8 @@ class ReqStatus:
 
     def raise_if_error(self):
         if self.error_info is not None:
+            if self.is_server_busy:
+                raise ServerBusyError(self.error_info)
             logger.error(
                 f"group_request_id: {self.req_id} detected PD node generate error, "
                 f"raise exception to end the request flow early: {self.error_info}"
@@ -885,6 +924,8 @@ class PDManager:
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
-        p_node, d_node = self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)
-        return p_node, d_node
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+        p_node, d_node, estimated_cache_hit_rate = self.selector.select_p_d_node(
+            prompt, sampling_params, multimodal_params
+        )
+        return p_node, d_node, estimated_cache_hit_rate

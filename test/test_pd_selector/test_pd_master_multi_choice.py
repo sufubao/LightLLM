@@ -18,6 +18,7 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
+    manager.pd_high_priority_request_time_out_seconds = 60
     return manager
 
 
@@ -39,7 +40,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
         captured_params = []
         p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
         manager._split_max_new_tokens = MagicMock(return_value=[4])
         manager.remove_req = AsyncMock()
 
@@ -143,6 +144,44 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
+@pytest.mark.parametrize(
+    "failed_finish_status",
+    [FinishStatus.FINISHED_ABORTED, FinishStatus.FINISHED_ERROR],
+)
+def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_finish_status):
+    async def run():
+        manager = _manager()
+        sampling_params = SamplingParams()
+        sampling_params.n = 1
+        sampling_params.best_of = 1
+        sampling_params.max_new_tokens = 4
+
+        multimodal_params = MagicMock()
+        multimodal_params.verify_and_preload = AsyncMock()
+        request = MagicMock()
+
+        async def generate_one(*_args, **_kwargs):
+            yield (
+                800,
+                "",
+                {"prompt_tokens": 2},
+                FinishStatus(failed_finish_status),
+            )
+
+        manager._generate_one = generate_one
+
+        with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
+            results = []
+            async for result in manager._generate("prompt", sampling_params, multimodal_params, request):
+                results.append(result)
+
+        assert len(results) == 1
+        assert results[0][3].get_status() == failed_finish_status
+        manager.metric_client.counter_inc.assert_called_once_with("lightllm_request_count")
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
 def test_pd_master_multi_choice_failure_closes_other_generators():
     async def run():
         manager = _manager()
@@ -217,7 +256,7 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
         manager.abort = AsyncMock()
         p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
 
         async def failing_wait_to_token_package(*_args, **_kwargs):
             raise RuntimeError("generation failed")
@@ -239,6 +278,7 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
 
         assert p_node.dispatched_prompt_chars == 0
         assert p_node.dispatched_req_num == 0
+        manager.pd_manager.selector.insert_prompt_cache.assert_not_called()
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
@@ -257,17 +297,19 @@ def test_pd_master_accounts_each_split_prefill_on_the_same_node():
             dispatched_req_num=other_request_count,
         )
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
         dispatched_nodes = []
         dispatched_prompts = []
         dispatched_loads = []
         dispatched_req_counts = []
+        high_priority_request_flags = []
 
         async def wait_to_token_package(selected_p_node, _d_node, _start_time, block_prompt, sampling_params, *_args):
             dispatched_nodes.append(selected_p_node)
             dispatched_prompts.append(block_prompt)
             dispatched_loads.append(selected_p_node.dispatched_prompt_chars)
             dispatched_req_counts.append(selected_p_node.dispatched_req_num)
+            high_priority_request_flags.append(sampling_params.pd_high_priority_request)
             yield (
                 sampling_params.group_request_id,
                 "x",
@@ -293,9 +335,97 @@ def test_pd_master_accounts_each_split_prefill_on_the_same_node():
         assert dispatched_prompts == ["prompt", "promptx"]
         assert dispatched_loads == [other_request_load + len("prompt"), other_request_load + len("promptx")]
         assert dispatched_req_counts == [other_request_count + 1, other_request_count + 1]
+        assert high_priority_request_flags == [False, True]
         assert p_node.dispatched_prompt_chars == other_request_load
         assert p_node.dispatched_req_num == other_request_count
         assert len(results) == 2
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@pytest.mark.parametrize(
+    ("estimated_cache_hit_rate", "expected_high_priority"),
+    [(0.8, False), (0.81, True)],
+)
+def test_pd_master_promotes_request_with_high_estimated_cache_hit_rate(
+    estimated_cache_hit_rate,
+    expected_high_priority,
+):
+    async def run():
+        manager = _manager()
+        manager._split_max_new_tokens = MagicMock(return_value=[1])
+        manager.id_gen.generate_id.return_value = 808
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, estimated_cache_hit_rate))
+        high_priority_request_flags = []
+
+        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
+            high_priority_request_flags.append(sampling_params.pd_high_priority_request)
+            yield (
+                sampling_params.group_request_id,
+                "x",
+                {"prompt_tokens": 1},
+                FinishStatus(FinishStatus.FINISHED_STOP),
+            )
+
+        manager._wait_to_token_package = wait_to_token_package
+
+        async for _ in manager._generate_one(
+            "prompt",
+            SamplingParams(),
+            MagicMock(),
+            MagicMock(),
+            0,
+            800,
+        ):
+            pass
+
+        assert high_priority_request_flags == [expected_high_priority]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_sets_high_priority_timeout():
+    async def run():
+        manager = _manager()
+        manager.pd_high_priority_request_time_out_seconds = 90
+        manager._split_max_new_tokens = MagicMock(return_value=[1])
+        manager.id_gen.generate_id.return_value = 808
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        p_node = MagicMock(
+            dispatched_prompt_chars=0,
+            dispatched_req_num=0,
+        )
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.81))
+        captured_timeout_seconds = []
+
+        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
+            captured_timeout_seconds.append(sampling_params.pd_high_priority_request_time_out_seconds)
+            yield (
+                sampling_params.group_request_id,
+                "x",
+                {"prompt_tokens": 1},
+                FinishStatus(FinishStatus.FINISHED_STOP),
+            )
+
+        manager._wait_to_token_package = wait_to_token_package
+
+        async for _ in manager._generate_one(
+            "prompt",
+            SamplingParams(),
+            MagicMock(),
+            MagicMock(),
+            0,
+            800,
+        ):
+            pass
+
+        assert captured_timeout_seconds == [90]
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
@@ -314,7 +444,7 @@ def test_pd_master_releases_prefill_load_when_stream_is_closed():
             dispatched_req_num=other_request_count,
         )
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
 
         async def wait_to_token_package(*_args, **_kwargs):
             yield 808, "first", {"prompt_tokens": 1}, FinishStatus()

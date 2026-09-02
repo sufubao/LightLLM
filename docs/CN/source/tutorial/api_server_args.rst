@@ -87,6 +87,19 @@ PD 分离模式参数
     推理进度健康检查：当仍有在途请求，且整个 PD Master 连续 ``HEALTH_TIMEOUT`` 秒
     没有任何请求成功返回 token 时，接口将返回 HTTP 503。
 
+.. option:: --enable_pd_node_self_request_limit
+
+    在 Prefill/Decode 节点上启用本地请求限流。PD Master 当前不执行请求准入限流。
+    HTTP server 申请本地 ``shm_req`` 对象的超时时间由
+    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 控制（默认 20 秒）；请求进入 Router 后等待
+    进入推理系统的超时时间由 ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` 控制（默认 20 秒）。
+    超时会导致 ``Server is busy``；其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，
+    由 PD Master 转换为 HTTP 429。未开启限流时请求会持续等待资源；PD 高优先级请求
+    （分段续跑请求或预计输入 cache 命中率高于 0.8 的请求）由 PD Master 通过
+    ``pd_high_priority_request_time_out_seconds`` 下发一个统一的超时时间下限。P/D 节点分别取
+    该值与本地 ``shm_req``、Router 超时的较大值；该字段为 0 时不延长本地超时。PD Master 下发值由
+    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` 控制，默认 60 秒。该参数默认关闭。
+
 .. option:: --config_server_host
 
     配置服务器模式下的主机地址

@@ -379,8 +379,12 @@ def get_fixed_kv_len():
 def has_vision_module(model_path: str) -> bool:
     try:
         from transformers.configuration_utils import PretrainedConfig
+        from lightllm.models.registry import get_model_support
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_support = get_model_support(model_cfg, model_dir=model_path)
+        if model_support.vision_factory is not None:
+            return True
         model_type = model_cfg["model_type"]
         if model_type == "qwen":
             # QWenVisionTransformer
@@ -394,12 +398,9 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen2_5_VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
-        elif model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+        elif model_type == "qwen3_vl_moe":
             # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
-            return True
-        elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
-            # TarsierVisionTransformerPretrainedModel
             return True
         elif model_type == "llava":
             # LlavaVisionModel

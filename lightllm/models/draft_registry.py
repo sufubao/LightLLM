@@ -1,5 +1,6 @@
 """Registry for mapping target model types and speculative modes to draft models."""
 
+from importlib import import_module
 from typing import Callable, Dict, List, Tuple, Type, TypeVar, Union
 
 
@@ -31,8 +32,15 @@ class _DraftModelRegistry:
 
     def get_model_class(self, model_cfg: dict, spec_mode: str) -> Type:
         model_type = model_cfg.get("model_type", "")
+        key = (model_type, spec_mode)
+        if key not in self._registry:
+            from lightllm.models.builtin_registry import BUILTIN_DRAFT_MODULES
+
+            module_name = BUILTIN_DRAFT_MODULES.get(key)
+            if module_name is not None:
+                import_module(module_name)
         try:
-            return self._registry[(model_type, spec_mode)]
+            return self._registry[key]
         except KeyError:
             raise ValueError(
                 f"Unsupported speculative draft model: mode={spec_mode}, model_type={model_type}"

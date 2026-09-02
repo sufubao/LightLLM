@@ -22,7 +22,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from transformers.convert_slow_tokenizer import convert_slow_tokenizer
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.log_utils import init_logger
-from ..models.tarsier2.model import Tarsier2Tokenizer
+from ..models.registry import ModelContext, TokenizerBuildContext, UnsupportedModelError, get_model_support
 
 logger = init_logger(__name__)
 from ..models.llava.model import LlavaTokenizer
@@ -91,12 +91,23 @@ def get_tokenizer(
         logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
         return DeepSeekV32Tokenizer(hf_tokenizer)
 
-    if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
-        from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
+    try:
+        model_support = get_model_support(model_cfg, model_dir=tokenizer_name)
+    except UnsupportedModelError:
+        model_support = None
+    if model_support is not None and model_support.tokenizer_factory is not None:
+        return model_support.create_tokenizer(
+            TokenizerBuildContext(
+                model=ModelContext.from_config(model_cfg, model_dir=tokenizer_name),
+                tokenizer_name=tokenizer_name,
+                tokenizer=tokenizer,
+                trust_remote_code=trust_remote_code,
+                args=args,
+                kwargs=kwargs,
+            )
+        )
 
-        image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)
-        tokenizer = Tarsier2Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
-    elif model_type == "llava" or model_type == "internlmxcomposer2":
+    if model_type == "llava" or model_type == "internlmxcomposer2":
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_type == "qwen" and "visual" in model_cfg:
         tokenizer = QWenVLTokenizer(tokenizer, model_cfg)
@@ -107,7 +118,7 @@ def get_tokenizer(
         tokenizer = QWen2VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
-    elif model_type in ["qwen3_vl", "qwen3_vl_moe"] and "vision_config" in model_cfg:
+    elif model_type == "qwen3_vl_moe" and "vision_config" in model_cfg:
         from transformers import AutoProcessor
 
         processor = AutoProcessor.from_pretrained(tokenizer_name)

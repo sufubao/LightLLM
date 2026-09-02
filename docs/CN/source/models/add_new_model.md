@@ -549,68 +549,36 @@ class BloomTpPartModel(TpPartBaseModel):
         return 
 ~~~
 
-### (4) 在server服务层加入对模型的支持
+### (4) 声明完整的模型支持
 
-***lightllm/server/router/model_infer/model_rpc.py***
+新模型不应在 `lightllm/server` 或 `lightllm/common` 中增加 `model_type` 分支。请在模型目录中新建
+`support.py`，集中声明文本模型、tokenizer、视觉模型等差异化组件：
 
 ~~~python
-import asyncio
-import rpyc
-import torch
-import traceback
-from datetime import timedelta
-from typing import Dict, List, Tuple
-from transformers.configuration_utils import PretrainedConfig
-from lightllm.server.router.model_infer.infer_batch import InferBatch
-from rpyc.utils.classic import obtain
-
 from lightllm.models.bloom.model import BloomTpPartModel
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.common.configs.config import setting
-from .post_process import sample
+from lightllm.models.registry import ModelSupport, ModelSupportRegistry
 
-class ModelRpcServer(rpyc.Service):
 
-    def exposed_init_model(self, rank_id, world_size, weight_dir, max_total_token_num, load_way, mode):
-        import torch
-        import torch.distributed as dist
-        if world_size != 1:
-            trans_list = [obtain(e) for e in (rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)]
-            rank_id, world_size, weight_dir, max_total_token_num, load_way, mode = trans_list
-
-        self.tp_rank = rank_id
-        self.world_size = world_size
-        self.load_way = load_way
-        self.mode = mode
-        self.cache = {}
-
-        dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
-        torch.cuda.set_device(rank_id)
-
-        model_cfg, _ = PretrainedConfig.get_config_dict(
-            weight_dir
-        )
-        try:
-            self.model_type = model_cfg["model_type"]
-            if self.model_type == "bloom":
-                self.model = BloomTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-                raise Exception(f"can not support {self.model_type} now")
-        except Exception as e:
-            print("#" * 16)
-            print("load model error:", str(e), e, type(e))
-            raise e
-        
-        set_random_seed(2147483647)
-        return
-    ...
+BLOOM_SUPPORT = ModelSupportRegistry.register_support(
+    ModelSupport(
+        name="bloom",
+        model_types=("bloom",),
+        text_model=BloomTpPartModel,
+    )
+)
 ~~~
 
+多模态模型可以额外提供 `tokenizer_factory` 和 `vision_factory`。factory 接收规范化的
+`TokenizerBuildContext` 或 `VisionBuildContext`，模型特有的构造、配置兼容和包装逻辑都应留在
+`support.py` 中。可参考 `lightllm/models/qwen3_vl/support.py` 和
+`lightllm/models/tarsier2/support.py`。
 
+最后在 `lightllm/models/builtin_registry.py` 的 `BUILTIN_MODEL_MODULES` 中添加一条懒加载映射：
 
+~~~python
+"bloom": ("lightllm.models.bloom.support",),
+~~~
 
-
-
-
-
+一个模型支持 PR 通常只需要修改模型自己的目录、builtin manifest 和测试。只有在新增通用框架能力时，
+才应修改 server/common 主流程。
 

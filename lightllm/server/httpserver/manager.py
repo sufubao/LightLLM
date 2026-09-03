@@ -619,6 +619,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
+            # pre-verify prompt length
+            # The average character length per token is always less than 8
+            # TODO: automatically calculate the average character length per token
+            max_prompt_chars = self.max_req_total_len * 8
+            if len(prompt) > max_prompt_chars:
+                raise InvalidRequestError(
+                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
+                    f"the request is rejected before tokenization."
+                )
+
             if self.enable_multimodal:
                 multimodal_params.verify_resource_limits()
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)

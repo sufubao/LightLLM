@@ -694,10 +694,8 @@ class ModeBackend:
         prefill_reqs = []
         decode_reqs = []
 
-        # 一次性最多暂停请求的数量, 防止盲目暂停大量请求
-        # 因为部分请求释放占用的token容量后，就会使推理可以正常进行。
-        # 如果因为一次推理容量不足，就以当前token容量的判断暂停了大量
-        # 请求，其逻辑是不适合的。
+        # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
+        # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
@@ -741,8 +739,24 @@ class ModeBackend:
                     can_alloc_token_num -= token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+                        if self.args.run_mode == "decode":
+                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
+                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
+                            wait_pause_count += 1
+                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
+                            if support_overlap:
+                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
+                                req_obj.filter_mark = True
+                            else:
+                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
+                                finished_reqs.append(req_obj)
+                            self.logger.info(
+                                f"force early finish for PD decode req_id={req_obj.req_id} "
+                                f"because token capacity is insufficient"
+                            )
+                        else:
+                            req_obj.wait_pause = True
+                            wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不

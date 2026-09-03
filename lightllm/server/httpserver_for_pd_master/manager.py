@@ -23,7 +23,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
-from lightllm.utils.envs_utils import get_pd_high_priority_request_timeout_seconds, get_pd_split_max_new_tokens
+from lightllm.utils.envs_utils import get_pd_high_priority_request_timeout_seconds
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
 
@@ -215,13 +215,6 @@ class HttpServerManagerForPDMaster:
         start_time: float,
         origin_request_id: int,
     ):
-        # 先将请求根据max_new_tokens 参数进行分块操作，主要是 pd 分离场景中，
-        # 只能使用保守调度，但是如果用户都设置一个很大的 max_new_tokens 值，会
-        # 导致极大显存预留，照成系统的吞吐能力下降，所以我们将请求分割成几段进行
-        # 推理，只要保证分块合理，实际分段推理是极少发生的情况，系统吞吐就不会受
-        # 到影响。
-        max_new_tokens_list = self._split_max_new_tokens(max_new_tokens=origin_sampling_params.max_new_tokens)
-
         block_group_request_id = origin_request_id
         p_node = None
         d_node = None
@@ -237,17 +230,24 @@ class HttpServerManagerForPDMaster:
 
             history_gen_token_strs = []
             origin_prompt_cache_len = None
+            remaining_max_new_tokens = origin_sampling_params.max_new_tokens
+            segment_index = 0
+            # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
+            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的 block_prompt 长度。
+            prompt_tokens = sys.maxsize
 
-            for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
+            # Decode 节点容量不足时会用专用状态结束当前分段。
+            # PD Master 吞掉该内部分段 marker，并用剩余 token 限额在同一组 P/D 节点上继续。
+            while remaining_max_new_tokens > 0:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
-                sampling_params.max_new_tokens = block_max_new_tokens
+                sampling_params.max_new_tokens = remaining_max_new_tokens
                 # 预计输入 cache 命中率高于 0.8 时，将首段也标记为 PD 高优先级请求，
                 # 使其优先进入 Router 调度队列，尽快复用已命中的 KV cache。第二段及后续
                 # 分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
-                sampling_params.pd_high_priority_request = iter_index > 0 or estimated_cache_hit_rate > 0.8
+                sampling_params.pd_high_priority_request = segment_index > 0 or estimated_cache_hit_rate > 0.8
                 # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
                 # 本地限流时使用该值，未开启限流时仍保持无限等待。
                 if sampling_params.pd_high_priority_request:
@@ -270,35 +270,44 @@ class HttpServerManagerForPDMaster:
                     multimodal_params,
                     request,
                 )
-                is_last_block = iter_index == len(max_new_tokens_list) - 1
-                prompt_tokens = sys.maxsize  # 因为分段的原因
-                async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                    # pd 分离模式下，返回的 metadata 可能序号信息可能存在不准确性。
+                raw_finish_status = FinishStatus()
+                async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
+                    # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
-                    if finish_status.is_finished_length() and not is_last_block:
-                        finish_status = FinishStatus()  # 转换为NoFinished
-                    history_gen_token_strs.append(request_output)
-                    prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
-                    metadata["prompt_tokens"] = prompt_tokens
-                    if iter_index == 0 and origin_prompt_cache_len is None:
-                        origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
-                        prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
-                        self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
-                        if not finish_status.is_error_finished():
-                            # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
-                            # 推理或已失败的请求被后续请求误判为可复用 cache。
-                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
-                    metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
+
+                    # 收到当前分段的任意输出，说明该请求已经完成 P 节点的 prefill 派发阶段。
+                    # 立即归还 selector 中记录的在途 prompt 字符数和请求数，并通过置空确保每段只更新一次。
                     if pending_prefill_load_chars is not None:
                         p_node.dispatched_prompt_chars = max(
                             0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
                         )
                         p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
                         pending_prefill_load_chars = None
-                    yield origin_request_id, request_output, metadata, finish_status
+
+                    if raw_finish_status.is_finished_pd_decode_capacity():
+                        # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
+                        break
+
+                    # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
+                    remaining_max_new_tokens -= 1
+                    history_gen_token_strs.append(request_output)
+                    prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
+                    metadata["prompt_tokens"] = prompt_tokens
+                    if origin_prompt_cache_len is None:
+                        origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                        prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
+                        self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
+                        if not raw_finish_status.is_error_finished():
+                            # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
+                            # 推理或已失败的请求被后续请求误判为可复用 cache。
+                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
+                    metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
+                    yield origin_request_id, request_output, metadata, raw_finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
-                if finish_status.is_finished():
+                segment_index += 1
+                # 只有 PD Decode 容量不足产生的内部分段需要续跑；其他状态都结束整个请求。
+                if not raw_finish_status.is_finished_pd_decode_capacity():
                     break
 
         except (ClientDisconnected, BaseException) as e:
@@ -717,14 +726,6 @@ class HttpServerManagerForPDMaster:
             except BaseException as e:
                 logger.exception(str(e))
         return
-
-    def _split_max_new_tokens(self, max_new_tokens: int) -> List[int]:
-        block_max_new_tokens = get_pd_split_max_new_tokens()
-        ans_list = [block_max_new_tokens for _ in range(max_new_tokens // block_max_new_tokens)]
-        left_token = max_new_tokens - (max_new_tokens // block_max_new_tokens) * block_max_new_tokens
-        if left_token > 0:
-            ans_list.append(left_token)
-        return ans_list
 
 
 class ReqStatus:

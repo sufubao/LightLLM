@@ -40,6 +40,12 @@ Basic Configuration Parameters
 
     HTTP server worker process count, default is ``1``
 
+.. option:: --disable_delay_response_start
+
+    Send the status and headers of a streaming response immediately instead of waiting until the first response
+    chunk is ready. By default, LightLLM delays the response start so errors raised before the first chunk can still
+    be returned with the appropriate HTTP status code.
+
 .. option:: --hypercorn_config
 
     Path to a Hypercorn TOML configuration file. Only TOML configuration files are supported.

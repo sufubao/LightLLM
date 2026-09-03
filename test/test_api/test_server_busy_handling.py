@@ -8,7 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from lightllm.server import api_anthropic, api_errors, api_http, api_openai, api_stream_obj
+from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.api_stream_obj import CustomStreamingResponse
+from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.error_utils import InvalidRequestError, ServerBusyError
 
 
@@ -18,6 +20,14 @@ class _MetricClient:
 
     def counter_inc(self, name):
         self.counters.append(name)
+
+
+def test_delay_response_start_cli_defaults_to_enabled_and_can_be_disabled():
+    parser = make_argument_parser()
+
+    assert parser.parse_args([]).disable_delay_response_start is False
+    assert parser.parse_args(["--disable_delay_response_start"]).disable_delay_response_start is True
+    assert StartArgs().disable_delay_response_start is False
 
 
 def test_api_modules_share_error_response_factory():
@@ -52,8 +62,12 @@ def test_anthropic_error_type(error, expected):
     assert api_anthropic._anthropic_error_type(error) == expected
 
 
-def test_pd_master_stream_starts_response_after_first_chunk(monkeypatch):
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+def test_stream_starts_response_after_first_chunk_by_default(monkeypatch):
+    monkeypatch.setattr(
+        api_stream_obj,
+        "get_env_start_args",
+        lambda: SimpleNamespace(disable_delay_response_start=False),
+    )
 
     async def run():
         response = None
@@ -83,8 +97,41 @@ def test_pd_master_stream_starts_response_after_first_chunk(monkeypatch):
     assert messages[0]["status"] == 201
 
 
-def test_pd_master_stream_propagates_error_before_response_start(monkeypatch):
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+def test_disable_delay_response_start_sends_status_immediately(monkeypatch):
+    monkeypatch.setattr(
+        api_stream_obj,
+        "get_env_start_args",
+        lambda: SimpleNamespace(disable_delay_response_start=True),
+    )
+
+    async def run():
+        response = None
+
+        async def generate():
+            response.status_code = 201
+            yield "first"
+
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        response = CustomStreamingResponse(generate())
+        await response.stream_response(send)
+        return messages
+
+    messages = asyncio.run(run())
+    assert messages[0]["type"] == "http.response.start"
+    assert messages[0]["status"] == 200
+    assert messages[1]["body"] == b"first"
+
+
+def test_stream_propagates_error_before_response_start(monkeypatch):
+    monkeypatch.setattr(
+        api_stream_obj,
+        "get_env_start_args",
+        lambda: SimpleNamespace(disable_delay_response_start=False),
+    )
 
     async def run():
         async def generate():
@@ -105,8 +152,12 @@ def test_pd_master_stream_propagates_error_before_response_start(monkeypatch):
     assert asyncio.run(run()) == []
 
 
-def test_pd_master_stream_can_return_http_429(monkeypatch):
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+def test_delayed_stream_can_return_http_429(monkeypatch):
+    monkeypatch.setattr(
+        api_stream_obj,
+        "get_env_start_args",
+        lambda: SimpleNamespace(disable_delay_response_start=False),
+    )
 
     app = FastAPI()
 
@@ -133,10 +184,14 @@ def test_pd_master_stream_can_return_http_429(monkeypatch):
     assert response.json() == {"error": "server busy"}
 
 
-def test_pd_master_stream_can_return_http_400_for_invalid_request(monkeypatch):
+def test_delayed_stream_can_return_http_400_for_invalid_request(monkeypatch):
     metric_client = _MetricClient()
     monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+    monkeypatch.setattr(
+        api_stream_obj,
+        "get_env_start_args",
+        lambda: SimpleNamespace(disable_delay_response_start=False),
+    )
     app = FastAPI()
     app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)
 
@@ -164,7 +219,11 @@ def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
     metric_client = _MetricClient()
     monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
     monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+    monkeypatch.setattr(
+        api_stream_obj,
+        "get_env_start_args",
+        lambda: SimpleNamespace(disable_delay_response_start=False),
+    )
 
     async def anthropic_messages_impl(_request):
         async def generate():
@@ -258,10 +317,14 @@ def test_safe_stream_converts_value_error_before_first_chunk():
     asyncio.run(run())
 
 
-def test_pd_master_stream_returns_http_400_for_value_error_before_first_chunk(monkeypatch):
+def test_delayed_stream_returns_http_400_for_value_error_before_first_chunk(monkeypatch):
     metric_client = _MetricClient()
     monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+    monkeypatch.setattr(
+        api_stream_obj,
+        "get_env_start_args",
+        lambda: SimpleNamespace(disable_delay_response_start=False),
+    )
     app = FastAPI()
     app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)
 

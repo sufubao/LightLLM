@@ -3,6 +3,8 @@ from typing import Optional
 
 logger = init_logger(__name__)
 
+SERVER_BUSY_MESSAGE = "Server is busy, please try again later"
+
 
 class InvalidRequestError(ValueError):
     """Request validation failed before generation started."""
@@ -11,7 +13,7 @@ class InvalidRequestError(ValueError):
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 
-    def __init__(self, message="Server is busy, please try again later", status_code=429):
+    def __init__(self, message=SERVER_BUSY_MESSAGE, status_code=429):
         """
         Initialize the ServerBusyError
 

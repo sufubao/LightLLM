@@ -79,14 +79,8 @@ async def _safe_stream_wrapper(stream_generator):
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
     except ServerBusyError as e:
-        if not first_chunk_sent:
-            raise
-        logger.error("Generation interrupted after the stream started: %s", e.message)
-        error_data = json.dumps(
-            {"error": {"message": e.message, "type": "server_error", "code": "stream_error"}},
-            ensure_ascii=False,
-        )
-        yield f"data: {error_data}\n\n"
+        logger.debug("Server busy detail: %s", e.message)
+        raise
     except ClientDisconnected as e:
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.

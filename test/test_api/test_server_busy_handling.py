@@ -35,6 +35,7 @@ def test_server_busy_response_is_rate_limited(monkeypatch):
     assert response.status_code == 429
     assert body["error"]["type"] == "RateLimitError"
     assert body["error"]["code"] == 429
+    assert body["error"]["message"] == "Server is busy, please try again later"
     assert metric_client.counters == ["lightllm_request_failure"]
 
 
@@ -178,26 +179,26 @@ def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
         "type": "error",
         "error": {
             "type": "rate_limit_error",
-            "message": "Server is busy, please try again later (Status code: 429)",
+            "message": "Server is busy, please try again later",
         },
     }
     assert metric_client.counters == ["lightllm_request_failure"]
 
 
-def test_safe_stream_reports_busy_error_after_first_chunk():
+def test_safe_stream_propagates_busy_error_after_first_chunk():
     async def run():
         async def generate():
             yield "first"
             raise ServerBusyError()
 
-        return [item async for item in api_openai._safe_stream_wrapper(generate())]
+        chunks = []
+        with pytest.raises(ServerBusyError):
+            async for item in api_openai._safe_stream_wrapper(generate()):
+                chunks.append(item)
+        return chunks
 
     chunks = asyncio.run(run())
-    error = json.loads(chunks[1].removeprefix("data: "))
-
-    assert chunks[0] == "first"
-    assert error["error"]["type"] == "server_error"
-    assert error["error"]["code"] == "stream_error"
+    assert chunks == ["first"]
 
 
 def test_safe_stream_propagates_invalid_request_before_first_chunk():

@@ -7,9 +7,9 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from lightllm.server import api_anthropic, api_errors, api_http, api_openai, api_stream_obj
+from lightllm.server import api_anthropic, api_errors, api_http, api_openai
 from lightllm.server.api_stream_obj import CustomStreamingResponse
-from lightllm.utils.error_utils import ServerBusyError
+from lightllm.utils.error_utils import InvalidRequestError, ServerBusyError
 
 
 class _MetricClient:
@@ -51,9 +51,7 @@ def test_anthropic_error_type(error, expected):
     assert api_anthropic._anthropic_error_type(error) == expected
 
 
-def test_pd_master_stream_starts_response_after_first_chunk(monkeypatch):
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
-
+def test_stream_starts_response_after_first_chunk():
     async def run():
         response = None
 
@@ -82,21 +80,19 @@ def test_pd_master_stream_starts_response_after_first_chunk(monkeypatch):
     assert messages[0]["status"] == 201
 
 
-def test_pd_master_stream_propagates_busy_error_before_response_start(monkeypatch):
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
-
+def test_stream_propagates_error_before_response_start():
     async def run():
         async def generate():
             if False:
                 yield
-            raise ServerBusyError()
+            raise InvalidRequestError("prompt is too long")
 
         messages = []
 
         async def send(message):
             messages.append(message)
 
-        with pytest.raises(ServerBusyError):
+        with pytest.raises(InvalidRequestError, match="prompt is too long"):
             await CustomStreamingResponse(generate()).stream_response(send)
 
         return messages
@@ -104,8 +100,7 @@ def test_pd_master_stream_propagates_busy_error_before_response_start(monkeypatc
     assert asyncio.run(run()) == []
 
 
-def test_pd_master_stream_can_return_http_429(monkeypatch):
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+def test_stream_can_return_http_429():
     app = FastAPI()
 
     @app.exception_handler(ServerBusyError)
@@ -131,11 +126,36 @@ def test_pd_master_stream_can_return_http_429(monkeypatch):
     assert response.json() == {"error": "server busy"}
 
 
+def test_stream_can_return_http_400_for_invalid_request(monkeypatch):
+    metric_client = _MetricClient()
+    monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+    app = FastAPI()
+    app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)
+
+    @app.get("/")
+    async def generate_stream():
+        async def generate():
+            if False:
+                yield
+            raise InvalidRequestError("prompt is too long")
+
+        return CustomStreamingResponse(api_openai._safe_stream_wrapper(generate()))
+
+    async def run():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get("/")
+
+    response = asyncio.run(run())
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "prompt is too long"
+    assert metric_client.counters == ["lightllm_request_failure"]
+
+
 def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
     metric_client = _MetricClient()
     monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
     monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
-    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
 
     async def anthropic_messages_impl(_request):
         async def generate():
@@ -178,6 +198,20 @@ def test_safe_stream_reports_busy_error_after_first_chunk():
     assert chunks[0] == "first"
     assert error["error"]["type"] == "server_error"
     assert error["error"]["code"] == "stream_error"
+
+
+def test_safe_stream_propagates_invalid_request_before_first_chunk():
+    async def run():
+        async def generate():
+            if False:
+                yield
+            raise InvalidRequestError("prompt is too long")
+
+        with pytest.raises(InvalidRequestError, match="prompt is too long"):
+            async for _ in api_openai._safe_stream_wrapper(generate()):
+                pass
+
+    asyncio.run(run())
 
 
 def test_safe_stream_propagates_busy_error_before_first_chunk():

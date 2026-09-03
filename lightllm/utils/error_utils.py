@@ -4,6 +4,10 @@ from typing import Optional
 logger = init_logger(__name__)
 
 
+class InvalidRequestError(ValueError):
+    """Request validation failed before generation started."""
+
+
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 

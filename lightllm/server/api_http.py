@@ -46,7 +46,7 @@ from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -168,6 +168,17 @@ async def server_busy_exception_handler(request: Request, exc: ServerBusyError) 
         return _anthropic_error_response(HTTPStatus(exc.status_code), str(exc))
 
     return create_server_busy_response(exc)
+
+
+@app.exception_handler(InvalidRequestError)
+async def invalid_request_exception_handler(request: Request, exc: InvalidRequestError) -> JSONResponse:
+    if request.url.path == "/v1/messages":
+        from .api_anthropic import _anthropic_error_response
+
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, str(exc))
+
+    return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 
 @app.get("/liveness")

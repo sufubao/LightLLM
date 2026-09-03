@@ -30,7 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -70,6 +70,11 @@ async def _safe_stream_wrapper(stream_generator):
         async for item in stream_generator:
             first_chunk_sent = True
             yield item
+    except InvalidRequestError as e:
+        if not first_chunk_sent:
+            raise
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
     except ValueError as e:
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"

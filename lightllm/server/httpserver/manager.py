@@ -649,7 +649,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
-                    raise InvalidRequestError("prompt List[int] format contain id > vocab_size")
+                    raise InvalidRequestError("The input contains token IDs outside the model vocabulary.")
             else:
                 if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
                     multimodal_params.verify_resource_limits()
@@ -665,7 +665,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     )
                 return prompt
         else:
-            raise InvalidRequestError(f"prompt format error, get type{type(prompt)}")
+            raise InvalidRequestError("The input prompt must be a string or a list of token IDs.")
         return
 
     def get_real_supported_max_req_total_len(self):

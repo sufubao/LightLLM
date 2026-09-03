@@ -156,7 +156,7 @@ app.add_middleware(_AccessLogMiddleware)
 
 @app.exception_handler(ServerBusyError)
 async def server_busy_exception_handler(request: Request, exc: ServerBusyError) -> JSONResponse:
-    logger.debug("Server busy detail: %s", exc.message)
+    logger.warning("Server busy detail: %s", exc.message)
 
     # Streaming responses can raise during their first body iteration, after
     # the route handler has already returned. Preserve the Anthropic error

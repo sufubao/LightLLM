@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from lightllm.server import api_anthropic, api_errors, api_http, api_openai
+from lightllm.server import api_anthropic, api_errors, api_http, api_openai, api_stream_obj
 from lightllm.server.api_stream_obj import CustomStreamingResponse
 from lightllm.utils.error_utils import InvalidRequestError, ServerBusyError
 
@@ -52,7 +52,9 @@ def test_anthropic_error_type(error, expected):
     assert api_anthropic._anthropic_error_type(error) == expected
 
 
-def test_stream_starts_response_after_first_chunk():
+def test_pd_master_stream_starts_response_after_first_chunk(monkeypatch):
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+
     async def run():
         response = None
 
@@ -81,7 +83,9 @@ def test_stream_starts_response_after_first_chunk():
     assert messages[0]["status"] == 201
 
 
-def test_stream_propagates_error_before_response_start():
+def test_pd_master_stream_propagates_error_before_response_start(monkeypatch):
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+
     async def run():
         async def generate():
             if False:
@@ -101,7 +105,9 @@ def test_stream_propagates_error_before_response_start():
     assert asyncio.run(run()) == []
 
 
-def test_stream_can_return_http_429():
+def test_pd_master_stream_can_return_http_429(monkeypatch):
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+
     app = FastAPI()
 
     @app.exception_handler(ServerBusyError)
@@ -127,9 +133,10 @@ def test_stream_can_return_http_429():
     assert response.json() == {"error": "server busy"}
 
 
-def test_stream_can_return_http_400_for_invalid_request(monkeypatch):
+def test_pd_master_stream_can_return_http_400_for_invalid_request(monkeypatch):
     metric_client = _MetricClient()
     monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
     app = FastAPI()
     app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)
 
@@ -157,6 +164,7 @@ def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
     metric_client = _MetricClient()
     monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
     monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
 
     async def anthropic_messages_impl(_request):
         async def generate():
@@ -250,9 +258,10 @@ def test_safe_stream_converts_value_error_before_first_chunk():
     asyncio.run(run())
 
 
-def test_stream_returns_http_400_for_value_error_before_first_chunk(monkeypatch):
+def test_pd_master_stream_returns_http_400_for_value_error_before_first_chunk(monkeypatch):
     metric_client = _MetricClient()
     monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
     app = FastAPI()
     app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)
 

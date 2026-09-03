@@ -197,6 +197,7 @@ def test_safe_stream_reports_busy_error_after_first_chunk():
     error = json.loads(chunks[1].removeprefix("data: "))
 
     assert chunks[0] == "first"
+    assert chunks[2] == "data: [DONE]\n\n"
     assert error["error"] == {
         "message": "Server is busy, please try again later",
         "type": "server_error",

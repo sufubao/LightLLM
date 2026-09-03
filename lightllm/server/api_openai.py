@@ -30,7 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -80,7 +80,13 @@ async def _safe_stream_wrapper(stream_generator):
         yield f"data: {error_data}\n\n"
     except ServerBusyError as e:
         logger.debug("Server busy detail: %s", e.message)
-        raise
+        if not first_chunk_sent:
+            raise
+        error_data = json.dumps(
+            {"error": {"message": SERVER_BUSY_MESSAGE, "type": "server_error", "code": "stream_error"}},
+            ensure_ascii=False,
+        )
+        yield f"data: {error_data}\n\n"
     except ClientDisconnected as e:
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.

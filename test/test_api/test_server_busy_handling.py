@@ -185,20 +185,23 @@ def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
     assert metric_client.counters == ["lightllm_request_failure"]
 
 
-def test_safe_stream_propagates_busy_error_after_first_chunk():
+def test_safe_stream_reports_busy_error_after_first_chunk():
     async def run():
         async def generate():
             yield "first"
             raise ServerBusyError()
 
-        chunks = []
-        with pytest.raises(ServerBusyError):
-            async for item in api_openai._safe_stream_wrapper(generate()):
-                chunks.append(item)
-        return chunks
+        return [item async for item in api_openai._safe_stream_wrapper(generate())]
 
     chunks = asyncio.run(run())
-    assert chunks == ["first"]
+    error = json.loads(chunks[1].removeprefix("data: "))
+
+    assert chunks[0] == "first"
+    assert error["error"] == {
+        "message": "Server is busy, please try again later",
+        "type": "server_error",
+        "code": "stream_error",
+    }
 
 
 def test_safe_stream_propagates_invalid_request_before_first_chunk():

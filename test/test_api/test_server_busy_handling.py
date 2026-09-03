@@ -219,6 +219,37 @@ def test_safe_stream_propagates_invalid_request_before_first_chunk():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("error_type", [InvalidRequestError, ValueError])
+def test_safe_stream_terminates_invalid_error_after_first_chunk(error_type):
+    async def run():
+        async def generate():
+            yield "first"
+            raise error_type("prompt is too long")
+
+        return [item async for item in api_openai._safe_stream_wrapper(generate())]
+
+    chunks = asyncio.run(run())
+    error = json.loads(chunks[1].removeprefix("data: "))
+
+    assert chunks[0] == "first"
+    assert error["error"] == {"message": "prompt is too long", "type": "invalid_request_error"}
+    assert chunks[2] == "data: [DONE]\n\n"
+
+
+def test_safe_stream_propagates_value_error_before_first_chunk():
+    async def run():
+        async def generate():
+            if False:
+                yield
+            raise ValueError("prompt is too long")
+
+        with pytest.raises(ValueError, match="prompt is too long"):
+            async for _ in api_openai._safe_stream_wrapper(generate()):
+                pass
+
+    asyncio.run(run())
+
+
 def test_safe_stream_propagates_busy_error_before_first_chunk():
     async def run():
         async def generate():

@@ -40,6 +40,11 @@ APIServer 参数详解
 
     HTTP 服务器工作进程数，默认为 ``1``
 
+.. option:: --disable_delay_response_start
+
+    立即发送流式响应的状态码和响应头，不再等待首个响应 chunk 就绪。默认情况下，LightLLM 会延迟发送
+    响应起始事件，使首个 chunk 产生前抛出的异常仍能返回正确的 HTTP 状态码。
+
 .. option:: --hypercorn_config
 
     Hypercorn TOML 配置文件路径，仅支持 TOML 格式。示例文件见 ``test/hypercorn_config.toml``。

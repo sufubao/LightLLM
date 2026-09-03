@@ -42,7 +42,12 @@ from lightllm.utils.envs_utils import (
     get_unique_server_name,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
-from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    InvalidRequestError,
+    PDPrefillNodeStopGenToken,
+    ServerBusyError,
+)
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -619,10 +624,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # TODO: automatically calculate the average character length per token
             max_prompt_chars = self.max_req_total_len * 8
             if len(prompt) > max_prompt_chars:
-                raise ValueError(
+                raise InvalidRequestError(
                     f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
                     f"the request is rejected before tokenization."
                 )
+
             if self.enable_multimodal:
                 multimodal_params.verify_resource_limits()
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
@@ -653,7 +659,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
-                    raise ValueError("prompt List[int] format contain id > vocab_size")
+                    raise InvalidRequestError("The input contains token IDs outside the model vocabulary.")
             else:
                 if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
                     multimodal_params.verify_resource_limits()
@@ -669,7 +675,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     )
                 return prompt
         else:
-            raise ValueError(f"prompt format error, get type{type(prompt)}")
+            raise InvalidRequestError("The input prompt must be a string or a list of token IDs.")
         return
 
     def get_real_supported_max_req_total_len(self):
@@ -678,7 +684,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
         if not prompt_ids:
-            raise ValueError("prompt_ids is empty")
+            raise InvalidRequestError("The input prompt must not be empty.")
         prompt_tokens = len(prompt_ids)
         # 这里 -36 是保留一些不可预知的边界余量，防止系统出错
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
@@ -695,16 +701,22 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 )
                 sampling_params.max_new_tokens = new_max_new_tokens
             else:
-                raise ValueError(
-                    f"the input prompt token len {prompt_tokens} + max_new_tokens \
-                        {sampling_params.max_new_tokens} > {real_supported_max_req_total_len}"
+                raise InvalidRequestError(
+                    f"This model's maximum context length is {real_supported_max_req_total_len} tokens. "
+                    f"However, you requested {sampling_params.max_new_tokens} output tokens and your prompt "
+                    f"contains {prompt_tokens} input tokens, for a total of "
+                    f"{prompt_tokens + sampling_params.max_new_tokens} tokens. Please reduce the length of "
+                    f"the input prompt or the number of requested output tokens."
                 )
 
         # last repaired
         req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
-            raise ValueError(
-                f"the req total len (input len + output len) is too long > max_req_total_len:{self.max_req_total_len}"
+            raise InvalidRequestError(
+                f"This model's maximum context length is {self.max_req_total_len} tokens. "
+                f"However, you requested {sampling_params.max_new_tokens} output tokens and your prompt "
+                f"contains {prompt_tokens} input tokens, for a total of {req_total_len} tokens. "
+                f"Please reduce the length of the input prompt or the number of requested output tokens."
             )
 
         return prompt_ids

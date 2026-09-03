@@ -78,7 +78,11 @@ async def _safe_stream_wrapper(stream_generator):
         yield "data: [DONE]\n\n"
     except ValueError as e:
         if not first_chunk_sent:
-            raise
+            # Request setup is lazy for streaming responses, so validation
+            # errors raised here bypass the endpoint's normal ValueError
+            # handler. Convert them to the dedicated request-error type so
+            # the application-level handler returns HTTP 400.
+            raise InvalidRequestError(str(e)) from e
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
         yield "data: [DONE]\n\n"

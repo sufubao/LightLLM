@@ -236,18 +236,44 @@ def test_safe_stream_terminates_invalid_error_after_first_chunk(error_type):
     assert chunks[2] == "data: [DONE]\n\n"
 
 
-def test_safe_stream_propagates_value_error_before_first_chunk():
+def test_safe_stream_converts_value_error_before_first_chunk():
     async def run():
         async def generate():
             if False:
                 yield
             raise ValueError("prompt is too long")
 
-        with pytest.raises(ValueError, match="prompt is too long"):
+        with pytest.raises(InvalidRequestError, match="prompt is too long"):
             async for _ in api_openai._safe_stream_wrapper(generate()):
                 pass
 
     asyncio.run(run())
+
+
+def test_stream_returns_http_400_for_value_error_before_first_chunk(monkeypatch):
+    metric_client = _MetricClient()
+    monkeypatch.setattr(api_http.g_objs, "metric_client", metric_client)
+    app = FastAPI()
+    app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)
+
+    @app.get("/")
+    async def generate_stream():
+        async def generate():
+            if False:
+                yield
+            raise ValueError("invalid token id")
+
+        return CustomStreamingResponse(api_openai._safe_stream_wrapper(generate()))
+
+    async def run():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get("/")
+
+    response = asyncio.run(run())
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "invalid token id"
+    assert metric_client.counters == ["lightllm_request_failure"]
 
 
 def test_safe_stream_propagates_busy_error_before_first_chunk():

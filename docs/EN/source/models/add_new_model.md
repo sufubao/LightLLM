@@ -550,68 +550,36 @@ class BloomTpPartModel(TpPartBaseModel):
         return 
 ~~~
 
-### (4) Add support for models in the server service layer
+### (4) Declare complete model support
 
-***lightllm/server/router/model_infer/model_rpc.py***
+A new model should not add `model_type` branches to `lightllm/server` or `lightllm/common`. Add a
+`support.py` file to the model package and declare all model-specific components there:
 
 ~~~python
-import asyncio
-import rpyc
-import torch
-import traceback
-from datetime import timedelta
-from typing import Dict, List, Tuple
-from transformers.configuration_utils import PretrainedConfig
-from lightllm.server.router.model_infer.infer_batch import InferBatch
-from rpyc.utils.classic import obtain
-
 from lightllm.models.bloom.model import BloomTpPartModel
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.common.configs.config import setting
-from .post_process import sample
+from lightllm.models.registry import ModelSupport, ModelSupportRegistry
 
-class ModelRpcServer(rpyc.Service):
 
-    def exposed_init_model(self, rank_id, world_size, weight_dir, max_total_token_num, load_way, mode):
-        import torch
-        import torch.distributed as dist
-        if world_size != 1:
-            trans_list = [obtain(e) for e in (rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)]
-            rank_id, world_size, weight_dir, max_total_token_num, load_way, mode = trans_list
-
-        self.tp_rank = rank_id
-        self.tp_world_size_ = world_size
-        self.load_way = load_way
-        self.mode = mode
-        self.cache = {}
-
-        dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
-        torch.cuda.set_device(rank_id)
-
-        model_cfg, _ = PretrainedConfig.get_config_dict(
-            weight_dir
-        )
-        try:
-            self.model_type = model_cfg["model_type"]
-            if self.model_type == "bloom":
-                self.model = BloomTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-                raise Exception(f"can not support {self.model_type} now")
-        except Exception as e:
-            print("#" * 16)
-            print("load model error:", str(e), e, type(e))
-            raise e
-        
-        set_random_seed(2147483647)
-        return
-    ...
+BLOOM_SUPPORT = ModelSupportRegistry.register_support(
+    ModelSupport(
+        name="bloom",
+        model_types=("bloom",),
+        text_model=BloomTpPartModel,
+    )
+)
 ~~~
 
+Multimodal models can also provide `tokenizer_factory` and `vision_factory`. A factory receives a normalized
+`TokenizerBuildContext` or `VisionBuildContext`; model-specific construction, config compatibility, and wrapper
+logic should remain in `support.py`. See `lightllm/models/qwen3_vl/support.py` and
+`lightllm/models/tarsier2/support.py` for complete examples.
 
+Finally, add one lazy-loading entry to `BUILTIN_MODEL_MODULES` in `lightllm/models/builtin_registry.py`:
 
+~~~python
+"bloom": ("lightllm.models.bloom.support",),
+~~~
 
-
-
-
-
+A model support PR should normally change only its model package, the built-in manifest, and tests. Modify the
+server/common flow only when introducing a reusable framework capability.
 

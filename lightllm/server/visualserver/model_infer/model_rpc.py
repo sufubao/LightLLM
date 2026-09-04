@@ -19,8 +19,8 @@ from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
-from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
+from lightllm.models.registry import ModelContext, VisionBuildContext, get_model_support
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
@@ -77,7 +77,15 @@ class VisualModelRpcServer(rpyc.Service):
                 "max_batch_size": kvargs["max_batch_size"],
             }
             self.model_type = model_cfg["model_type"]
-            if self.model_type == "qwen":
+            model_support = get_model_support(model_cfg, model_dir=weight_dir)
+            if model_support.vision_factory is not None:
+                self.model = model_support.create_vision_model(
+                    VisionBuildContext(
+                        model=ModelContext.from_config(model_cfg, model_dir=weight_dir),
+                        kvargs=kvargs,
+                    )
+                )
+            elif self.model_type == "qwen":
                 self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
                 self.model = (
@@ -87,12 +95,10 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = (
                     Qwen2_5_VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
-            elif self.model_type in ["qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"]:
+            elif self.model_type in ["qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"]:
                 self.model = (
                     Qwen3VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
-            elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
-                self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
                 self.model = LlavaVisionModel()
             elif self.model_type == "internvl_chat":

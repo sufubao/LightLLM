@@ -734,6 +734,7 @@ class InferReq:
                             req=self,
                             linear_att_small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
                         )
+                        g_infer_context.radix_cache.mark_small_page_state_used(share_node)
                     else:
                         # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
                         # 对应的小页对应的节点，递归找到对应最近的大叶节点进行返回,然后赋值到req.shared_node 对象上
@@ -767,6 +768,8 @@ class InferReq:
                                 req=self,
                                 linear_att_small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
                             )
+                            # 仅在真正使用小页状态时刷新；内存不足而退回大页的分支不刷新。
+                            radix_cache.mark_small_page_state_used(share_node)
                             self.shared_kv_node = None
 
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)

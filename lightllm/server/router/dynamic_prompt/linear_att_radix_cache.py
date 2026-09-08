@@ -26,6 +26,8 @@ class LinearAttPagedTreeNode:
 
         self.ref_counter = 0
         self.time_id = time_gen.generate_time_id()
+        # 快照单独记录使用时间，避免匹配更长前缀时，沿途未使用的历史快照也被刷新为热门。
+        self.state_time_id = self.time_id
 
         self.node_value_len = 0
         self.node_prefix_total_len = 0
@@ -54,7 +56,7 @@ class LinearAttPagedTreeNode:
         assert self.is_big_page_node() is False
         # 对于有 buffer_id 的节点的回收处理比较器
         assert self.small_page_buffer_idx is not None
-        return (self.time_id,)
+        return (self.state_time_id,)
 
     def add_and_return_new_child(
         self,
@@ -171,6 +173,14 @@ class LinearAttPagedRadixCache:
         if node.small_page_buffer_idx is not None:
             self._evict_tree_set_for_linear_att.add(node)
         return
+
+    def mark_small_page_state_used(self, node: LinearAttPagedTreeNode):
+        """只有实际恢复了该节点的线性状态，才刷新快照 LRU；仅遍历到节点不算使用。"""
+        assert node.small_page_buffer_idx is not None
+        # SortedSet 的排序键发生变化时，必须先移除节点，再更新时间并重新加入。
+        self._evict_tree_set_for_linear_att.discard(node)
+        node.state_time_id = time_gen.generate_time_id()
+        self._evict_tree_set_for_linear_att.add(node)
 
     def insert(
         self,
@@ -302,6 +312,8 @@ class LinearAttPagedRadixCache:
                             # 将这个buffer id 移交给这个存在的节点。
                             self._discard_node(child)
                             child.small_page_buffer_idx = block_linear_idxs[0]
+                            # 原快照已被淘汰，补入的新快照应从当前时间开始参与 LRU 排序。
+                            child.state_time_id = time_gen.generate_time_id()
                             self._add_node(child)
                         else:
                             # 说明节点已经存在了，直接提前移除掉这个节点占用的线性缓存，外部不用处理这个细节了
@@ -619,22 +631,34 @@ class LinearAttPagedRadixCache:
         num_evicted = 0
         while num_evicted < need_remove_tokens:
             node: LinearAttPagedTreeNode = self._evict_tree_set.pop(0)
-            self._discard_node(node)
+            while True:
+                self._discard_node(node)
 
-            assert (
-                node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
-            ), "error evict tree node state"
-            num_evicted += len(node.token_mem_index_value)
+                assert (
+                    node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
+                ), "error evict tree node state"
+                num_evicted += len(node.token_mem_index_value)
 
-            if node.is_big_page_node():
-                assert node.big_page_buffer_idx is not None
-                self.linear_att_big_page_buffers.free_state_cache([node.big_page_buffer_idx])
+                if node.is_big_page_node():
+                    assert node.big_page_buffer_idx is not None
+                    self.linear_att_big_page_buffers.free_state_cache([node.big_page_buffer_idx])
 
-            evict_callback(node.token_mem_index_value, node.small_page_buffer_idx)
-            self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
-            parent_node: LinearAttPagedTreeNode = node.parent
-            parent_node.remove_child(node)
+                evict_callback(node.token_mem_index_value, node.small_page_buffer_idx)
+                self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
+                parent_node: LinearAttPagedTreeNode = node.parent
+                parent_node.remove_child(node)
 
-            self._add_node(parent_node)
+                self._add_node(parent_node)
+                # 末尾恢复点被删除后，向上连续的无快照叶节点已无法复用，一并回收，
+                # 即使释放量已达标也继续清理；遇到引用、其他分支或有效快照就停止。
+                if (
+                    parent_node is self.root_node
+                    or parent_node.ref_counter != 0
+                    or not parent_node.is_leaf()
+                    or parent_node.is_big_page_node()
+                    or parent_node.small_page_buffer_idx is not None
+                ):
+                    break
+                node = parent_node
 
         return

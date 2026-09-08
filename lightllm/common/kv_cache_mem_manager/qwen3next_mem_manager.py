@@ -3,7 +3,7 @@ import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
+from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig
 from .operator import LinearAttMemOperator
 from typing import Tuple, Any, List
 
@@ -32,52 +32,10 @@ class Qwen3NextMemManager(MemoryManager):
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
 
-    def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        # TODO 初始化线性 att 对应的部分 buffer.
-        self._init_linear_att_buffers()
-        return
-
-    def _init_linear_att_buffers(self):
-        big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
-        # 申请大页可能需要对应的资源, 多申请了两个linear att的状态，理论上这个状态
-        # 永远不会被 alloc 申请到，只会在 cpu cache中，用于过渡和存储碎页情况下的
-        # cpu cache 的页面拷贝。
-        self.linear_att_big_page_buffers = LinearAttCacheManager(
-            size=triton.cdiv(self.size, big_page_token_num) + 2,
-            linear_config=self.linear_config,
-            keep_num=2,
-        )
-
-        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
-        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 1
-        return
-
-    def _free_buffers(self):
-        super()._free_buffers()
-        self._free_linear_att_buffers()
-        return
-
-    def _free_linear_att_buffers(self):
-        self.linear_att_big_page_buffers = None
-        return
-
     def write_to_shm(self, req_manager):
         self.req_to_conv_state = req_manager.req_to_conv_state
         self.req_to_ssm_state = req_manager.req_to_ssm_state
-        # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
-        # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本
-        # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针
-        # 启动会报 "Pointer argument cannot be accessed from Triton (cpu tensor?)"。
-        # 跨进程消费方并不使用 cpu 侧大页 state cache，序列化期间临时剔除以保住 pinned。
-        big_page_buffers = self.linear_att_big_page_buffers
-        self.linear_att_big_page_buffers = None
-        try:
-            return super().write_to_shm(req_manager)
-        finally:
-            self.linear_att_big_page_buffers = big_page_buffers
+        return super().write_to_shm(req_manager)
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)

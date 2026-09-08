@@ -131,29 +131,60 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     assert len(module.cpu_cache_handle_queue) == 2
 
 
-def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
-    freed_small_pages = []
-    freed_big_pages = []
+def test_non_gpu_linear_cache_tiers_do_not_own_checkpoint_slots():
+    from lightllm.common.linear_att_cache_manager.checkpoints import CheckpointIndex
+
     context = InferenceContext()
     context.is_linear_att_mixed_model = True
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
-    context.radix_cache = SimpleNamespace(
-        linear_att_small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
-        linear_att_big_page_buffers=SimpleNamespace(free_state_cache=freed_big_pages.extend),
-    )
-    req = SimpleNamespace(
-        req_idx=0,
-        cur_kv_len=3,
-        shared_kv_node=None,
-        tail_linear_att_small_page_buffer_id=7,
-        linear_att_len_to_big_page_id={128: 8, 256: 9},
-    )
+    context.radix_cache = SimpleNamespace()
+    checkpoints = CheckpointIndex(1)
+    saved = checkpoints.insert([1, 2, 3], 3, lambda slot: None)
+    context.backend = SimpleNamespace(linear_att_checkpoint_cache=SimpleNamespace(index=checkpoints))
+    req = SimpleNamespace(req_idx=0, cur_kv_len=3, shared_kv_node=None)
     free_token_indexes = []
 
     context._free_req_mem_without_radix_insert(free_token_indexes, req)
 
     assert free_token_indexes[0].tolist() == [10, 11, 12]
-    assert freed_small_pages == [7]
-    assert freed_big_pages == [8, 9]
-    assert req.tail_linear_att_small_page_buffer_id is None
-    assert req.linear_att_len_to_big_page_id == {}
+    assert checkpoints.match([1, 2, 3], 3) == saved
+
+
+def test_cpu_local_checkpoint_leaves_a_token_for_logits(monkeypatch):
+    from threading import RLock
+    from unittest.mock import Mock
+    from lightllm.common.linear_att_cache_manager.checkpoints import CheckpointIndex
+
+    index = CheckpointIndex(2)
+    tokens = list(range(16))
+    index.insert(tokens, 8, lambda slot: None)
+    index.insert(tokens, 16, lambda slot: None)
+    cache = SimpleNamespace(index=index, lock=RLock(), policy=SimpleNamespace(hash_page_size=8))
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.args = SimpleNamespace(cpu_cache_token_page_size=16)
+    module.backend = SimpleNamespace(is_master_in_dp=True, dp_world_size=1, linear_att_checkpoint_cache=cache)
+    module.linear_state_client = Mock()
+    module.cpu_cache_client = Mock()
+    module.gloo_group = module.init_sync_group = None
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 100)
+    monkeypatch.setattr(
+        multi_level_kv_cache_impl.dist, "all_gather_object", lambda out, obj, **kwargs: out.__setitem__(0, obj)
+    )
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda **kwargs: None)
+    req = SimpleNamespace(
+        cur_kv_len=8,
+        linear_checkpoint_demand=0,
+        get_input_token_ids=lambda: tokens,
+        sampling_param=SimpleNamespace(disable_prompt_cache=False, shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        shm_req=SimpleNamespace(
+            input_len=16,
+            linear_att_cpu_state_page=-1,
+            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [0]),
+            token_hash_page_len_list=SimpleNamespace(get_all=lambda: [16]),
+            disk_prompt_cache_len=0,
+        ),
+    )
+    module.load_cpu_cache_to_reqs([req])
+    assert req.cur_kv_len == 8
+    assert req.shm_req.cpu_prompt_cache_len == 0
+    module.cpu_cache_client.deref_pages.assert_called_once_with(page_list=[0])

@@ -38,6 +38,13 @@ class MultiLevelKVCacheManager:
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
+        self.linear_state_client = None
+        from lightllm.utils.config_utils import is_linear_att_mixed_model
+
+        if is_linear_att_mixed_model(args.model_dir):
+            from .linear_state_cache import CpuLinearStateCacheClient
+
+            self.linear_state_client = CpuLinearStateCacheClient(self.cpu_cache_client, False, True)
         self.shm_req_manager = ShmReqManager()
         self.only_cpu_cache_enable = args.enable_cpu_cache and not args.enable_disk_cache
         # 磁盘io在NVMe SSD上需要大量并发才能发挥性能
@@ -67,9 +74,16 @@ class MultiLevelKVCacheManager:
             try:
                 current_group_req = self.recv_queue.get()
 
-                self.executor.submit(self._handle_group_req_multi_cache_match, current_group_req, time.time())
+                future = self.executor.submit(self._handle_group_req_multi_cache_match, current_group_req, time.time())
+                future.add_done_callback(self._log_match_error)
             except BaseException as e:
                 logger.exception(str(e))
+
+    @staticmethod
+    def _log_match_error(future):
+        error = future.exception()
+        if error is not None:
+            logger.error("CPU cache lookup failed", exc_info=(type(error), error, error.__traceback__))
 
     def _cpu_cache_match(self, token_hash_list: List[int]) -> List[int]:
         """
@@ -99,11 +113,19 @@ class MultiLevelKVCacheManager:
             return all_pages, 0
 
         missing_hash_keys = token_hash_list[cpu_hit_len : cpu_hit_len + loadable_len]
+        state_client = self.linear_state_client
+        if state_client is not None:
+            state_client.lock.acquire_sleep1ms()
         self.cpu_cache_client.lock.acquire_sleep1ms()
-        allocated_pages, _ = self.cpu_cache_client.allocate_pages(
-            hash_keys=missing_hash_keys, disk_offload_enable=self.args.enable_disk_cache
-        )
-        self.cpu_cache_client.lock.release()
+        try:
+            allocator = (
+                state_client.allocate_kv_pages if state_client is not None else self.cpu_cache_client.allocate_pages
+            )
+            allocated_pages, _ = allocator(hash_keys=missing_hash_keys, disk_offload_enable=self.args.enable_disk_cache)
+        finally:
+            self.cpu_cache_client.lock.release()
+            if state_client is not None:
+                state_client.lock.release()
 
         # 收集成功分配的页面,直接append到all_pages
         new_page_indexes = []
@@ -164,7 +186,40 @@ class MultiLevelKVCacheManager:
                 continue
 
             req: Req = req
-            if req.sample_params.prompt_logprobs >= 0:
+            if req.sample_params.prompt_logprobs >= 0 or req.sample_params.disable_prompt_cache:
+                continue
+
+            if self.linear_state_client is not None:
+                req.link_prompt_ids_shm_array()
+                # Disk can supply missing full KV pages. State remains a
+                # separately retained CPU object; never resume on KV alone.
+                kv_hashes = req.token_hash_list.get_all()
+                staged_pages = self._cpu_cache_match(kv_hashes)
+                disk_page_num = 0
+                if not self.only_cpu_cache_enable and kv_hashes:
+                    staged_pages, disk_page_num = self._disk_cache_match(kv_hashes, staged_pages)
+                state_client = self.linear_state_client
+                state_client.lock.acquire_sleep1ms()
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                try:
+                    state_idx, pages, lengths = state_client.match(req.get_prompt_ids(), req.input_len - 1)
+                    # Local recurrent snapshots may combine with a longer
+                    # CPU KV hit. Let inference reconcile both state stores.
+                    raw_len = len(staged_pages) * self.args.cpu_cache_token_page_size
+                    if raw_len > (lengths[-1] if lengths else 0):
+                        self.cpu_cache_client.deref_pages(pages)
+                        pages, staged_pages = staged_pages, []
+                        lengths = [self.args.cpu_cache_token_page_size * (i + 1) for i in range(len(pages))]
+                    req.linear_att_cpu_state_page = state_idx
+                    req.cpu_cache_match_page_indexes.fill(pages)
+                    req.token_hash_page_len_list.clear()
+                    req.token_hash_page_len_list.fill(lengths)
+                    disk_start = raw_len - disk_page_num * self.args.cpu_cache_token_page_size
+                    req.disk_prompt_cache_len = max(0, lengths[-1] - disk_start) if lengths and disk_page_num else 0
+                    self.cpu_cache_client.deref_pages(staged_pages)
+                finally:
+                    self.cpu_cache_client.lock.release()
+                    state_client.lock.release()
                 continue
 
             token_hash_list = req.token_hash_list.get_all()

@@ -74,11 +74,11 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         linear_config = LinearAttCacheConfig.load_from_args()
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
-            token_page_size=1,
-            layer_num=1,
-            num_heads=1,
-            head_dim=linear_config.get_cpu_cache_big_page_bytes(),
-            data_type=torch.uint8,
+            token_page_size=args.cpu_cache_token_page_size,
+            layer_num=linear_config.get_full_att_kv_layer_num_with_draft_model(),
+            num_heads=linear_config.full_att_all_num_kv_heads * 2,
+            head_dim=linear_config.full_att_head_dim,
+            data_type=linear_config.full_att_dtype,
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
         )
@@ -123,8 +123,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         # TODO 可能会存在不同mtp模式的精度问题
         if not is_linear_att_mixed_model(args.model_dir):
             # 对于非 linear att 混合模型，需要额外增加 mtp 的 kv 层数，
-            # 对于 linear att 混合模型，如qwen 3.5 mtp，已经将 kv 数据
-            # 打包成一个块了，所以不需要额外增加，其 layer_num 一直都保持为 1
+            # Hybrid configuration already includes the draft full-attention layers.
             cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(

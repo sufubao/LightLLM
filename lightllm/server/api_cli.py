@@ -836,9 +836,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_cpu_cache",
         action="store_true",
-        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.
-        For linear attention cache reuse constraints, cpu cache token page size will be forced to
-        linear_att_page_block_num * linear_att_hash_page_size when cpu cache is enabled.""",
+        help="""Enable CPU KV caching. Prefer hugepages for better performance.
+        Hybrid models retain recurrent checkpoints separately from KV transfer pages.""",
     )
     parser.add_argument(
         "--cpu_cache_storage_size",
@@ -899,24 +898,30 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         It controls the number of tokens in each hash bucket, which can affect radix cache reused""",
     )
     parser.add_argument(
+        "--linear_att_cpu_cache_size",
+        type=int,
+        default=None,
+        help="Number of independently retained shared CPU recurrent checkpoints. Defaults to twice running_max_req_size.",
+    )
+    parser.add_argument(
+        "--linear_att_checkpoint_interval",
+        type=int,
+        default=32768,
+        help="Retain recurrent checkpoints at this token interval, independent of KV pages. "
+        "Must be a multiple of linear_att_hash_page_size; 0 retains only prompt/output ends and reused prefixes.",
+    )
+    parser.add_argument(
         "--linear_att_page_block_num",
         type=int,
         default=10000000,
-        help="""The number of blocks for linear attention state storage.
-        It controls the number of pages used for storing the attention state,
-        which can affect memory usage and mutiturn chat performance.
-        Block size is linear_att_page_block_num * linear_att_hash_page_size.
-        When this value multiplied by linear_att_hash_page_size is greater than max_req_total_len,
-        block-level matching in radix cache is effectively disabled and request-level small-page
-        matching (linear_att_hash_page_size) may dominate.""",
+        help="Deprecated compatibility option; use linear_att_checkpoint_interval for checkpoint spacing.",
     )
     parser.add_argument(
         "--linear_att_cache_size",
         type=int,
         default=None,
-        help="""The size of linear attn cache.
-        If radix cache hit rate is low under high load due to limited small-page capacity and LRU
-        eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
+        help="Number of local recurrent snapshots per TP rank, independent of GPU KV capacity. "
+        "Snapshots use pinned CPU memory and LRU eviction.",
     )
     parser.add_argument(
         "--linear_att_ssm_data_type",
@@ -929,8 +934,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--disable_linear_att_small_page_cpu_cache",
         action="store_true",
         default=False,
-        help="""Disable storing linear attention small page data in CPU cache.
-        This reduces CPU cache memory waste but also decreases the hit length.""",
+        help="Deprecated compatibility option; recurrent checkpoints no longer use paired small KV/state pages.",
     )
     parser.add_argument(
         "--hardware_platform",

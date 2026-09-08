@@ -16,8 +16,8 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
-from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
+from lightllm.common.linear_att_cache_manager.checkpoint_cache import LinearAttCheckpointCache
+from lightllm.common.linear_att_cache_manager.checkpoints import CheckpointPolicy
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
@@ -153,34 +153,33 @@ class ModeBackend:
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
 
-        if self.is_linear_att_mixed_model:
-            self.linear_att_cache_manager = LinearAttCacheManager(
-                size=self.args.linear_att_cache_size,
-                linear_config=self.model.req_manager.linear_config,
-            )
-        else:
-            self.linear_att_cache_manager = None
+        self.linear_att_checkpoint_cache = None
+        self.linear_state_group = None
+        if self.is_linear_att_mixed_model and self.use_dynamic_prompt_cache:
+            from lightllm.utils.dist_utils import create_new_group_for_current_dp
 
-        if not self.use_dynamic_prompt_cache:
-            self.radix_cache = None
-        else:
-            if self.is_linear_att_mixed_model:
-                self.radix_cache = LinearAttPagedRadixCache(
-                    unique_name=get_unique_server_name(),
-                    total_token_num=self.model.mem_manager.size,
-                    rank_in_node=self.rank_in_node,
+            # Finish/stop decisions arrive in post-handle. A following forward
+            # would overwrite the recurrent rows needed for exact output
+            # checkpoints (including an interior accepted MTP row). Keep this
+            # path serialized until snapshots have their own event-owned staging.
+            self.support_overlap = False
+            self.linear_state_group = create_new_group_for_current_dp("gloo")
+            self.linear_att_checkpoint_cache = LinearAttCheckpointCache(
+                capacity=self.args.linear_att_cache_size,
+                linear_config=self.model.req_manager.linear_config,
+                policy=CheckpointPolicy(
+                    interval=self.args.linear_att_checkpoint_interval,
                     hash_page_size=self.args.linear_att_hash_page_size,
-                    big_page_num=self.args.linear_att_page_block_num,
-                    kv_cache_mem_manager=self.model.mem_manager,
-                    linear_att_small_page_buffers=self.linear_att_cache_manager,
-                )
-            else:
-                self.radix_cache = RadixCache(
-                    unique_name=get_unique_server_name(),
-                    total_token_num=self.model.mem_manager.size,
-                    rank_in_node=self.rank_in_node,
-                    mem_manager=self.model.mem_manager,
-                )
+                ),
+            )
+        self.radix_cache = None
+        if self.use_dynamic_prompt_cache:
+            self.radix_cache = RadixCache(
+                unique_name=get_unique_server_name(),
+                total_token_num=self.model.mem_manager.size,
+                rank_in_node=self.rank_in_node,
+                mem_manager=self.model.mem_manager,
+            )
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
@@ -703,7 +702,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -780,6 +778,8 @@ class ModeBackend:
         cache_controller = g_infer_context.cache_placement_controller
         new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
         cache_controller.set_req_cache_way(new_finished_reqs)
+        for req in new_finished_reqs:
+            g_infer_context.capture_output_linear_state(req)
         if self.args.enable_cpu_cache:
             offload_reqs = [
                 req for req in finished_reqs if CacheTier.CPU in req.cache_tiers or CacheTier.DISK in req.cache_tiers
@@ -882,6 +882,7 @@ class ModeBackend:
                 pd_prefill_chunked_handle_func=pd_prefill_chunked_handle_func,
             )
 
+        g_infer_context.capture_decode_linear_states(run_reqs)
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
             req_objs=run_reqs, next_token_ids=next_token_ids
         )
@@ -917,7 +918,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

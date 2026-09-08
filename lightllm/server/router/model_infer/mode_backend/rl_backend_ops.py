@@ -52,6 +52,9 @@ class RlBackendOps:
     def flush_cache(self, request: FlushCacheReq):
         if self.backend.radix_cache is not None:
             self.backend.radix_cache.flush_cache()
+        cache = getattr(self.backend, "linear_att_checkpoint_cache", None)
+        if cache is not None:
+            cache.clear()
         return True, "Succeeded to flush cache."
 
     def _iter_memory_tags(self, tags: Optional[List[MemoryTag]]):

@@ -4,7 +4,6 @@ import torch
 
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
-from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .base import ReqManager
@@ -29,9 +28,6 @@ class ReqManagerForMamba(ReqManager):
         if self.mtp_step > 0:
             assert get_env_start_args().enable_prefill_decode_mixed is False
 
-        self.big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
         self.linear_config = linear_config
 
         self.req_to_conv_state = LayerCache(
@@ -61,6 +57,29 @@ class ReqManagerForMamba(ReqManager):
             self.req_to_mtp_state_index[req.req_idx] = 0
         return
 
+    def get_linear_att_state(self, req: "InferReq", state_index=None):
+        """Return the conv window and SSM row at one committed boundary.
+
+        MTP keeps every verified recurrent row and a widened convolution
+        window. The accepted offset applies to BOTH, not just the SSM row.
+        Prefill callers explicitly pass zero because their state is canonical.
+        """
+        if state_index is None:
+            state_index = (
+                0 if self.req_to_mtp_state_index is None else int(self.req_to_mtp_state_index[req.req_idx].item())
+            )
+        assert 0 <= state_index <= self.mtp_step
+        width = self.linear_config.conv_kernel_size - 1
+        conv = self.req_to_conv_state.buffer[:, req.req_idx, ..., state_index : state_index + width]
+        ssm = self.req_to_ssm_state.buffer[:, req.req_idx * (self.mtp_step + 1) + state_index, ...]
+        return conv, ssm
+
+    def restore_linear_att_state(self, req: "InferReq", conv, ssm):
+        self.req_to_conv_state.buffer[:, req.req_idx, ..., : conv.shape[-1]].copy_(conv)
+        self.req_to_ssm_state.buffer[:, req.req_idx * (self.mtp_step + 1), ...].copy_(ssm)
+        if self.req_to_mtp_state_index is not None:
+            self.req_to_mtp_state_index[req.req_idx] = 0
+
     def get_mamba_cache(self, layer_idx_in_all: int):
         assert (
             0 <= layer_idx_in_all < self.linear_config.all_layer_num
@@ -69,33 +88,3 @@ class ReqManagerForMamba(ReqManager):
         conv_states = self.req_to_conv_state.buffer[layer_idx_in_linear]
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
-
-    def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
-        big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
-
-        conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
-        conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
-        conv_cache_width = conv_state.shape[-1]
-        self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
-        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_mtp_state_index is not None:
-            self.req_to_mtp_state_index[req.req_idx] = 0
-        return
-
-    def copy_small_page_buffer_to_linear_att_state(
-        self, req: "InferReq", linear_att_small_page_buffers: LinearAttCacheManager
-    ):
-        conv_state, ssm_state = linear_att_small_page_buffers.get_state_cache(
-            buffer_idx=req.shared_kv_node.small_page_buffer_idx
-        )
-        conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
-        conv_cache_width = conv_state.shape[-1]
-        # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
-        # 同时，非连续对象的拷贝，可能存在效率问题。
-        self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
-        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_mtp_state_index is not None:
-            self.req_to_mtp_state_index[req.req_idx] = 0
-        return

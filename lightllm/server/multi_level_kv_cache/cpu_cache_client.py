@@ -15,17 +15,28 @@ class CpuKvCacheClient(object):
     This class is responsible for handling cpu kv cache meta data.
     """
 
-    def __init__(self, only_create_meta_data: bool, init_shm_data: bool):
+    def __init__(
+        self,
+        only_create_meta_data: bool,
+        init_shm_data: bool,
+        *,
+        cache_name=None,
+        tensor_meta=None,
+        tensor_shm_key=None,
+        item_class=None,
+    ):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
-        self.kv_cache_tensor_meta = calcu_cpu_cache_meta()
+        self.cache_name = cache_name or f"{get_unique_server_name()}_cpu_kv_cache"
+        self.item_class = item_class or _CpuPageStatus
+        self.kv_cache_tensor_meta = tensor_meta if tensor_meta is not None else calcu_cpu_cache_meta()
         self.page_num: int = self.kv_cache_tensor_meta.page_num
-        self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_cpu_kv_cache_client_lock")
+        self.lock = AtomicShmLock(lock_name=f"{self.cache_name}_client_lock")
         self._create_cpu_status_list(init_shm_data)
 
         if not only_create_meta_data:
             tensor_spec = CpuCacheTensorSpec(
-                shm_key=self.args.cpu_kv_cache_shm_id,
+                shm_key=self.args.cpu_kv_cache_shm_id if tensor_shm_key is None else tensor_shm_key,
                 shape=(
                     self.kv_cache_tensor_meta.page_num,
                     self.kv_cache_tensor_meta.layer_num,
@@ -268,18 +279,18 @@ class CpuKvCacheClient(object):
 
     def _create_cpu_status_list(self, init_shm_data: bool):
         self.page_items = ShmLinkedList(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_page_items",
-            item_class=_CpuPageStatus,
+            name=f"{self.cache_name}_page_items",
+            item_class=self.item_class,
             capacity=self.page_num,
             init_shm_data=init_shm_data,
         )
         self.page_hash_dict = ShmDict(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_hash",
+            name=f"{self.cache_name}_hash",
             capacity=self.page_num * 2,
             init_shm_data=init_shm_data,
         )
         self.offload_page_indexes = IntList(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_offload_page_indexes",
+            name=f"{self.cache_name}_offload_page_indexes",
             capacity=self.page_num * 2,
             init_shm_data=init_shm_data,
         )

@@ -264,15 +264,19 @@ def _launch_subprocesses(args: StartArgs):
         per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
         args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
 
-    if args.run_mode == "decode":
-        # PD Decode 节点只接收 prompt 末尾位置的 linear attention state，不具备
-        # 中间大页边界对应的 state。因此 Decode 节点必须使用默认值关闭大页功能，
-        # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
-        args.linear_att_page_block_num = 10000000
+    if is_linear_att_mixed_model(args.model_dir):
+        from lightllm.common.linear_att_cache_manager.checkpoints import CheckpointPolicy
 
-    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
-        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+        CheckpointPolicy(args.linear_att_checkpoint_interval, args.linear_att_hash_page_size)
+        if args.linear_att_cpu_cache_size is None:
+            args.linear_att_cpu_cache_size = args.running_max_req_size * 2
+        assert args.linear_att_cpu_cache_size > 0
+        assert args.linear_att_cache_size >= 0
+        if args.linear_att_page_block_num != 10000000:
+            logger.warning(
+                "linear_att_page_block_num is deprecated; use linear_att_checkpoint_interval. "
+                "cpu_cache_token_page_size now controls KV transfer pages independently."
+            )
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:

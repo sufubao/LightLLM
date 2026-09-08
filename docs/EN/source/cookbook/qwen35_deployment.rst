@@ -39,6 +39,71 @@ Qwen3.5-397B-A17B is a multimodal Mixture-of-Experts model with 397B total param
 
     Qwen3.5 models are registered as multimodal by default. Multimodal support is automatically enabled unless explicitly disabled. For text-only deployment, add ``--disable_vision`` to skip loading the vision encoder, which reduces memory usage and startup time.
 
+Recurrent Checkpoints and CPU KV Caching
+---------------------------------------
+
+Qwen3.5 caches full-attention KV and recurrent checkpoints independently.
+A checkpoint contains the convolution history and recurrent state of every
+linear-attention layer at one exact prefix length. GPU KV eviction does not
+evict that checkpoint, and checkpoint eviction does not free GPU KV.
+
+.. list-table:: Independent cache controls
+   :header-rows: 1
+
+   * - Option
+     - Meaning
+   * - ``--cpu_cache_token_page_size``
+     - Physical full-attention KV transfer page size; a power of two.
+   * - ``--linear_att_hash_page_size``
+     - Logical alignment for the reusable prompt-tail and demand checkpoints.
+   * - ``--linear_att_checkpoint_interval``
+     - Periodic checkpoint spacing (default 32768 tokens), a multiple of the
+       hash page size. Zero disables periodic checkpoints.
+   * - ``--linear_att_cache_size``
+     - Number of local snapshots per TP rank, stored in pinned CPU memory.
+   * - ``--linear_att_cpu_cache_size``
+     - Number of shared CPU snapshots across local DP replicas. Defaults to
+       twice ``running_max_req_size``. State storage is additional to the
+       full-attention KV budget set by ``cpu_cache_storage_size``.
+
+Prefill stops at selected checkpoints, independently of physical KV pages.
+Prompt ends and their reusable hash-aligned tails are retained. A GPU KV-only
+prefix match requests a checkpoint during recomputation, allowing subsequent
+requests to reuse that prefix. All retention is subject to the independent
+state budget and LRU eviction.
+
+Generated output is also cacheable. The terminal checkpoint uses the exact
+computed prefix, excluding the last emitted token when it has not yet passed
+through the model. It need not align to a hash bucket or a physical page.
+With MTP, capture selects both the accepted recurrent row and the corresponding
+convolution window; a stop inside an accepted bundle excludes the extra output.
+Periodic output checkpoints can likewise select an interior accepted row.
+
+A hit must have both complete KV coverage and a ready state for the same
+prefix length. The state is copied into the new request's private working
+buffers before extension. Shared CPU checkpoints reference the physical KV
+page containing their endpoint, so an interior prefix can match even when
+the new request has a different suffix in that page. Earlier KV pages remain
+independently evictable. Publication waits for all TP shards and KV transfers
+to finish; borrowed states and tail pages cannot be reclaimed during a copy.
+KV allocation pressure can evict idle checkpoints to release their endpoint
+page references, even before the independent state pool fills.
+
+``linear_att_page_block_num`` and
+``disable_linear_att_small_page_cpu_cache`` are deprecated compatibility
+options. They no longer determine cache layout or retention. Existing disk
+KV pages do not contain the new independent state objects and are not a
+persistent recurrent-state store; reuse still requires a retained CPU state.
+Use a fresh disk-cache directory when migrating from the old packed layout.
+CPU prefix metadata holds up to ``LIGHTLLM_TOKEN_HASH_LIST_SIZE`` physical pages
+(default 2048); increase this environment setting for longer cached contexts.
+Checkpoint capture currently synchronizes the device-to-host copy. Hybrid
+dynamic caching also disables forward/post-processing overlap so finish/stop
+decisions can select the correct recurrent row before another forward overwrites
+it. This is a correctness-first implementation; throughput impact must be
+measured separately. Shared CPU/disk caches are not invalidated by the GPU
+``flush_cache`` operation; restart the service after changing model weights.
+
 Recommended Launch Scripts
 --------------------------
 
@@ -79,11 +144,9 @@ Linear-Attention Cache Tuning Notes
 
 Qwen3.5 uses a hybrid attention architecture. For linear-attention cache reuse, pay attention to:
 
-- ``--linear_att_hash_page_size``: small-page granularity (tokens per hash bucket)
-- ``--linear_att_page_block_num``: block-level matching related setting. Block size can be approximated as ``linear_att_page_block_num * linear_att_hash_page_size``.
-- When ``linear_att_page_block_num * linear_att_hash_page_size > max_req_total_len``, block-level matching in radix cache is effectively disabled, and request-level small-page matching (small page size is ``linear_att_hash_page_size``) becomes dominant.
-- Under high load, limited small-page capacity plus internal LRU eviction can reduce hit rate. In this case, increasing ``--linear_att_cache_size`` can improve hit rate, at the cost of more memory usage.
-- When ``--enable_cpu_cache`` is enabled, CPU cache page size is forced to ``linear_att_page_block_num * linear_att_hash_page_size`` to satisfy internal reuse constraints.
+- Tune physical KV pages, logical hash alignment, and checkpoint spacing independently, as described above.
+- Increase ``--linear_att_cache_size`` or ``--linear_att_cpu_cache_size`` when checkpoint eviction limits reuse; both reserve additional host memory.
+- Smaller checkpoint intervals retain more intermediate prefixes but increase state-copy traffic and compete for the same bounded snapshot capacity.
 
 Text-only Mode (Save Memory)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

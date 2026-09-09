@@ -1,8 +1,9 @@
-"""PD separation control-plane WebSocket APIs.
+"""PD separation control-plane and monitoring APIs.
 
 供 prefill / decode 节点与 pd_master 通信：
   - ``/pd_register``：P/D 节点注册与请求转发
   - ``/kv_move_status``：decode 节点上报 KV 传输状态
+  - ``/pd/metrics``：代理已注册 P/D 节点的 Prometheus 指标
 
 路由在模块级 ``router`` 上注册，由 ``api_http`` ``include_router`` 挂载。
 ``g_objs`` 在 handler 内懒导入，避免与 api_http 循环依赖。
@@ -10,10 +11,14 @@
 
 import asyncio
 import pickle
+from typing import Literal, Optional
 
 import ujson as json
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST
 
+from lightllm.server.metrics.pd_metrics import collect_pd_metrics
 from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
@@ -21,6 +26,19 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/pd/metrics")
+async def pd_metrics(role: Optional[Literal["prefill", "decode"]] = None) -> Response:
+    from .api_http import g_objs
+
+    if g_objs.args.run_mode != "pd_master":
+        raise HTTPException(status_code=404, detail="PD metrics proxy is only available on pd_master")
+
+    nodes = list(g_objs.httpserver_manager.pd_manager.url_to_pd_nodes.values())
+    nodes = [node for node in nodes if role is None or node.mode == role]
+    data = await collect_pd_metrics(nodes, roles=[role] if role else ["prefill", "decode"])
+    return Response(content=data, headers={"Content-Type": CONTENT_TYPE_LATEST})
 
 
 @router.websocket("/pd_register")

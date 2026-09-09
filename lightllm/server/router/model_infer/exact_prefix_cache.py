@@ -44,7 +44,7 @@ class ExactPrefixCache:
         self.req_manager = backend.model.req_manager
         self.mem_manager = backend.model.mem_manager
         self.cache = CpuCheckpointCache(
-            max_bytes=self.args.exact_prefix_cache_mb * 1024**2,
+            max_bytes=self.args.exact_prefix_cache_mb * 1024 ** 2,
             max_entries=self.args.exact_prefix_cache_entries,
             page_size=self.args.exact_prefix_cache_page_size,
             draft_tail_dependency=bool(self.args.mtp_step),

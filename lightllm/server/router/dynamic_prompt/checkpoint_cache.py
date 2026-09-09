@@ -188,7 +188,7 @@ class CpuCheckpointCache:
             origins = origins.tolist()
         origins = tuple(origins)
         if len(origins) != length or any(
-            isinstance(origin, bool) or not isinstance(origin, Integral) or not 0 <= origin < 2**63
+            isinstance(origin, bool) or not isinstance(origin, Integral) or not 0 <= origin < 2 ** 63
             for origin in origins
         ):
             raise ValueError("checkpoint origins must contain one nonnegative int64 per token")

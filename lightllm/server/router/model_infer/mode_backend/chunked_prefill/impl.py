@@ -107,10 +107,17 @@ class ChunkedPrefillBackend(ModeBackend):
     ):
         # 第一阶段: 模型推理
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        cache = self.exact_prefix_cache
+        ticket = cache.prepare_batch(model_input, run_reqs) if cache is not None else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
-            (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
+            (
+                next_token_ids,
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+            ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -123,6 +130,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
+            if cache is not None:
+                cache.capture(ticket, model_input, model_output, next_token_ids)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -142,6 +151,9 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
         )
+        if cache is not None:
+            cache.finalize(ticket)
+
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -152,9 +164,16 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        cache = self.exact_prefix_cache
+        ticket = cache.prepare_batch(model_input, run_reqs) if cache is not None else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
+            (
+                next_token_ids,
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+            ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -162,6 +181,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 is_prefill=False,
                 mask_func=self.decode_mask_func,
             )
+            if cache is not None:
+                cache.capture(ticket, model_input, model_output, next_token_ids)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -181,6 +202,9 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
+        if cache is not None:
+            cache.finalize(ticket)
+
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -191,6 +215,8 @@ class ChunkedPrefillBackend(ModeBackend):
         prefill_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        cache = self.exact_prefix_cache
+        ticket = cache.prepare_batch(model_input, run_reqs) if cache is not None else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
@@ -219,6 +245,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
+            if cache is not None:
+                cache.capture(ticket, model_input, model_output, next_token_ids)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -240,6 +268,9 @@ class ChunkedPrefillBackend(ModeBackend):
             pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
         )
 
+        if cache is not None:
+            cache.finalize(ticket)
+
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -251,6 +282,8 @@ class ChunkedPrefillBackend(ModeBackend):
     ):
         """Run the speculative draft-and-verify decode flow."""
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        cache = self.exact_prefix_cache
+        ticket = cache.prepare_batch(model_input, run_reqs) if cache is not None else None
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
 
@@ -271,6 +304,9 @@ class ChunkedPrefillBackend(ModeBackend):
                 async_selected_row_mask_cpu.wait()
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
+                if ticket is not None:
+                    ticket.reqs = run_reqs
+                    ticket.output_lengths = [n for n, keep in zip(ticket.output_lengths, selected_rows) if keep]
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
@@ -331,6 +367,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ranks=next_token_ranks,
             )
 
+            if cache is not None:
+                cache.capture(ticket, model_input, model_output, next_token_ids, accepted_index=accepted_index)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -387,6 +425,9 @@ class ChunkedPrefillBackend(ModeBackend):
             backend=self,
             extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
         )
+
+        if cache is not None:
+            cache.finalize(ticket)
 
         # 第四阶段
         event_pack.notify_pre_post_handle()

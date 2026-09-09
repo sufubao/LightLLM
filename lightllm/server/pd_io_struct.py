@@ -62,6 +62,7 @@ class PD_Client_Obj:
     dispatched_prompt_chars: int = 0
     # 当前派发到该节点且尚未产出首 token 的请求数。
     dispatched_req_num: int = 0
+    checkpoint_registry_token: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
@@ -93,7 +94,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)
@@ -126,6 +126,8 @@ class PDDecodeNodeInfo:
 
     request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
+    # None preserves compatibility with older peers using the input_len - 1 convention.
+    first_token_owner: Optional[str] = None
 
 
 @dataclass
@@ -182,6 +184,9 @@ class PDChunckedTransTask:
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
+    first_token_owner: Optional[str] = None
+    # Logical KV producer IDs for exactly this transfer range, when enabled.
+    kv_origins: Optional[List[int]] = None
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
@@ -195,6 +200,8 @@ class PDChunckedTransTask:
             assert len(self.mem_indexes) == 0
         else:
             raise ValueError(f"unknown PD trans page kind {self.page_kind}")
+        if self.kv_origins is not None and len(self.kv_origins) != self.end_kv_index - self.start_kv_index:
+            raise ValueError("PD KV provenance must cover the transferred range")
         self.create_time = time.time()
         return
 
@@ -221,6 +228,7 @@ class PDChunckedTransTask:
     def to_str(self):
         obj: PDChunckedTransTask = copy.copy(self)
         obj.mem_indexes = None
+        obj.kv_origins = None
         if obj.decode_agent_metadata is not None:
             obj.decode_agent_metadata = b"xxx"
         if obj.prefill_agent_metadata is not None:
@@ -248,6 +256,8 @@ class PDChunckedTransTask:
             error_info=self.error_info,
             first_gen_token_id=self.first_gen_token_id,
             first_gen_token_logprob=self.first_gen_token_logprob,
+            prefill_dp_index=self.prefill_dp_index,
+            kv_origins=self.kv_origins,
         )
         return ret
 
@@ -277,6 +287,8 @@ class PDChunckedTransTaskRet:
     error_info: str = None
     first_gen_token_id: Optional[int] = None
     first_gen_token_logprob: Optional[float] = None
+    prefill_dp_index: Optional[int] = None
+    kv_origins: Optional[List[int]] = None
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"

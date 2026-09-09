@@ -169,7 +169,9 @@ class PDDecodeNode(ChunkedPrefillBackend):
                         page_kind="linear_att_state",
                     )
         else:
-            assert req_obj.cur_kv_len == input_len - 1
+            # Exact checkpoints also preserve the output seed, so a full hit can
+            # produce the first token on D without transferring any KV from P.
+            assert req_obj.cur_kv_len in (input_len - 1, input_len)
 
         if not group.task_list:
             # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
@@ -183,6 +185,13 @@ class PDDecodeNode(ChunkedPrefillBackend):
             )
 
         if self.is_master_in_dp:
+            group.task_list[0].first_token_owner = (
+                "decode"
+                if input_len - req_obj.cur_kv_len <= 1
+                and len(group.task_list) == 1
+                and group.task_list[0].transfer_kv_num() == 0
+                else "prefill"
+            )
             self.info_queue.put(group)
         return
 

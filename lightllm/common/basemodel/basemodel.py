@@ -310,6 +310,55 @@ class TpPartBaseModel:
     def _init_hidden_collector(self):
         self.hidden_collector_prototype = self.mtp_manager.create_hidden_collector(model=self)
 
+    def supports_exact_output_seed(self) -> bool:
+        """Whether the target's output head has the implemented replay format.
+
+        This only describes the target head. Speculative modes additionally
+        require the proposer's auxiliary-resume capability before a full hit
+        can be admitted. A matching seed alone is not sufficient for MTP.
+        """
+        from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+
+        return not self.is_mtp_draft_model and type(self.post_infer) is LlamaPostLayerInfer
+
+    def _capture_output_seed(self, hidden: torch.Tensor, infer_state: InferStateInfo):
+        if not getattr(self.args, "enable_exact_prefix_cache", False) or not self.supports_exact_output_seed():
+            return None
+        if infer_state.is_prefill:
+            last_rows = torch.cumsum(infer_state.b_seq_len - infer_state.b_ready_cache_len, dim=0).long() - 1
+            return hidden.index_select(0, last_rows)
+        return hidden[-infer_state.batch_size :].clone()
+
+    @torch.no_grad()
+    def forward_output_seed(self, output_seed: torch.Tensor, microbatch_index: int = 0) -> ModelOutput:
+        """Run only the normal final norm/head/gather for a batch of exact hits.
+
+        The scheduler must call this on its usual compute stream, in the same
+        collective order on all ranks of this TP group. This method neither
+        touches recurrent/KV state nor samples, updates request lengths, or
+        initializes a drafter. Those remain normal backend responsibilities.
+        """
+        if not self.supports_exact_output_seed():
+            raise NotImplementedError("this model does not implement exact output-seed replay")
+        if output_seed.ndim != 2 or output_seed.shape[1] != self.config["hidden_size"]:
+            raise ValueError("output seed must contain raw final hidden rows for this model")
+        if not output_seed.is_cuda or output_seed.dtype != self.data_type:
+            raise ValueError("output seed must use the model CUDA device and hidden dtype")
+        infer_state = self.infer_state_class()
+        infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
+        batch_size = output_seed.shape[0]
+        if batch_size == 0:
+            vocab_size = self.pre_post_weight.lm_head_weight_.vocab_size
+            return ModelOutput(logits=torch.empty((0, vocab_size), dtype=torch.float32, device=output_seed.device))
+        g_cache_manager.cache_env_in()
+        try:
+            logits = self.post_infer._lm_head_and_gather(
+                output_seed, batch_size, self.pre_post_weight, infer_state
+            ).clone()
+        finally:
+            g_cache_manager.cache_env_out()
+        return ModelOutput(logits=logits)
+
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
         model_input.to_cuda()
@@ -472,7 +521,7 @@ class TpPartBaseModel:
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
         padded_batch_size = model_output.logits.shape[0]
-        if padded_batch_size == origin_batch_size:
+        if padded_batch_size == origin_batch_size and model_output.output_seed is None:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
@@ -480,6 +529,10 @@ class TpPartBaseModel:
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
         )
+        if model_output.output_seed is not None:
+            # Graph output addresses are overwritten by the next replay even
+            # without padding. Detach them before returning to the backend.
+            new_model_output.output_seed = model_output.output_seed[:origin_batch_size].clone()
         return new_model_output
 
     def _create_unpad_prefill_model_output(
@@ -488,6 +541,8 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if padded_model_output.output_seed is not None:
+            new_model_output.output_seed = padded_model_output.output_seed[:origin_batch_size].clone()
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
@@ -620,7 +675,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -674,6 +728,7 @@ class TpPartBaseModel:
         if infer_state.need_dp_prefill_balance:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
+        output_seed = self._capture_output_seed(last_input_embs, infer_state)
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         hidden_collector = infer_state.hidden_collector
         hidden_collector.add_final_hidden(last_input_embs)
@@ -681,6 +736,7 @@ class TpPartBaseModel:
             logits=predict_logits.contiguous(),
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
+            output_seed=output_seed,
         )
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
@@ -701,6 +757,7 @@ class TpPartBaseModel:
             hidden_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        output_seed = self._capture_output_seed(last_input_embs, infer_state)
         predict_logits: torch.Tensor = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
@@ -709,6 +766,7 @@ class TpPartBaseModel:
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            output_seed=output_seed,
         )
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
@@ -953,6 +1011,8 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
             last_input_embs1 = infer_state1._all_to_all_unbalance_get(data=last_input_embs1)
 
+        output_seed = self._capture_output_seed(last_input_embs, infer_state)
+        output_seed1 = self._capture_output_seed(last_input_embs1, infer_state1)
         predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
@@ -964,11 +1024,13 @@ class TpPartBaseModel:
             logits=predict_logits.contiguous(),
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
+            output_seed=output_seed,
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
             mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
             prompt_logics=infer_state1.prompt_logics,
+            output_seed=output_seed1,
         )
 
         return model_output, model_output1
@@ -1003,6 +1065,8 @@ class TpPartBaseModel:
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
 
+        output_seed = self._capture_output_seed(last_input_embs, infer_state)
+        output_seed1 = self._capture_output_seed(last_input_embs1, infer_state1)
         predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
@@ -1012,10 +1076,12 @@ class TpPartBaseModel:
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            output_seed=output_seed,
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
             mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
+            output_seed=output_seed1,
         )
 
         if infer_state.is_cuda_graph:

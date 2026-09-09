@@ -108,6 +108,8 @@ class HttpServerManagerForPDMaster:
         return
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
+        if isinstance(prompt, list):
+            return len(prompt)
         kwargs = {} if kwargs is None else kwargs
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
@@ -169,7 +171,12 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
-        assert isinstance(prompt, str), "prompt must be str"
+        if not isinstance(prompt, (str, list)):
+            raise ValueError("prompt must be a string or a list of token IDs")
+        if isinstance(prompt, list) and (
+            not prompt or any(not isinstance(token, int) or isinstance(token, bool) or token < 0 for token in prompt)
+        ):
+            raise ValueError("prompt token IDs must be a nonempty list of nonnegative integers")
         start_time = time.time()
         await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
@@ -296,8 +303,11 @@ class HttpServerManagerForPDMaster:
         pending_prefill_load_chars = None
 
         try:
+            # Cache-aware selection remains an approximate text affinity hint.
+            # Token-ID requests retain their original IDs all the way to P/D.
+            routing_prompt = self.tokenizer.decode(prompt) if isinstance(prompt, list) else prompt
             p_node, d_node, selection_extra_info = await self.select_p_d_node(
-                prompt, origin_sampling_params, multimodal_params
+                routing_prompt, origin_sampling_params, multimodal_params
             )
             if not p_node or not d_node:
                 logger.error(f"{origin_request_id}: No p_node or d_node found")
@@ -323,6 +333,7 @@ class HttpServerManagerForPDMaster:
             )
 
             history_gen_token_strs = []
+            history_gen_token_ids = []
             origin_prompt_cache_len = None
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
@@ -353,8 +364,12 @@ class HttpServerManagerForPDMaster:
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
-                block_prompt = prompt + "".join(history_gen_token_strs)
-                pending_prefill_load_chars = len(block_prompt)
+                block_prompt = (
+                    prompt + history_gen_token_ids
+                    if isinstance(prompt, list)
+                    else prompt + "".join(history_gen_token_strs)
+                )
+                pending_prefill_load_chars = len(routing_prompt) + sum(map(len, history_gen_token_strs))
                 p_node.dispatched_prompt_chars += pending_prefill_load_chars
                 p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(
@@ -387,6 +402,8 @@ class HttpServerManagerForPDMaster:
                     # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
                     remaining_max_new_tokens -= 1
                     history_gen_token_strs.append(request_output)
+                    if isinstance(prompt, list):
+                        history_gen_token_ids.append(int(metadata["id"]))
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
                     if origin_prompt_cache_len is None:
@@ -396,7 +413,7 @@ class HttpServerManagerForPDMaster:
                         if not raw_finish_status.is_error_finished():
                             # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
                             # 推理或已失败的请求被后续请求误判为可复用 cache。
-                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
+                            self.pd_manager.selector.insert_prompt_cache(routing_prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_request_id, request_output, metadata, raw_finish_status
 
@@ -511,6 +528,10 @@ class HttpServerManagerForPDMaster:
     ):
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
+        # This address comes from the registered node selected by the server,
+        # rather than an untrusted sampling parameter supplied by the caller.
+        sampling_params.pd_checkpoint_owner_url = f"http://{p_node.client_ip_port}".encode("utf-8")
+        sampling_params.pd_checkpoint_owner_auth = (p_node.checkpoint_registry_token or "").encode("utf-8")
 
         req_status = ReqStatus(group_request_id, p_node, d_node)
         self.req_id_to_out_inf[group_request_id] = req_status
@@ -565,7 +586,12 @@ class HttpServerManagerForPDMaster:
         )
 
         first_token_gen = False
-        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        first_token_owner = getattr(decode_node_info, "first_token_owner", None)
+        needs_prefill_first_token = (
+            first_token_owner == "prefill"
+            if first_token_owner is not None
+            else decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        )
         prompt_cache_len_from_prefill = await self._wait_for_prefill_token_if_needed(
             req_status=req_status,
             request=request,

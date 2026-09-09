@@ -177,12 +177,14 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         run_reqs_num = len(run_reqs)
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket = checkpoint_cache.prepare_batch(model_input, run_reqs) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
             if run_reqs_num > 0:
                 (
-                    _,
+                    next_token_ids,
                     next_token_ids_cpu,
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
@@ -199,6 +201,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=model_input.b_req_idx,
                     reqs=run_reqs,
                 )
+                if checkpoint_cache is not None:
+                    checkpoint_cache.capture(checkpoint_ticket, model_input, model_output, next_token_ids)
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -219,6 +223,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket)
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
@@ -231,11 +237,13 @@ class DPChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(req_objs=decode_reqs)
         model_input: ModelInput = model_input
         run_reqs_num = len(run_reqs)
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket = checkpoint_cache.prepare_batch(model_input, run_reqs) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             if run_reqs_num > 0:
                 (
-                    _,
+                    next_token_ids,
                     next_token_ids_cpu,
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
@@ -247,6 +255,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=False,
                     mask_func=None,
                 )
+                if checkpoint_cache is not None:
+                    checkpoint_cache.capture(checkpoint_ticket, model_input, model_output, next_token_ids)
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -266,6 +276,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket)
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -283,6 +295,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             run_reqs1,
         ) = overlap_prepare_prefill_inputs(prefill_reqs)
 
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket0 = checkpoint_cache.prepare_batch(model_input0, run_reqs0) if checkpoint_cache else None
+        checkpoint_ticket1 = checkpoint_cache.prepare_batch(model_input1, run_reqs1) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
@@ -302,7 +317,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             if req_num0 + req_num1 > 0:
                 (
-                    _,
+                    next_token_ids,
                     next_token_ids_cpu,
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
@@ -319,6 +334,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 if g_infer_context.is_linear_att_mixed_model:
                     g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
 
+                if checkpoint_cache is not None:
+                    checkpoint_cache.capture(checkpoint_ticket0, model_input0, model_output0, next_token_ids[:req_num0])
+                    checkpoint_cache.capture(checkpoint_ticket1, model_input1, model_output1, next_token_ids[req_num0:])
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -340,6 +358,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket0)
+                checkpoint_cache.finalize(checkpoint_ticket1)
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
@@ -353,6 +374,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         run_reqs = run_reqs0 + run_reqs1
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
 
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket0 = checkpoint_cache.prepare_batch(model_input0, run_reqs0) if checkpoint_cache else None
+        checkpoint_ticket1 = checkpoint_cache.prepare_batch(model_input1, run_reqs1) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             if req_num0 + req_num1 > 0:
@@ -360,7 +384,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
                 b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
                 (
-                    _,
+                    next_token_ids,
                     next_token_ids_cpu,
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
@@ -372,6 +396,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=False,
                     mask_func=None,
                 )
+                if checkpoint_cache is not None:
+                    checkpoint_cache.capture(checkpoint_ticket0, model_input0, model_output0, next_token_ids[:req_num0])
+                    checkpoint_cache.capture(checkpoint_ticket1, model_input1, model_output1, next_token_ids[req_num0:])
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -391,6 +418,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket0)
+                checkpoint_cache.finalize(checkpoint_ticket1)
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -407,6 +437,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             is_chuncked_mode=not self.disable_chunked_prefill,
         )
         req_num = len(run_reqs)
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket = checkpoint_cache.prepare_batch(model_input, run_reqs) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output: ModelOutput = self.model.forward(model_input)
             b_has_out_cpu = model_input.b_prefill_has_output_cpu
@@ -442,11 +474,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             if req_num > 0:
                 g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
 
+            if checkpoint_cache is not None:
+                checkpoint_cache.capture(checkpoint_ticket, model_input, model_output, next_token_ids)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
         if req_num > 0:
-
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
@@ -464,6 +497,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket)
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -480,6 +515,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
 
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket = checkpoint_cache.prepare_batch(model_input, run_reqs) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             spec_plan = spec_engine.plan_decode(
                 model_input=model_input,
@@ -496,6 +533,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                 async_selected_row_mask_cpu.wait()
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
+                if checkpoint_ticket is not None:
+                    checkpoint_ticket.reqs = list(run_reqs)
+                    checkpoint_ticket.output_lengths = [
+                        length for length, selected in zip(checkpoint_ticket.output_lengths, selected_rows) if selected
+                    ]
 
             if req_num > 0:
                 next_token_ids, next_token_logprobs = sample(
@@ -573,6 +615,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks=next_token_ranks,
                 )
 
+            if checkpoint_cache is not None and req_num > 0:
+                checkpoint_cache.capture(
+                    checkpoint_ticket, model_input, model_output, next_token_ids, accepted_index=accepted_index
+                )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -620,6 +666,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket)
             mtp_utils.free_mem_indexes(
                 backend=self,
                 extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
@@ -645,6 +693,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_input1,
             run_reqs1,
         ) = overlap_prepare_prefill_inputs(prefill_reqs)
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket0 = checkpoint_cache.prepare_batch(model_input0, run_reqs0) if checkpoint_cache else None
+        checkpoint_ticket1 = checkpoint_cache.prepare_batch(model_input1, run_reqs1) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
@@ -698,6 +749,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             if req_num > 0 and g_infer_context.is_linear_att_mixed_model:
                 g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
 
+            if checkpoint_cache is not None:
+                checkpoint_cache.capture(checkpoint_ticket0, model_input0, model_output0, next_token_ids[:req_num0])
+                checkpoint_cache.capture(checkpoint_ticket1, model_input1, model_output1, next_token_ids[req_num0:])
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -717,6 +771,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket0)
+                checkpoint_cache.finalize(checkpoint_ticket1)
             event_pack.notify_pre_post_handle()
         else:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
@@ -737,6 +794,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         real_request_num1 = len(decode_reqs1)
         req_num = real_request_num0 + real_request_num1
         spec_engine = self.decode_draft_engine
+        checkpoint_cache = self.exact_prefix_cache
+        checkpoint_ticket0 = checkpoint_cache.prepare_batch(model_input0, run_reqs0) if checkpoint_cache else None
+        checkpoint_ticket1 = checkpoint_cache.prepare_batch(model_input1, run_reqs1) if checkpoint_cache else None
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             spec_plan = spec_engine.plan_decode(
                 model_input0=model_input0,
@@ -761,10 +821,24 @@ class DPChunkedPrefillBackend(ModeBackend):
                 selected_row_mask_cpu0.wait()
                 selected_rows0 = selected_row_mask_cpu0.tensor.tolist()
                 run_reqs0 = [req for req, selected in zip(run_reqs0, selected_rows0) if selected]
+                if checkpoint_ticket0 is not None:
+                    checkpoint_ticket0.reqs = list(run_reqs0)
+                    checkpoint_ticket0.output_lengths = [
+                        length
+                        for length, selected in zip(checkpoint_ticket0.output_lengths, selected_rows0)
+                        if selected
+                    ]
             if selected_row_mask_cpu1 is not None:
                 selected_row_mask_cpu1.wait()
                 selected_rows1 = selected_row_mask_cpu1.tensor.tolist()
                 run_reqs1 = [req for req, selected in zip(run_reqs1, selected_rows1) if selected]
+                if checkpoint_ticket1 is not None:
+                    checkpoint_ticket1.reqs = list(run_reqs1)
+                    checkpoint_ticket1.output_lengths = [
+                        length
+                        for length, selected in zip(checkpoint_ticket1.output_lengths, selected_rows1)
+                        if selected
+                    ]
 
             verify_row_num0 = model_input0.batch_size
             verify_row_num1 = model_input1.batch_size
@@ -858,6 +932,21 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     mask=accepted_index == 1,
                 )
+            if checkpoint_cache is not None and req_num > 0:
+                checkpoint_cache.capture(
+                    checkpoint_ticket0,
+                    model_input0,
+                    model_output0,
+                    next_token_ids[:verify_row_num0],
+                    accepted_index=accepted_index[:verify_row_num0],
+                )
+                checkpoint_cache.capture(
+                    checkpoint_ticket1,
+                    model_input1,
+                    model_output1,
+                    next_token_ids[verify_row_num0:],
+                    accepted_index=accepted_index[verify_row_num0:],
+                )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -911,6 +1000,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
+            if checkpoint_cache is not None:
+                checkpoint_cache.finalize(checkpoint_ticket0)
+                checkpoint_cache.finalize(checkpoint_ticket1)
             mtp_utils.free_mem_indexes(
                 backend=self,
                 extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,

@@ -229,6 +229,7 @@ class _DecodeTransModule:
                 page_reg_desc=self.transporter.local_page_mem_desc,
                 request_id=task.request_id,
                 ready_kv_len=task.start_kv_index,
+                first_token_owner=task.first_token_owner,
             )
 
             up_status = PDUpKVStatus(
@@ -293,6 +294,7 @@ class _DecodeTransModule:
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
+                                local_trans_task.prefill_dp_index = remote_trans_task.prefill_dp_index
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
                                 self.request_page_task_queue.put(local_trans_task)
                                 logger.info(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
@@ -321,6 +323,7 @@ class _DecodeTransModule:
                             if local_trans_task is not None:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
+                                local_trans_task.kv_origins = remote_trans_task.kv_origins
                                 self.ready_page_task_queue.put(local_trans_task)
                                 logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:

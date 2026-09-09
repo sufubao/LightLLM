@@ -290,6 +290,9 @@ class SamplingParams(ctypes.Structure):
         # P/D 节点的资源等待超时，由 PD Master 下发。非负值用于控制 shm_req 申请和
         # Router 等待进入推理系统的时限；负数表示永久等待。
         ("pd_node_resource_wait_timeout_seconds", ctypes.c_int),
+        # Set by PD Master from the selected, registered P node. Never accepted from an API caller.
+        ("pd_checkpoint_owner_url", ctypes.c_char * 512),
+        ("pd_checkpoint_owner_auth", ctypes.c_char * 128),
         ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         # in pd split mode, use to keep the id of pd master
         ("pd_master_node_id", NodeUUId),
@@ -336,6 +339,8 @@ class SamplingParams(ctypes.Structure):
         # 这两个字段是 PD Master 的内部调度信息，不能由外部请求参数开启或修改。
         self.pd_high_priority_request = False
         self.pd_node_resource_wait_timeout_seconds = -1
+        self.pd_checkpoint_owner_url = b""
+        self.pd_checkpoint_owner_auth = b""
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)

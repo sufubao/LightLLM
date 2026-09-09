@@ -94,7 +94,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
                 ping_interval=None,
             ) as websocket:
-
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -107,9 +106,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     "mode": manager.pd_mode.value,
                     "start_args": args_dict,
                 }
+                if getattr(manager.args, "enable_exact_prefix_cache", False):
+                    from lightllm.server.router.model_infer.mode_backend.pd.checkpoint_transport import (
+                        checkpoint_registry_token,
+                    )
+
+                    regist_json["checkpoint_registry_token"] = checkpoint_registry_token()
 
                 await websocket.send(json.dumps(regist_json))
-                logger.info(f"Sent registration JSON: {regist_json}")
+                logger.info(f"Sent registration JSON: {dict(regist_json, checkpoint_registry_token='<redacted>')}")
 
                 # 转发任务
                 forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
@@ -289,7 +294,6 @@ async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
 
 # 获取节点负载信息
 def _get_load_info() -> dict:
-
     from lightllm.server.api_http import g_objs
 
     assert g_objs.shared_token_load is not None, "shared_token_load is not initialized"

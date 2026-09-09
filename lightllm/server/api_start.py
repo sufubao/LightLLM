@@ -256,6 +256,32 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    if args.enable_exact_prefix_cache:
+        if not is_linear_att_mixed_model(args.model_dir):
+            raise ValueError("--enable_exact_prefix_cache requires a hybrid linear-attention model")
+        for name in (
+            "exact_prefix_cache_mb",
+            "exact_prefix_cache_entries",
+            "exact_prefix_cache_page_size",
+            "exact_prefix_cache_capture_slots",
+        ):
+            if getattr(args, name) <= 0:
+                raise ValueError(f"--{name} must be positive")
+        if args.disable_dynamic_prompt_cache:
+            raise ValueError("exact prefix cache requires dynamic prompt cache")
+        if args.enable_cpu_cache or args.enable_disk_cache:
+            raise ValueError(
+                "exact prefix cache owns its CPU store; disable legacy --enable_cpu_cache/--enable_disk_cache"
+            )
+        if args.diverse_mode or args.enable_dp_prompt_cache_fetch:
+            raise ValueError("exact prefix cache does not support diverse mode or legacy DP cache fetch")
+        if args.mtp_step and args.enable_ep_moe:
+            raise ValueError("exact MTP resume with expert parallelism requires coordinated auxiliary scheduling")
+        if args.enable_rl:
+            raise ValueError(
+                "exact prefix cache requires immutable deployment weights; online RL updates are unsupported"
+            )
+
     # linear att cache 参数自动设置
     if args.linear_att_cache_size is None:
         # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。

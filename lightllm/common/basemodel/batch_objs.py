@@ -200,6 +200,13 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
+    # Exact-prefix replay seed: one raw final hidden per logits row, before
+    # final norm. Public model.forward() returns independently owned storage;
+    # graph-internal outputs are cloned when leaving the graph replay wrapper.
+    # This is distinct from spec_hidden, which may contain intermediate layers
+    # and may be normalized in-place by an MTP draft model.
+    output_seed: Optional[torch.Tensor] = None
+
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
@@ -207,3 +214,5 @@ class ModelOutput:
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
         self.mtp_collector.to_no_ref_tensor()
+        if self.output_seed is not None:
+            self.output_seed = tensor_to_no_ref_tensor(self.output_seed)

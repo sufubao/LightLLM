@@ -8,11 +8,12 @@ from lightllm.common.basemodel.triton_kernel.build_chained_mtp_decode_input impo
     build_chained_mtp_decode_input_inplace,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.exact_resume import Qwen35ExactResumeMixin
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
-class VanillaWithAttProposer(BaseSpecProposer):
+class VanillaWithAttProposer(Qwen35ExactResumeMixin, BaseSpecProposer):
     """使用 attention KV cache 的 Vanilla chained MTP proposer。"""
 
     def fill_draft_model_kv_state(

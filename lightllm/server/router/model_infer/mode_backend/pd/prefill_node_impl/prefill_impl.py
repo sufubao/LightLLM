@@ -155,6 +155,11 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             first_gen_token_logprob=None,
             page_kind=page_kind,
             req_idx=req_idx,
+            kv_origins=(
+                list(req_obj.exact_kv_origins[kv_start_index:kv_end_index])
+                if page_kind == "kv" and getattr(self.args, "enable_exact_prefix_cache", False)
+                else None
+            ),
         )
         req_obj.pd_task_num += 1
         return trans_task

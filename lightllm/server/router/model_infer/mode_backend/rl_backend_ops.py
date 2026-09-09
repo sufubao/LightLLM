@@ -50,6 +50,9 @@ class RlBackendOps:
         return getattr(self, op_name)(op_args)
 
     def flush_cache(self, request: FlushCacheReq):
+        checkpoint_cache = getattr(self.backend, "exact_prefix_cache", None)
+        if checkpoint_cache is not None:
+            checkpoint_cache.clear()
         if self.backend.radix_cache is not None:
             self.backend.radix_cache.flush_cache()
         return True, "Succeeded to flush cache."

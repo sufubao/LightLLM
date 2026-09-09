@@ -892,6 +892,35 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
     parser.add_argument(
+        "--enable_exact_prefix_cache",
+        action="store_true",
+        help="Cache hybrid attention checkpoints at exact token lengths, including generated prefixes.",
+    )
+    parser.add_argument(
+        "--exact_prefix_cache_mb",
+        type=int,
+        default=1024,
+        help="CPU checkpoint KV, state and hidden budget in MiB per TP rank.",
+    )
+    parser.add_argument(
+        "--exact_prefix_cache_entries",
+        type=int,
+        default=128,
+        help="Maximum number of retained exact checkpoints per TP rank.",
+    )
+    parser.add_argument(
+        "--exact_prefix_cache_page_size",
+        type=int,
+        default=8192,
+        help="CPU KV page capacity in tokens; checkpoint lengths do not need page alignment.",
+    )
+    parser.add_argument(
+        "--exact_prefix_cache_capture_slots",
+        type=int,
+        default=4,
+        help="Bounded checkpoint capture slots per overlapping batch; excess candidates are skipped.",
+    )
+    parser.add_argument(
         "--linear_att_hash_page_size",
         type=int,
         default=512,

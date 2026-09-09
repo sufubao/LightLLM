@@ -46,6 +46,15 @@ class SpecEngine:
 
     # Prefill draft-state initialization.
 
+    def supports_exact_prefix_resume(self) -> bool:
+        return self.proposer.supports_exact_prefix_resume()
+
+    def resume_auxiliary(
+        self, resume_input: ModelInput, output_seed: torch.Tensor, next_token_ids: torch.Tensor
+    ) -> None:
+        """Repair mode-specific draft state after an exact target checkpoint hit."""
+        self.proposer.resume_auxiliary(resume_input, output_seed, next_token_ids)
+
     def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,

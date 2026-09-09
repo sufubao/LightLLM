@@ -39,6 +39,11 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def _init_linear_att_buffers(self):
+        if getattr(get_env_start_args(), "enable_exact_prefix_cache", False):
+            self.linear_att_big_page_buffers = None
+            self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = None
+            self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = None
+            return
         big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )

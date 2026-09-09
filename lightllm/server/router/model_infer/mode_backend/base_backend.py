@@ -153,7 +153,7 @@ class ModeBackend:
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
 
-        if self.is_linear_att_mixed_model:
+        if self.is_linear_att_mixed_model and not self.args.enable_exact_prefix_cache:
             self.linear_att_cache_manager = LinearAttCacheManager(
                 size=self.args.linear_att_cache_size,
                 linear_config=self.model.req_manager.linear_config,
@@ -164,7 +164,7 @@ class ModeBackend:
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
-            if self.is_linear_att_mixed_model:
+            if self.is_linear_att_mixed_model and not self.args.enable_exact_prefix_cache:
                 self.radix_cache = LinearAttPagedRadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
@@ -257,6 +257,13 @@ class ModeBackend:
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
+
+        self.exact_prefix_cache = None
+        if self.args.enable_exact_prefix_cache:
+            from lightllm.server.router.model_infer.exact_prefix_cache import ExactPrefixCache
+
+            self.exact_prefix_cache = ExactPrefixCache(self)
+            g_infer_context.exact_prefix_cache = self.exact_prefix_cache
 
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
@@ -357,28 +364,29 @@ class ModeBackend:
         next_token_ids: torch.Tensor,
         next_token_logprobs: torch.Tensor,
         next_token_ranks: torch.Tensor,
+        pin_memory_namespace: str = "",
     ):
         """
         把 next token id / logprobs / ranks 异步拷到 pinned memory，
         供后续 post_handle 读取。ranks 始终有值（不需要时为常量 -1）。
         """
         next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-            key="next_token_ids",
+            key=pin_memory_namespace + "next_token_ids",
             gpu_tensor=next_token_ids,
         )
         next_token_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-            key="next_token_logprobs",
+            key=pin_memory_namespace + "next_token_logprobs",
             gpu_tensor=next_token_logprobs,
         )
         # 仅 enable_rl 需要真实 rank；否则跳过 D2H，返回常量 -1。
         if self.args.enable_rl:
             next_token_ranks_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="next_token_ranks",
+                key=pin_memory_namespace + "next_token_ranks",
                 gpu_tensor=next_token_ranks,
             )
         else:
             next_token_ranks_cpu = g_pin_mem_manager.get_const_cpu_tensor(
-                key="next_token_ranks",
+                key=pin_memory_namespace + "next_token_ranks",
                 shape=next_token_ids_cpu.shape,
                 fill_value=-1,
                 dtype=torch.int32,
@@ -551,8 +559,26 @@ class ModeBackend:
                         # pd decode 节点需要预填充 prefill 节点发送过来的产生的首token信息，以使
                         # 推理过程可以继续。
                         if self.is_pd_decode_mode:
+                            start, end = obj.start_kv_index, obj.end_kv_index
+                            origins = obj.kv_origins
+                            exact_cache = g_infer_context.exact_prefix_cache
+                            if origins is None and exact_cache is not None and end > start:
+                                # P may run with exact caching disabled. Its KV
+                                # and state still arrive together; assign this
+                                # received range a stable, private D identity.
+                                origin = exact_cache._origin(req, 0, kind=f"pd-import:{start}:{end}")
+                                origins = [origin] * (end - start)
+                            if origins is not None:
+                                if len(origins) != end - start:
+                                    raise ValueError("PD KV provenance does not cover the received range")
+                                if len(req.exact_kv_origins) < end:
+                                    req.exact_kv_origins.extend([0] * (end - len(req.exact_kv_origins)))
+                                req.exact_kv_origins[start:end] = origins
+                            if obj.prefill_dp_index is not None:
+                                req.pd_checkpoint_owner_dp_index = obj.prefill_dp_index
                             if obj.first_gen_token_id is not None:
-                                assert req.cur_output_len == 0
+                                if req.cur_output_len != 0:
+                                    continue
                                 req.cur_output_len += 1
                                 req_to_next_token_ids = (
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
@@ -673,6 +699,8 @@ class ModeBackend:
         """
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
+        if self.exact_prefix_cache is not None:
+            self.exact_prefix_cache.poll_imports()
 
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
             self.multi_level_cache_module.update_cpu_cache_task_states()
@@ -684,6 +712,8 @@ class ModeBackend:
             return [], []
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
+        if self.exact_prefix_cache is not None:
+            self.exact_prefix_cache.process_head_only(ready_reqs)
         support_overlap = self.support_overlap
         ready_reqs = self._reorder_pd_high_priority_reqs(ready_reqs)
         ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
@@ -703,7 +733,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -872,6 +901,7 @@ class ModeBackend:
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
+            was_finished = req_obj.finish_status.is_finished()
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,
@@ -881,6 +911,8 @@ class ModeBackend:
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=pd_prefill_chunked_handle_func,
             )
+            if not was_finished and req_obj.finish_status.is_finished():
+                req_obj.exact_visible_end = req_obj.shm_req.input_len + pack.output_len - 1
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
             req_objs=run_reqs, next_token_ids=next_token_ids
@@ -916,8 +948,8 @@ class ModeBackend:
         is_prefill: bool,
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
+        pin_memory_namespace: str = "",
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
@@ -927,7 +959,7 @@ class ModeBackend:
         b_has_out = None
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(
-                key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
+                key=pin_memory_namespace + "b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
             ).cuda(non_blocking=True)
 
         scatter_token(
@@ -950,6 +982,7 @@ class ModeBackend:
             next_token_ids,
             next_token_logprobs,
             next_token_ranks,
+            pin_memory_namespace=pin_memory_namespace,
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 

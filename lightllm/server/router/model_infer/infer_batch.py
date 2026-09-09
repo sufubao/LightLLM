@@ -46,6 +46,7 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_linear_att_mixed_model: bool = False  # 标记模型是否是full att 混合 linear att 的混合模型。
+    exact_prefix_cache: object = None
 
     def register(
         self,
@@ -130,10 +131,12 @@ class InferenceContext:
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
-        elif CacheTier.GPU not in req.cache_tiers:
+        elif CacheTier.GPU not in req.cache_tiers or (
+            self.exact_prefix_cache is not None and req.sampling_param.disable_prompt_cache
+        ):
             self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
         else:
-            if not self.is_linear_att_mixed_model:
+            if not self.is_linear_att_mixed_model or self.exact_prefix_cache is not None:
                 self._full_att_free_req(free_token_index=free_token_index, req=req)
             else:
                 self._linear_att_free_req(free_token_index=free_token_index, req=req)
@@ -146,7 +149,7 @@ class InferenceContext:
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
 
-        if self.is_linear_att_mixed_model:
+        if self.is_linear_att_mixed_model and self.exact_prefix_cache is None:
             # 释放请求尾部尚未移交给 radix cache 的 linear attention 小页状态。
             if req.tail_linear_att_small_page_buffer_id is not None:
                 self.radix_cache.linear_att_small_page_buffers.free_state_cache(
@@ -168,9 +171,17 @@ class InferenceContext:
 
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
         input_token_ids = req.get_input_token_ids()
-        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+        insert_len = req.cur_kv_len
+        if self.exact_prefix_cache is not None:
+            if self.args.mtp_step:
+                insert_len = min(insert_len, len(input_token_ids) - 1)
+            key = self.exact_prefix_cache.gpu_radix_key(req.exact_kv_origins, insert_len)
+        else:
+            key = torch.tensor(input_token_ids[0:insert_len], dtype=torch.int64, device="cpu")
         # .cpu() 是 流内阻塞操作
-        value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+        value = self.req_manager.req_to_token_indexs[req.req_idx][:insert_len].detach().cpu()
+        if insert_len < req.cur_kv_len:
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][insert_len : req.cur_kv_len])
 
         prefix_len, _ = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
@@ -348,7 +359,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -369,7 +379,6 @@ class InferenceContext:
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
-
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:
@@ -401,6 +410,8 @@ class InferenceContext:
         该函数用于在线性混合模型prefill后,如果存在大页匹配的情况下，将线性层状态复制到
         """
         if not self.is_linear_att_mixed_model:
+            return
+        if self.exact_prefix_cache is not None:
             return
 
         # 大页对应的 linear att 的拷贝
@@ -602,6 +613,7 @@ class InferReq:
         # Disk 需要 CPU 中转，因此表示为 (CPU, Disk)。
         # 兼容策略可以同时包含 GPU、CPU 和 Disk 多层。
         self.cache_tiers: Tuple[CacheTier, ...] = (CacheTier.GPU,)
+        self.exact_kv_origins: List[int] = []
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
@@ -611,7 +623,7 @@ class InferReq:
         else:
             self.decode_need_token_num = self._normal_decode_need_token_num
 
-        if g_infer_context.is_linear_att_mixed_model:
+        if g_infer_context.is_linear_att_mixed_model and not self.args.enable_exact_prefix_cache:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_linear_att
             self.get_chuncked_input_token_ids = self.get_chuncked_input_token_ids_for_linear_att
 
@@ -682,6 +694,9 @@ class InferReq:
         return
 
     def _linear_match_radix_cache(self):
+        if g_infer_context.exact_prefix_cache is not None:
+            g_infer_context.exact_prefix_cache.restore(self)
+            return
         assert (
             g_infer_context.is_linear_att_mixed_model is True
         ), "current _linear_match_radix_cache only support linear att hybrid model, to do..."

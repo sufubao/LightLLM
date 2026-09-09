@@ -328,7 +328,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
@@ -413,7 +412,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
                 sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
 
-                if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
+                first_token_owner = getattr(decode_node_info, "first_token_owner", None)
+                if first_token_owner == "decode" or (
+                    first_token_owner is None and decode_node_info.ready_kv_len == len(prompt_ids) - 1
+                ):
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
                     # 直接 raise PDPrefillNodeStopGenToken
                     raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
@@ -729,7 +731,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -772,7 +773,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_status: "ReqStatus",
         request: Request,
     ):
-
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0

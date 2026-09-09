@@ -27,7 +27,6 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-
     operator_class = NormalMemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
@@ -91,7 +90,8 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         pd_kv_move_buffer_size = self.get_pd_kv_move_buffer_size()
-        available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
+        checkpoint_staging_size = self.get_checkpoint_staging_size()
+        available_memory_bytes = available_memory * 1024**3 - pd_kv_move_buffer_size - checkpoint_staging_size
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
@@ -100,10 +100,25 @@ class MemoryManager:
         logger.info(
             f"{str(available_memory)} GB space is available after load the model weight\n"
             f"{str(pd_kv_move_buffer_size / 1024 ** 2)} MB is reserved for PD KV transfer buffer\n"
+            f"{str(checkpoint_staging_size / 1024 ** 2)} MB is reserved for exact checkpoint capture/transfer\n"
             f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
             f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
         )
         return
+
+    def get_checkpoint_staging_size(self):
+        args = get_env_start_args()
+        config = getattr(self, "linear_config", None)
+        if not getattr(args, "enable_exact_prefix_cache", False) or config is None:
+            return 0
+        state_bytes = config.linear_layer_num * (
+            math.prod(config.get_conv_state_shape()) * torch._utils._element_size(config.conv_state_dtype)
+            + math.prod(config.get_ssm_state_shape()) * torch._utils._element_size(config.ssm_state_dtype)
+        )
+        batch_count = 4 if (args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap) else 2
+        # Include frozen packed tail KV plus one bounded page gather temporary.
+        capture_bytes = batch_count * args.exact_prefix_cache_capture_slots * (state_bytes + self.get_cell_size())
+        return capture_bytes + args.exact_prefix_cache_page_size * self.get_cell_size()
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         # 在初始化 kv_buffer 的时候，每层多初始化了一个 token，这个 token 永远不会被真的被对外

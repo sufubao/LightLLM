@@ -11,10 +11,11 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     MtpMemIndexesToFree,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.exact_resume import Qwen35ExactResumeMixin
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
-class EagleWithAttProposer(BaseSpecProposer):
+class EagleWithAttProposer(Qwen35ExactResumeMixin, BaseSpecProposer):
     """使用 attention KV cache 的 EAGLE proposer。"""
 
     def fill_draft_model_kv_state(

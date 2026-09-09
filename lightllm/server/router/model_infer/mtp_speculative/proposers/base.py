@@ -59,6 +59,14 @@ class BaseSpecProposer(ABC):
         self.backend = backend
         self.enable_dynmaic_mtp = bool(enable_dynmaic_mtp)
 
+    def supports_exact_prefix_resume(self) -> bool:
+        return False
+
+    def resume_auxiliary(
+        self, resume_input: ModelInput, output_seed: torch.Tensor, next_token_ids: torch.Tensor
+    ) -> None:
+        raise NotImplementedError("the configured proposer has no exact-prefix resume adapter")
+
     @abstractmethod
     def fill_draft_model_kv_state(
         self,

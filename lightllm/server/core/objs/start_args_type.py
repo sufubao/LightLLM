@@ -236,6 +236,11 @@ class StartArgs:
 
     # hybrid attention model (Qwen3Next)
     linear_att_hash_page_size: int = field(default=512)
+    enable_exact_prefix_cache: bool = field(default=False)
+    exact_prefix_cache_mb: int = field(default=1024)
+    exact_prefix_cache_entries: int = field(default=128)
+    exact_prefix_cache_page_size: int = field(default=8192)
+    exact_prefix_cache_capture_slots: int = field(default=4)
     linear_att_page_block_num: int = field(default=10000000)
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)

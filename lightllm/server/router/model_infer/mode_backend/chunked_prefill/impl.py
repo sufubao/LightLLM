@@ -72,6 +72,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 run_way = self.control_state_machine.select_run_way(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs)
 
                 if run_way.is_prefill():
+                    self._forward_generation += 1
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
@@ -81,6 +82,7 @@ class ChunkedPrefillBackend(ModeBackend):
                     )
                     continue
                 elif run_way.is_decode():
+                    self._forward_generation += 1
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
@@ -90,10 +92,14 @@ class ChunkedPrefillBackend(ModeBackend):
                     )
                     continue
                 elif run_way.is_pass():
+                    idle_generation = self._forward_generation
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()
-                    time.sleep(0.02)
+                    # The partner may have started work during these handshakes.
+                    # Its next post step needs us; only back off if both stayed idle.
+                    if self._forward_generation == idle_generation:
+                        time.sleep(0.02)
                     continue
 
         except BaseException as e:

@@ -20,23 +20,31 @@
 | 固定容量纯 KV 页、同计算来源整页共享、不可变尾页 COW、LRU、lease、flush generation | 同上 |
 | batch 长度绑定、GPU 带 mask 的有界捕获、CPU stop 最终判定、全 TP admission | `model_infer/exact_prefix_cache.py` |
 | CPU 恢复仅加载 GPU radix 缺失区间，GPU KV 淘汰不删除 CPU 状态目录 | 同上 |
-| 双 infer 线程各自 ticket；microbatch overlap 使用四组 staging | chunked prefill / DP backend |
-| 独立 hidden 副本、scheduler HEAD_ONLY、当前请求重新采样、独立 pinned 输出缓冲 | `basemodel.py` / `base_backend.py` |
+| 双 infer 线程各自 ticket；microbatch overlap 使用四组 staging；伙伴计算时跳过过时的空闲休眠 | chunked prefill / DP backend |
+| 独立 hidden 副本、批量 scheduler HEAD_ONLY、当前请求重新采样、独立 pinned 输出缓冲 | `basemodel.py` / `base_backend.py` |
 | 精确 MTP conv 窗口与 SSM row、canonical 恢复、Qwen draft 私有尾槽重建 | `linear_att.py` / `proposers/exact_resume.py` |
 | D→P CPU 缺页传输、全 TP 发布、首 token owner、D 完整命中零 KV 控制任务 | `pd/checkpoint_transport.py` / PD master |
 | 原生 HTTP 边界、Agent、分支、stop、并发回归脚本 | `test/benchmark/agent_checkpoint_cache.py` |
 
 `exact_prefix_cache_mb` 是**每 TP rank 的缓存数据预算**，包括 KV 页物理容量、状态/seed、未发布数据及尚有 lease 的已淘汰数据。Python 元数据、HTTP 序列化、TP 转换和网络队列的临时内存另计；条目数、捕获槽及传输队列另有上限。GPU 自动容量 profiling 预留 staging 和一页 gather 临时空间。
 
+启用时在启动阶段一次性预留该预算的 pinned CPU arena，请求处理中只划分和回收窗口，避免 `cudaHostAlloc` 停顿。每个窗口具有独立 tensor storage，序列化一页不会携带整座 arena；最后一个 tensor/view 释放后才归还窗口。finalizer 只向队列投递回收记录，分配时在锁内合并空闲区，避免 GC 重入锁或修改正在遍历的空闲表。已关闭 lease 和已消费的 pending 不再持有缓存实体。
+
+捕获所需 CPU flags 按 staging slot 使用独立 pinned buffer，一次异步上传；已知输出长度且忽略 EOS、没有 token stop 时，直接使用 prompt/终止位置 mask。完整命中的 LM head、当前采样和 MTP 私有尾槽修复按批次执行，再统一等待。普通模式固定 MTP 的首次 decode 只验证有效 target 行，随后由正常 proposer 产生下一轮候选，避免验证尚未初始化的 draft 位置。启用该模式时，目标模型的 GDN、FA3 FP/MLA 始终使用可变行布局，保持 CUDA Graph 捕获和重放一致，SSM 的每请求物理槽跨度不变。捕获选择和请求起始位置 kernel 将实际行数作为非特化运行时参数，仅保留 block 大小的编译版本，避免新旧请求混合后按每个精确行数重新编译。启动时用空 mask 预热本 rank 容量范围内的有限 block 版本；不读写请求状态和 KV。offload 的最后一页 KV 与 state/seed 共用完成等待，多页之间仍释放上一页 gather 临时空间；异常路径同样等待已提交的读写，再归还窗口。
+
+普通模式在 CPU post 决定接受/停止位置后冻结 tokens、origins 和状态视图，交给独立 CUDA stream 的后台线程写入 CPU 缓存。任务数量由 staging 槽约束；在全 TP 都完成复制之前，请求保留 GPU KV 和索引，不能释放或暂停，但可以继续计算后缀。worker 使用独立 Gloo 组，只准备尚不可见的数据；调度阶段取完成 epoch 的全 TP 交集后统一发布，再释放引用和 staging，并允许 worker 处理下一任务。目录发布与恢复因此保持串行，避免相同 tokens/长度在不同 TP rank 命中不同版本。clear 取消旧 generation 的发布，不提前释放在途资源。两个 infer 线程仍遵守原有全部握手，保证 post 发布登记与下一次分类轮询的顺序。若全 TP 的目录已经有同一精确前缀及所需 seed，worker 持 lease 共同确认后沿用既有 KV/state/seed/origins，跳过重复搬运；任一 rank 缺失仍执行原有准备流程。复用也经过完成队列和引用释放，不修改当前请求的计算来源。PD 保留原有同步发布和传输协议。
+
+普通模式的 `_pre_post_handle` 只推进实际接受行；当输出长度已达 `max_new_tokens` 时，下一次分类不再安排多余 forward，仍保留原有握手和正常 post/finish/free 顺序。
+
 捕获自然 prefill chunk 终点，以及 GPU token/EOS/长度提示选出的停止候选；CPU post 再核验实际接受与 stop 边界。普通 decode 生成 N 个 token，默认最多保存 `prompt_len + N - 1` 的状态：最后刚采样的 token 尚未计算。迟到的外部 abort 或字符串停止不保证留下精确末态，只保留此前合法检查点。
 
 检查点额外保存每个 KV token 的计算来源 `origins`。同 token 前缀分别通过 decode/prefill 计算，可能留下不同的浮点 KV；不能把一份状态和另一条计算历史的 KV 混用。CPU 目录先验证实际 tokens，GPU radix 再按 origins 查找；CPU 页键同时包含 tokens 与 origins，COW 只复制两者都一致的前缀。每批新计算区间产生新的跨 TP 一致来源，恢复/PD 传输继承已有来源；普通 decode 不逐步复制整条前缀来源向量。
 
-MTP CPU 页键还记录 successor 或终端标记，因为 draft slot i 可能依赖 token[i+1]。恢复末槽到请求私有 KV，再用 H@L 和本次 token[L] 重建 draft 尾部，并为这个 packed 槽赋新来源；捕获还冻结 packed 尾槽，防止下一批 proposal 提前改写它。
+MTP CPU 页键还记录 successor 或终端标记，因为 draft slot i 可能依赖 token[i+1]。恢复末槽到请求私有 KV，再用 H@L 和本次 token[L] 重建 draft 尾部，并为这个 packed 槽赋新来源；捕获还冻结 packed 尾槽，防止下一批 proposal 提前改写它。DP 的单批次 draft 修复不能重放双微批 CUDA Graph，采用已有的普通执行路径；正常 DP 双微批仍使用图重放。
 
 ### 当前限制
 
-- **CPU KV/state 搬运仍有同步屏障，CPU cache 锁会跨页拷贝等待。** 已隔离下一批可覆盖的运行态，但尚未实现 `LOAD_WAIT`、事件轮询、HEAD_ONLY 与 onload 并行，不能称为全异步 CPU cache。
+- **CPU onload 和 PD 发布仍有同步屏障，CPU cache 锁会跨页拷贝等待。** 普通模式 offload 在后台完成，活动 decode 不等待该复制；新请求的目录查找仍可能等待 worker 持有的锁。尚未实现 `LOAD_WAIT`、HEAD_ONLY 与 onload 并行，不能称为全异步 CPU cache。
 - 尾页采用 COW，没有原地追加、fragment arena；许多短分支可能浪费 CPU 容量和复制带宽。checkpoint 选择为 LRU/有界候选，没有成本模型或每会话优先级。
 - namespace 覆盖模型配置、实际加载的 safetensors（没有时为 `.bin`）文件名/大小/mtime、dtype、解析后的量化配置、expert dtype 及 draft 配置，不包含模型或量化文件路径。部署期间权重必须不可变，跨节点复制需保留权重元信息；这里不扫描权重内容计算摘要，若替换权重却保留大小和 mtime，必须更新 `weight_version` 并重启服务。启动拒绝在线 RL 更新。多模态、请求 prompt logprobs/routed experts 回退重算。
 - 完整命中要求模型具有末位置 hidden adapter。MTP 仅支持带 adapter 的单层 Qwen3.5 `vanilla_with_att` / `eagle_with_att`；其他 proposer 不使用新检查点。启动拒绝 MTP+expert parallelism、diverse mode、legacy DP cache fetch 组合。

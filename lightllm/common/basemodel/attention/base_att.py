@@ -66,8 +66,12 @@ class BaseAttBackend:
         draft_step = self.model.mtp_manager.get_decode_draft_step(self.model.is_mtp_draft_model)
         is_main_model = not self.model.is_mtp_draft_model
         has_decode_draft_step = draft_step > 0
-        dynamic_verify_enabled = args.mtp_dynamic_verify
-        return is_main_model and has_decode_draft_step and dynamic_verify_enabled
+        # Exact HEAD replay starts without proposals, so fixed planning can
+        # also mix one-row and full-width requests. Keep the attention layout
+        # service-wide to make CUDA Graph capture and replay use the same shape.
+        exact_head_enabled = getattr(args, "enable_exact_prefix_cache", False) and args.run_mode == "normal"
+        variable_layout_enabled = args.mtp_dynamic_verify or exact_head_enabled
+        return is_main_model and has_decode_draft_step and variable_layout_enabled
 
     def uses_causal_attention(self) -> bool:
         args = get_env_start_args()

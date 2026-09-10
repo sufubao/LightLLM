@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _select_capture_candidates(
     req_indices,
     state_rows,
@@ -20,7 +20,7 @@ def _select_capture_candidates(
     selected_rows,
     selected_lengths,
     source_rows,
-    N: tl.constexpr,
+    N,
     CAPACITY: tl.constexpr,
     MAX_REQS: tl.constexpr,
     MTP_SIZE: tl.constexpr,

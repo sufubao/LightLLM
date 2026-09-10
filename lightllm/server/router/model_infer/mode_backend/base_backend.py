@@ -59,6 +59,9 @@ class ModeBackend:
         self.shm_req_manager = ShmReqManager()
 
         self.overlap_event_manager = OverlapEventManager()
+        # Shared by the two infer threads; idle handshakes must not delay a
+        # partner that has already started a real model forward.
+        self._forward_generation = 0
         # 标识是否支持 overlap 功能，很多子类模式如 xgrammar 和 outlines 当前不支持 overlap 高性能模式
         self.support_overlap = True
 
@@ -697,10 +700,14 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
+        exact_cache = self.exact_prefix_cache
+        if exact_cache is not None:
+            exact_cache.poll_publications()
+
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
-        if self.exact_prefix_cache is not None:
-            self.exact_prefix_cache.poll_imports()
+        if exact_cache is not None:
+            exact_cache.poll_imports()
 
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
             self.multi_level_cache_module.update_cpu_cache_task_states()
@@ -712,8 +719,8 @@ class ModeBackend:
             return [], []
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
-        if self.exact_prefix_cache is not None:
-            self.exact_prefix_cache.process_head_only(ready_reqs)
+        if exact_cache is not None:
+            exact_cache.process_head_only(ready_reqs)
         support_overlap = self.support_overlap
         ready_reqs = self._reorder_pd_high_priority_reqs(ready_reqs)
         ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
@@ -733,12 +740,18 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
+            # Publication reads the request's KV prefix on another stream.
+            # Active requests can extend it, but its slots must remain owned
+            # until scheduler polling retires every outstanding publication.
+            pending_publication = exact_cache is not None and exact_cache.has_pending(req_obj)
             if req_obj.filter_mark:
-                finished_reqs.append(req_obj)
+                if not pending_publication:
+                    finished_reqs.append(req_obj)
                 continue
 
             if req_obj.wait_pause:
-                wait_pause_reqs.append(req_obj)
+                if not pending_publication:
+                    wait_pause_reqs.append(req_obj)
                 continue
 
             if req_obj.paused:
@@ -750,9 +763,18 @@ class ModeBackend:
                     # 延迟处理
                     req_obj.filter_mark = True
                     continue
-                else:
+                elif not pending_publication:
                     finished_reqs.append(req_obj)
-                    continue
+                continue
+
+            if (
+                self.args.run_mode == "normal"
+                and req_obj.cur_output_len >= req_obj.sampling_param.shm_param.max_new_tokens
+            ):
+                # Accepted rows already reached the output limit in pre-post.
+                # Keep ownership until the preceding batch's ordered post
+                # finishes; another forward only delays its final tokens.
+                continue
 
             if no_decode:
                 is_decode = False
@@ -767,7 +789,7 @@ class ModeBackend:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
+                    if wait_pause_count < pause_max_req_num and not pending_publication:
                         if self.args.run_mode == "decode":
                             # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
                             # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
@@ -801,7 +823,7 @@ class ModeBackend:
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
+                    if wait_pause_count < pause_max_req_num and not pending_publication:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 
@@ -921,6 +943,16 @@ class ModeBackend:
 
     # 一些可以复用的通用功能函数
     def _filter_reqs(self, reqs: List[InferReq]):
+        if reqs and self.exact_prefix_cache is not None:
+            ready = []
+            for req in reqs:
+                if self.exact_prefix_cache.has_pending(req):
+                    # Preserve explicit removal intent until the next scheduler
+                    # poll observes that every reader has completed.
+                    req.filter_mark = True
+                else:
+                    ready.append(req)
+            reqs = ready
         if reqs:
             g_infer_context.filter_reqs(reqs)
         return

@@ -94,6 +94,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 
 def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs: List[InferReq] = []
+    initialized_mtp_reqs = []
     total_token_num = 0
     b_req_idx = []
     b_mtp_index = []
@@ -110,8 +111,14 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         total_token_num += seq_len
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
-        # process the draft tokens.
-        for step in range(req.mtp_step):
+        # HEAD_ONLY repaired the draft tail, but has not generated a proposal.
+        # The first target row seeds it through the normal proposer below.
+        draft_steps = req.mtp_step
+        if getattr(req, "exact_mtp_needs_proposal", False):
+            initialized_mtp_reqs.append(req)
+            if req.cur_output_len == 1:
+                draft_steps = 0
+        for step in range(draft_steps):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
@@ -161,6 +168,10 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         is_prefill=False,
         multimodal_params=multimodal_params,
     )
+    # Keep the marker if allocation fails. A pause followed by prefill may
+    # already advance output_len; consume that stale marker without narrowing.
+    for req in initialized_mtp_reqs:
+        del req.exact_mtp_needs_proposal
     return model_input, run_reqs
 
 

@@ -640,9 +640,15 @@ class TpPartBaseModel:
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
         infer_max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        use_cuda_graph = self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size,
-            max_len_in_batch=infer_max_kv_seq_len,
+        # Auxiliary single-batch calls cannot replay a graph captured with two
+        # microbatches; normal DP decode uses _microbatch_overlap_decode_cuda.
+        use_cuda_graph = (
+            self.graph is not None
+            and not self.graph.enable_decode_microbatch_overlap
+            and self.graph.can_run(
+                batch_size=infer_batch_size,
+                max_len_in_batch=infer_max_kv_seq_len,
+            )
         )
         need_capture = False
         if use_cuda_graph:

@@ -15,11 +15,13 @@ class FixedSpecPlanner(BaseMtpPlanner):
         self.max_draft_step = int(max_draft_step)
 
     def plan(self, decode_reqs: List, origin_batch_size: int) -> SpecDecodePlan:
+        target_only = bool(decode_reqs) and origin_batch_size == len(decode_reqs)
         return SpecDecodePlan(
             origin_batch_size=origin_batch_size,
             dynamic_batch_size=origin_batch_size,
             draft_step=self.max_draft_step,
-            pre_draft_step=self.max_draft_step,
+            pre_draft_step=0 if target_only else self.max_draft_step,
+            all_reqs_have_proposals=origin_batch_size == len(decode_reqs) * (self.max_draft_step + 1),
         )
 
     def update_statics(

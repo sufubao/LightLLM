@@ -246,7 +246,7 @@ class Workload:
         self.write_json("manifest.json", self.manifest)
         return case
 
-    def run_request(self, server, case, phase, *, stream=True, cold=False):
+    def run_request(self, server, case, phase, *, stream=True, cold=False, concurrency_round=None):
         parameters = {
             "do_sample": False,
             "seed": self.args.seed,
@@ -260,6 +260,7 @@ class Workload:
         }
         record = request_once(self.endpoints[server], case, parameters, phase, stream, self.args.timeout)
         record["server"] = server
+        record["concurrency_round"] = concurrency_round
         with self.lock:
             self.ordinal += 1
             record["record_id"] = f"{self.ordinal:05d}-{server}-{case['name']}-{phase}"
@@ -438,17 +439,28 @@ class Workload:
                     self.compare(refs[case["name"]], seeds[case["name"]])
                 time.sleep(self.args.settle_ms / 1000)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.concurrency) as executor:
-                    pending = [
-                        (case, executor.submit(self.run_request, server, case, "concurrent_warm")) for case in cases
-                    ]
-                    for case, future in pending:
-                        warm = future.result()
-                        self.compare(refs[case["name"]], warm)
-                        self.compare(seeds[case["name"]], warm)
-                        if self.args.require_exact_hits and server == "candidate":
-                            self.add_check(
-                                warm, "concurrent_exact_full_hit", warm["cache_hit_len"] == len(case["tokens"])
+                    for round_index in range(self.args.repeats):
+                        pending = [
+                            (
+                                case,
+                                executor.submit(
+                                    self.run_request,
+                                    server,
+                                    case,
+                                    "concurrent_warm",
+                                    concurrency_round=round_index,
+                                ),
                             )
+                            for case in cases
+                        ]
+                        for case, future in pending:
+                            warm = future.result()
+                            self.compare(refs[case["name"]], warm)
+                            self.compare(seeds[case["name"]], warm)
+                            if self.args.require_exact_hits and server == "candidate":
+                                self.add_check(
+                                    warm, "concurrent_exact_full_hit", warm["cache_hit_len"] == len(case["tokens"])
+                                )
         return self.finish()
 
     def finish(self, fatal_error=None):
@@ -487,6 +499,7 @@ class Workload:
                         for key in (
                             "case",
                             "phase",
+                            "concurrency_round",
                             "input_len",
                             "output_len",
                             "ttft_ms",

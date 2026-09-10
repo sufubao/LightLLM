@@ -78,10 +78,14 @@ class PendingCheckpoint:
     cache: "CpuCheckpointCache"
     entry: _Entry
     consumed: bool = False
+    _length: int = field(init=False)
+
+    def __post_init__(self):
+        self._length = self.entry.length
 
     @property
     def length(self):
-        return self.entry.length
+        return self._length
 
 
 class CheckpointLease:
@@ -90,11 +94,12 @@ class CheckpointLease:
     def __init__(self, cache, entry):
         self.cache = cache
         self.entry = entry
+        self._length = entry.length
         self.closed = False
 
     @property
     def length(self):
-        return self.entry.length
+        return self._length
 
     @property
     def conv_state(self):
@@ -152,6 +157,7 @@ class CpuCheckpointCache:
         page_size: int = 8192,
         pin_memory: bool = True,
         draft_tail_dependency: bool = False,
+        preallocate: bool = False,
     ):
         if max_bytes < 0 or max_entries < 0 or page_size <= 0:
             raise ValueError("invalid checkpoint cache capacity")
@@ -169,6 +175,11 @@ class CpuCheckpointCache:
         self._entries: Dict[int, _Entry] = {}
         self._nodes: Dict[int, _Node] = {}
         self._lru: OrderedDict[int, _Entry] = OrderedDict()
+        self._arena = None
+        if preallocate and self.pin_memory:
+            from .checkpoint_memory import PinnedCheckpointArena
+
+            self._arena = PinnedCheckpointArena(self.max_bytes)
 
     @staticmethod
     def _tokens(tokens: Sequence[int]):
@@ -363,14 +374,34 @@ class CpuCheckpointCache:
     def _make_room(self, needed_bytes):
         if needed_bytes > self.max_bytes or self.max_entries == 0:
             return False
-        for entry in list(self._lru.values()):
+        # Retain IDs, not entries: retired tensors must be released immediately
+        # so their arena windows can satisfy the next preparation.
+        for serial in list(self._lru):
             if self._bytes + needed_bytes <= self.max_bytes and len(self._entries) < self.max_entries:
                 break
+            entry = self._entries[serial]
             if entry.leases == 0:
                 self._retire(entry)
+            del entry
         return self._bytes + needed_bytes <= self.max_bytes and len(self._entries) < self.max_entries
 
     def _empty_cpu(self, shape, dtype):
+        if self._arena is not None:
+            with self._lock:
+                tensor = self._arena.allocate(shape, dtype)
+                if tensor is not None:
+                    return tensor
+                # Physical fragmentation or outstanding exported views can
+                # require more space than logical byte admission alone predicts.
+                for serial in list(self._lru):
+                    entry = self._entries[serial]
+                    if entry.leases == 0:
+                        self._retire(entry)
+                    del entry
+                    tensor = self._arena.allocate(shape, dtype)
+                    if tensor is not None:
+                        return tensor
+            raise MemoryError("checkpoint pinned arena has no available contiguous range")
         return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=self.pin_memory)
 
     @staticmethod
@@ -392,6 +423,7 @@ class CpuCheckpointCache:
         ssm_state,
         output_seed,
         copy_page,
+        copy_producers=(),
     ):
         if not tokens:
             return None
@@ -404,6 +436,7 @@ class CpuCheckpointCache:
         base_entry = candidates[-1] if candidates else None
         base_pages = base_entry.pages if base_entry is not None else ()
         common_origins = self._common(origins, base_entry.origins()) if base_entry is not None else 0
+        del base_entry
         del candidates
         page_bytes = int(np.prod(kv_shape)) * torch.empty((), dtype=kv_dtype).element_size()
         state_bytes = sum(
@@ -462,7 +495,7 @@ class CpuCheckpointCache:
                 state_tensors.append(destination)
             # The producer owns all sources through this fence.  No directory or
             # page becomes visible while a device copy is still outstanding.
-            self._finish_stream((conv_state, ssm_state, output_seed))
+            self._finish_stream((*copy_producers, conv_state, ssm_state, output_seed))
             pages = iter(created)
             entry_pages = tuple(page if page is not None else next(pages) for page in existing)
             self._serial += 1
@@ -480,7 +513,7 @@ class CpuCheckpointCache:
             # D2H copy. Fence the producer before releasing temporary buffers
             # or returning its staging slot to the next capture.
             try:
-                self._finish_stream((conv_state, ssm_state, output_seed))
+                self._finish_stream((*copy_producers, conv_state, ssm_state, output_seed))
             finally:
                 created.clear()
                 state_tensors.clear()
@@ -492,6 +525,9 @@ class CpuCheckpointCache:
                     self._unref_page(page)
             for page in base_pages:
                 self._unref_page(page)
+            existing.clear()
+            base_pages = ()
+            old = page = None
 
     def prepare(
         self,
@@ -523,35 +559,45 @@ class CpuCheckpointCache:
         ):
             raise ValueError("frozen tail must contain one complete KV token")
         kv_shape = (kv_buffer.shape[0], self.page_size, *kv_buffer.shape[2:])
+        copy_sources = []
 
         def copy_page(destination, start, valid, copied, _key):
             try:
                 if copied < valid:
+                    if copy_sources:
+                        # Keep GPU gather storage bounded to one page. The last
+                        # page shares its completion fence with state and seed.
+                        self._finish_stream((kv_buffer,))
+                        copy_sources.clear()
                     indexes = mem_indexes[start + copied : start + valid].to(device=kv_buffer.device, dtype=torch.long)
+                    copy_sources.append(indexes)
                     source = kv_buffer.index_select(1, indexes)
+                    copy_sources.append(source)
                     if frozen_tail_kv is not None and start + valid == len(tokens):
                         source[:, -1].copy_(frozen_tail_kv)
                     destination[:, copied:valid].copy_(source, non_blocking=source.is_cuda)
             finally:
-                # State can already be on CPU; in that case it cannot fence
-                # this KV producer, including a partially completed copy.
-                try:
-                    self._finish_stream((kv_buffer,))
-                finally:
-                    source = indexes = None
+                source = indexes = destination = None
 
         with self._lock:
-            return self._prepare(
-                tokens,
-                origins,
-                namespace,
-                kv_shape,
-                kv_buffer.dtype,
-                conv_state,
-                ssm_state,
-                output_seed,
-                copy_page,
-            )
+            try:
+                return self._prepare(
+                    tokens,
+                    origins,
+                    namespace,
+                    kv_shape,
+                    kv_buffer.dtype,
+                    conv_state,
+                    ssm_state,
+                    output_seed,
+                    copy_page,
+                    copy_producers=(kv_buffer,),
+                )
+            finally:
+                # _prepare fences this producer on success and failure, even
+                # when recurrent state was already on CPU. Clear retained
+                # temporaries so an exception traceback cannot keep them alive.
+                copy_sources.clear()
 
     def commit(self, pending):
         """Publish one prepared rank shard after coordinated TP admission."""
@@ -560,6 +606,7 @@ class CpuCheckpointCache:
                 raise ValueError("invalid or already consumed checkpoint preparation")
             pending.consumed = True
             entry = pending.entry
+            pending.entry = None
             if entry.epoch != self._epoch:
                 self._retire(entry)
                 return False
@@ -573,7 +620,9 @@ class CpuCheckpointCache:
             if pending.cache is not self or pending.consumed:
                 raise ValueError("invalid or already consumed checkpoint preparation")
             pending.consumed = True
-            self._retire(pending.entry)
+            entry = pending.entry
+            pending.entry = None
+            self._retire(entry)
 
     def release(self, lease):
         with self._lock:
@@ -583,6 +632,7 @@ class CpuCheckpointCache:
                 return
             lease.closed = True
             entry = lease.entry
+            lease.entry = None
             entry.leases -= 1
             if entry.retired and entry.leases == 0:
                 self._drop_entry(entry)
@@ -600,18 +650,25 @@ class CpuCheckpointCache:
                 raise ValueError("invalid checkpoint lease or load range")
             if len(mem_indexes) != lease.length - start:
                 raise ValueError("destination indexes must cover precisely the missing prefix range")
-            for index, page in enumerate(lease.entry.pages):
-                page_start = index * self.page_size
-                begin = max(start, page_start)
-                end = page_start + len(page.tokens)
-                if begin >= end:
-                    continue
-                source = page.tensor[:, begin - page_start : end - page_start].to(
-                    device=kv_buffer.device, non_blocking=kv_buffer.is_cuda
-                )
-                indexes = mem_indexes[begin - start : end - start].to(device=kv_buffer.device, dtype=torch.long)
-                kv_buffer.index_copy_(1, indexes, source)
-            self._finish_stream((kv_buffer,))
+            try:
+                for index, page in enumerate(lease.entry.pages):
+                    page_start = index * self.page_size
+                    begin = max(start, page_start)
+                    end = page_start + len(page.tokens)
+                    if begin >= end:
+                        continue
+                    source = page.tensor[:, begin - page_start : end - page_start].to(
+                        device=kv_buffer.device, non_blocking=kv_buffer.is_cuda
+                    )
+                    indexes = mem_indexes[begin - start : end - start].to(device=kv_buffer.device, dtype=torch.long)
+                    kv_buffer.index_copy_(1, indexes, source)
+            finally:
+                # Even a later allocation/copy failure must finish H2D readers
+                # before the caller releases its lease on arena windows.
+                try:
+                    self._finish_stream((kv_buffer,))
+                finally:
+                    source = indexes = page = None
 
     def export(self, lease, known_page_keys=()):
         """Return torch.save-compatible CPU payload; retain lease until serialized."""

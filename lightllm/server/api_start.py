@@ -338,6 +338,7 @@ def _launch_subprocesses(args: StartArgs):
     validate_ports(ports_to_check)
 
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
     send_and_receive_node_ip(args)
@@ -480,6 +481,7 @@ def pd_master_start(args: StartArgs):
 
     validate_ports([args.port])
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -545,6 +547,7 @@ def visual_only_start(args):
         ports_to_check.append(args.visual_rpyc_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -572,6 +575,7 @@ def config_server_start(args):
         ports_to_check.append(args.config_server_visual_redis_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 

@@ -7,6 +7,8 @@ import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import is_process_active
+from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_process
 
 logger = init_logger(__name__)
 
@@ -20,6 +22,7 @@ class SubmoduleManager:
         assert len(start_funcs) == len(start_args)
         pipe_readers = []
         processes = []
+        managed_processes = []
 
         for start_func, start_arg in zip(start_funcs, start_args):
             pipe_reader, pipe_writer = mp.Pipe(duplex=False)
@@ -30,6 +33,11 @@ class SubmoduleManager:
             process.start()
             pipe_readers.append(pipe_reader)
             processes.append(process)
+            # 初始化完成前也可能收到退出信号，因此子进程启动后立即纳入管理。
+            managed_process = psutil.Process(process.pid)
+            managed_processes.append(managed_process)
+            self.processes.append(managed_process)
+            self.process_names[managed_process] = managed_process.name()
 
         # Wait for all processes to initialize
         for index, pipe_reader in enumerate(pipe_readers):
@@ -43,10 +51,7 @@ class SubmoduleManager:
                 logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
 
         assert all([proc.is_alive() for proc in processes])
-        processes = [psutil.Process(proc.pid) for proc in processes]
-        self.processes.extend(processes)
-        self.process_names.update((process, process.name()) for process in processes)
-        return processes
+        return managed_processes
 
     def register_process_tree(self, root_process):
         """Add persistent LightLLM descendants to supervision.
@@ -99,7 +104,17 @@ class SubmoduleManager:
             stop_mps()
         logger.info("All processes terminated gracefully.")
 
+    def setup_exit_controller(self):
+        """启动 launcher 的独立资源清理进程。
+
+        在 service name 和启动参数写入环境后、创建共享内存或启动子进程前调用。
+        launcher 退出后由独立进程回收资源。
+        """
+        start_launcher_shm_cleanup_process(get_unique_server_name())
+
     def setup_signal_handlers(self, http_server_process=None):
+        """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
+
         def signal_handler(sig, _frame):
             if sig == signal.SIGINT:
                 logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")

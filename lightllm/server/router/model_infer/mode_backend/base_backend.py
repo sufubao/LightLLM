@@ -617,12 +617,13 @@ class ModeBackend:
         return
 
     def _reorder_pd_high_priority_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
-        """将 PD 分段续跑的高优先级请求前置，普通请求保持在其后。"""
-        # PD 分段续跑请求已经完成前一段推理，需要优先进入本轮调度；将请求拆分后再拼接，
-        # 保持各自原有顺序，并确保高优先级请求位于普通请求之前。
-        high_priority_reqs = [req for req in ready_reqs if req.shm_req.sample_params.pd_high_priority_request]
-        normal_reqs = [req for req in ready_reqs if not req.shm_req.sample_params.pd_high_priority_request]
-        return high_priority_reqs + normal_reqs
+        """续跑先获得本轮 token 容量，其次为 cache 优先新请求；同级保持原顺序。"""
+        return sorted(
+            ready_reqs,
+            key=lambda req: 0
+            if req.shm_req.sample_params.pd_is_continuation
+            else (1 if req.shm_req.sample_params.pd_high_priority_request else 2),
+        )
 
     def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
         """

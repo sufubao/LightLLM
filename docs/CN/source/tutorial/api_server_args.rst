@@ -99,16 +99,23 @@ PD 分离模式参数
     ``pd_node_resource_wait_timeout_seconds`` 为所有请求下发统一的资源等待上限；P/D 节点只负责按下发值
     控制本地 ``shm_req`` 申请和 Router 等待进入推理系统，不读取本地限流开关或超时配置。首段的等待上限由
     PD Master 上的
-    ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 10 秒；设置为 -1 表示永久等待。
-    ``segment_index > 0`` 的续跑分段使用独立的等待上限，该值由
-    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 60 秒，以提高已产生部分结果的
-    请求最终完成的成功率。
-    设置为非负数时，超时会导致 ``Server is busy``；
-    其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，由 PD Master 转换为 HTTP 429。
-    本功能启用时，PD Master 收到 ``Server is busy`` 会重新选择 P/D 节点并重试；最长探测周期由
-    ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` 控制，默认 120 秒。若请求已经向客户端输出 token，
-    则不再从头重试，以免产生重复内容。设置 ``--disable_pd_node_self_request_limit`` 后，PD Master 不再下发
-    有限的资源等待时间；P/D 节点永久等待，其他原因产生的 ``Server is busy`` 也会直接返回，不触发重试。
+    ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 20 秒；设置为 -1 表示永久等待。
+    首段资源等待超时会报告 ``Server is busy``。尚未输出 token 时，Master 可重新选点重试，
+    探测周期由 ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` 控制，默认 120 秒；耗尽后返回 HTTP 429。
+
+    续跑通过内部字段 ``pd_is_continuation`` 标识，优先级高于 cache 命中的新请求。
+    shm 槽位在跨 HTTP worker 的共享锁内按优先级整组分配，等待期间不占有部分槽位；
+    Router 和推理后端也优先处理续跑。已经进入 Router 的请求仍可运行并释放资源，
+    避免用等待 shm 的续跑阻塞所有槽位持有者。
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` 默认 -1，续跑不受单次资源等待上限限制。
+    若显式配置非负值，尚未产出 token 的续跑分段遇到 busy 后会清理旧分段并退避重试，保留已输出内容和剩余额度。
+    已产出 token 的失败分段不会从头重试。关闭节点自限流时，首段不执行 busy 重试，续跑保护仍然生效。
+
+    ``LIGHTLLM_PD_REQUEST_TIMEOUT_SECONDS`` 为生成流程提供覆盖所有分段和重试的时间预算，默认 1800 秒，
+    负数禁用。续跑的 Master 握手和 P 节点等待 Decode 分配不再使用原来的 60/180 秒局部上限，
+    由请求总预算、客户端取消及节点断连终止并清理。此预算不重置于分段边界或 token 输出，
+    也不替代客户端、网关和健康检查自身的超时设置。
+    此变更增加了共享请求结构字段，升级时需要使用同一版本重启 Master、P/D 节点及其 worker。
     多机 TP 场景仅由 master 节点执行超时判断，slave 节点永久等待。cache 命中记录允许提升优先级的最大年龄由
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 36 秒。cache 命中提权还要求输入
     token 数达到 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` 配置的门槛（默认 4096），避免短请求仅因
@@ -118,8 +125,8 @@ PD 分离模式参数
 
     .. code-block:: bash
 
-        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
-            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=20 \
+            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=-1 \
             LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
             python -m lightllm.server.api_server --run_mode pd_master ...
 

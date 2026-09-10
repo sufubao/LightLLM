@@ -45,7 +45,12 @@ def _make_manager(mode: NodeRole):
     manager.metric_client = MagicMock()
     manager._run_reqs_count_lock = asyncio.Lock()
     manager.run_reqs_count_mark = _ValueMark()
-    manager.shm_req_manager = SimpleNamespace(async_alloc_req_index=AsyncMock(side_effect=RuntimeError("alloc failed")))
+    manager.shm_req_manager = SimpleNamespace(
+        async_alloc_req_index=AsyncMock(side_effect=RuntimeError("alloc failed")),
+        register_pd_waiter=MagicMock(),
+        unregister_pd_waiter=MagicMock(),
+        alloc_pd_req_indexes=MagicMock(side_effect=RuntimeError("alloc failed")),
+    )
     return manager
 
 
@@ -204,7 +209,9 @@ def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
     async def run():
         manager = _make_manager(mode)
         manager.shm_req_manager = SimpleNamespace(
-            async_alloc_req_index=AsyncMock(return_value=None),
+            register_pd_waiter=MagicMock(),
+            unregister_pd_waiter=MagicMock(),
+            alloc_pd_req_indexes=MagicMock(return_value=None),
             async_release_req_index=AsyncMock(),
         )
 
@@ -225,7 +232,8 @@ def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
                     pd_event,
                 )
 
-        manager.shm_req_manager.async_alloc_req_index.assert_awaited_once()
+        manager.shm_req_manager.alloc_pd_req_indexes.assert_called_once_with(1, 2)
+        manager.shm_req_manager.unregister_pd_waiter.assert_called_once_with(2)
         manager.shm_req_manager.async_release_req_index.assert_not_awaited()
         manager._register_running_request.assert_awaited_once()
         manager._unregister_running_request.assert_awaited_once()
@@ -320,9 +328,9 @@ def test_httpserver_keeps_started_requests_and_requests_with_remaining_master_ti
         assert req_status.has_timed_out_waiting_for_inference() is False
 
 
-def test_pd_node_self_request_limit_releases_partially_allocated_shm_reqs():
+def test_normal_node_releases_partially_allocated_shm_reqs():
     async def run():
-        manager = _make_manager(NodeRole.D)
+        manager = _make_manager(NodeRole.NORMAL)
         manager.shm_req_manager = SimpleNamespace(
             async_alloc_req_index=AsyncMock(side_effect=[7, RuntimeError("alloc failed")]),
             async_release_req_index=AsyncMock(),

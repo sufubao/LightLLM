@@ -61,11 +61,11 @@ def test_pd_node_resource_wait_timeout_reads_environment_variable(monkeypatch):
     get_pd_node_resource_wait_timeout_seconds.cache_clear()
 
 
-def test_pd_node_continuation_resource_wait_timeout_defaults_to_60_seconds(monkeypatch):
+def test_pd_node_continuation_resource_wait_timeout_defaults_to_unlimited(monkeypatch):
     monkeypatch.delenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", raising=False)
     get_pd_node_continuation_resource_wait_timeout_seconds.cache_clear()
 
-    assert get_pd_node_continuation_resource_wait_timeout_seconds() == 60
+    assert get_pd_node_continuation_resource_wait_timeout_seconds() == -1
 
     get_pd_node_continuation_resource_wait_timeout_seconds.cache_clear()
 

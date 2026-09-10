@@ -103,18 +103,26 @@ PD disaggregation Mode Parameters
     ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
     ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
     or timeout settings. The first segment's timeout is
-    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
-    to -1 to wait indefinitely. Continuation segments with ``segment_index > 0`` use a separate timeout controlled by
-    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 60 seconds, improving the chance
-    that requests which have already produced partial results complete successfully. When set to a non-negative value,
-    a timeout reports ``Server is busy``; a request that has
-    entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
-    While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
-    The maximum probing period is controlled by ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` and defaults to
-    120 seconds. Once response tokens have been streamed to the client, the request is not restarted because doing so
-    would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
-    resource wait timeout; all P/D nodes wait indefinitely, and a ``Server is busy`` raised for another reason is
-    returned immediately without retrying.
+    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 20 seconds;
+    -1 disables the limit. Before any output, busy requests may retry on another P/D pair within
+    ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` (default 120 seconds), then return HTTP 429.
+
+    Continuations carry the internal ``pd_is_continuation`` flag and outrank cache-hit new requests.
+    Request slots are allocated as a group under a shared lock across HTTP workers, without holding partial
+    allocations while waiting. Router and inference scheduling also prioritize continuations. Requests already
+    holding slots may still run and release resources, avoiding deadlock with continuations waiting for slots.
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` defaults to -1 (unlimited resource wait).
+    If explicitly set to a non-negative value, a busy continuation segment that has not produced tokens is
+    cleaned up and retried with backoff, preserving delivered output and the remaining token budget.
+    Failed segments that have already produced tokens are not replayed. Disabling node self-limiting disables
+    initial busy retries but retains continuation protection.
+
+    ``LIGHTLLM_PD_REQUEST_TIMEOUT_SECONDS`` sets the generation time budget across all segments and retries
+    (default 1800 seconds; negative disables it). Continuation handshakes on Master and the Prefill node no longer
+    use the fixed 60/180-second limits. The request budget, client cancellation and node disconnection terminate
+    waiting continuations and clean up their resources. The budget does not reset after a token or segment and
+    does not replace client, gateway or health-check timeouts.
+    The shared request structure has a new field: restart Master, P/D nodes and their workers on the same version.
     In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
     The maximum cache-record age eligible for promotion is controlled by
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
@@ -126,8 +134,8 @@ PD disaggregation Mode Parameters
 
     .. code-block:: bash
 
-        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
-            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=20 \
+            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=-1 \
             LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
             python -m lightllm.server.api_server --run_mode pd_master ...
 

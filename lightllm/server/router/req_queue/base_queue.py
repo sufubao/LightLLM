@@ -83,12 +83,18 @@ class BaseQueue:
     def extend(self, req_group: List[Req]):
         for req in req_group:
             req.sample_params.suggested_dp_index = self.dp_index
-        # PD 高优先级请求应排在普通请求之前，但高优先级请求之间仍按到达顺序排队，
-        # 避免后到请求反复插到队头而阻塞先到的高优先级请求。
-        if req_group and req_group[0].sample_params.pd_high_priority_request:
+        # 续跑 > cache 优先新请求 > 普通新请求；同级保持 FIFO。
+        if req_group and (
+            req_group[0].sample_params.pd_is_continuation or req_group[0].sample_params.pd_high_priority_request
+        ):
+
+            def priority(req):
+                params = req.sample_params
+                return 0 if params.pd_is_continuation else (1 if params.pd_high_priority_request else 2)
+
             first_normal_req_index = len(self.waiting_req_list)
             for index, waiting_req in enumerate(self.waiting_req_list):
-                if not waiting_req.sample_params.pd_high_priority_request:
+                if priority(waiting_req) > priority(req_group[0]):
                     first_normal_req_index = index
                     break
             # req_group 可能包含同一请求组的多个 Req，整体插入可以保持组内顺序。

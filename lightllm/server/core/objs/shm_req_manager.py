@@ -75,6 +75,10 @@ class ShmReqManager:
         self.alloc_state_shm = ShmArray(shm_name, (self.max_req_num,), np.int32)
         self.alloc_state_shm.create_shm()
         self.alloc_state_shm.arr[:] = 0
+        # 所有 HTTP worker 共用的等待人数：续跑、cache 优先新请求、普通请求。
+        self.priority_waiters = ShmArray(f"{shm_name}_priority_waiters", (3,), np.int32)
+        self.priority_waiters.create_shm()
+        self.priority_waiters.arr[:] = 0
         # 用来做为每个进程独立的状态管理，用于申请和
         self.proc_private_get_state = np.zeros(shape=(self.max_req_num,), dtype=np.int32)
         return
@@ -92,6 +96,34 @@ class ShmReqManager:
 
     async def async_alloc_req_index(self):
         return self.alloc_req_index()
+
+    def register_pd_waiter(self, priority: int):
+        with self.manager_lock:
+            self.priority_waiters.arr[priority] += 1
+
+    def unregister_pd_waiter(self, priority: int):
+        with self.manager_lock:
+            self.priority_waiters.arr[priority] -= 1
+
+    def alloc_pd_req_indexes(self, req_num: int, priority: int):
+        """整组申请，等待期间不占有部分槽位；优先级检查与分配在同一把锁内。"""
+        if not 0 < req_num <= self.max_req_num:
+            raise ValueError(f"Requested {req_num} sequences, but capacity is {self.max_req_num}")
+        with self.manager_lock:
+            if self.priority_waiters.arr[:priority].any():
+                return None
+            indexes = []
+            for _ in range(req_num):
+                index = self.linked_req_manager.alloc()
+                if index is None:
+                    for allocated in reversed(indexes):
+                        self.linked_req_manager.free(allocated)
+                    return None
+                indexes.append(index)
+            for index in indexes:
+                assert self.alloc_state_shm.arr[index] == 0
+                self.alloc_state_shm.arr[index] = 1
+            return indexes
 
     def release_req_index(self, req_index_in_mem):
         assert req_index_in_mem < self.max_req_num

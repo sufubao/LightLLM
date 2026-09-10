@@ -311,8 +311,14 @@ def get_pd_node_resource_wait_timeout_seconds() -> int:
 
 @lru_cache(maxsize=None)
 def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
-    """P/D 节点处理续跑分段时的资源等待超时，单位为秒。"""
-    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", 60)))
+    """续跑单次资源等待上限；默认无限等待，由 Master 请求总期限和取消控制。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", -1))
+
+
+@lru_cache(maxsize=None)
+def get_pd_request_timeout_seconds() -> int:
+    """PD 回答的总时间预算（秒），包括所有分段和重试；负数禁用。"""
+    return int(os.getenv("LIGHTLLM_PD_REQUEST_TIMEOUT_SECONDS", 1800))
 
 
 @lru_cache(maxsize=None)

@@ -29,6 +29,7 @@ from lightllm.utils.envs_utils import (
     get_pd_node_busy_retry_timeout_seconds,
     get_pd_node_continuation_resource_wait_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
+    get_pd_request_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import PDSelectionExtraInfo, create_selector
@@ -95,6 +96,10 @@ class HttpServerManagerForPDMaster:
 
     async def remove_pd(self, pd_info_json):
         self.pd_manager.remove_pd(pd_info_json)
+        # 唤醒正在无限等待续跑资源的请求，节点断连属于真实故障。
+        for req_status in list(self.req_id_to_out_inf.values()):
+            if any(node.node_id == pd_info_json["node_id"] for node in (req_status.p_node, req_status.d_node)):
+                await req_status.set_error(f"PD node {pd_info_json['node_id']} disconnected")
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -171,6 +176,8 @@ class HttpServerManagerForPDMaster:
     ):
         assert isinstance(prompt, str), "prompt must be str"
         start_time = time.time()
+        timeout = get_pd_request_timeout_seconds()
+        deadline = time.monotonic() + timeout if timeout >= 0 else None
         await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
@@ -211,11 +218,13 @@ class HttpServerManagerForPDMaster:
             )
 
         request_finished_successfully = True
-        async for result in self._merge_choice_generators(generators):
-            finish_status = result[3]
-            if finish_status.is_error_finished():
-                request_finished_successfully = False
-            yield result
+        remaining_timeout = max(0, deadline - time.monotonic()) if deadline is not None else None
+        async with aclosing(self._merge_choice_generators(generators, timeout=remaining_timeout)) as merged:
+            async for result in merged:
+                finish_status = result[3]
+                if finish_status.is_error_finished():
+                    request_finished_successfully = False
+                yield result
         if request_finished_successfully:
             self.metric_client.counter_inc("lightllm_request_success")
         return
@@ -326,6 +335,7 @@ class HttpServerManagerForPDMaster:
             origin_prompt_cache_len = None
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
+            retry_delay = 0.05
             # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
             # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的 block_prompt 长度。
             prompt_tokens = sys.maxsize
@@ -343,6 +353,7 @@ class HttpServerManagerForPDMaster:
                 # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
                 # 紧张导致分段续跑失败。
                 sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
+                sampling_params.pd_is_continuation = segment_index > 0
                 # 仅在 Master 开启限流时下发资源等待超时。续跑分段已经产生了部分结果，
                 # 使用独立配置的等待时间，提高请求最终完成的成功率。
                 if self.enable_pd_node_self_request_limit:
@@ -367,38 +378,63 @@ class HttpServerManagerForPDMaster:
                     request,
                 )
                 raw_finish_status = FinishStatus()
-                async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
-                    # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
-                    assert sub_req_id == block_group_request_id
+                segment_token_budget = remaining_max_new_tokens
+                try:
+                    async with aclosing(results_generator):
+                        async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
+                            # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
+                            assert sub_req_id == block_group_request_id
 
-                    # 收到当前分段的任意输出，说明该请求已经完成 P 节点的 prefill 派发阶段。
-                    # 立即归还 selector 中记录的在途 prompt 字符数和请求数，并通过置空确保每段只更新一次。
+                            # 收到当前分段的任意输出，说明该请求已经完成 P 节点的 prefill 派发阶段。
+                            # 立即归还 selector 中记录的在途 prompt 字符数和请求数，并通过置空确保每段只更新一次。
+                            if pending_prefill_load_chars is not None:
+                                p_node.dispatched_prompt_chars = max(
+                                    0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
+                                )
+                                p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
+                                pending_prefill_load_chars = None
+
+                            if raw_finish_status.is_finished_pd_decode_capacity():
+                                # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
+                                break
+
+                            # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
+                            remaining_max_new_tokens -= 1
+                            history_gen_token_strs.append(request_output)
+                            prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
+                            metadata["prompt_tokens"] = prompt_tokens
+                            if origin_prompt_cache_len is None:
+                                origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                                prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
+                                self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
+                                if not raw_finish_status.is_error_finished():
+                                    # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
+                                    # 推理或已失败的请求被后续请求误判为可复用 cache。
+                                    self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
+                            metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
+                            yield origin_request_id, request_output, metadata, raw_finish_status
+                except ServerBusyError:
+                    # 仅重试尚未输出 token 的续跑分段；已经交付的内容与额度保持不变。
+                    if not sampling_params.pd_is_continuation or remaining_max_new_tokens != segment_token_budget:
+                        raise
+                    await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
                     if pending_prefill_load_chars is not None:
                         p_node.dispatched_prompt_chars = max(
                             0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
                         )
                         p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
                         pending_prefill_load_chars = None
+                    if request is not None and await request.is_disconnected():
+                        raise ClientDisconnected(origin_request_id)
+                    logger.warning(
+                        f"group_request_id: {origin_request_id} continuation {block_group_request_id} "
+                        f"is busy; retrying the same segment in {retry_delay}s"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(1.0, retry_delay * 2)
+                    continue
 
-                    if raw_finish_status.is_finished_pd_decode_capacity():
-                        # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
-                        break
-
-                    # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
-                    remaining_max_new_tokens -= 1
-                    history_gen_token_strs.append(request_output)
-                    prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
-                    metadata["prompt_tokens"] = prompt_tokens
-                    if origin_prompt_cache_len is None:
-                        origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
-                        prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
-                        self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
-                        if not raw_finish_status.is_error_finished():
-                            # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
-                            # 推理或已失败的请求被后续请求误判为可复用 cache。
-                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
-                    metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
-                    yield origin_request_id, request_output, metadata, raw_finish_status
+                retry_delay = 0.05
 
                 await self.remove_req(group_request_id=block_group_request_id)
                 segment_index += 1
@@ -425,18 +461,23 @@ class HttpServerManagerForPDMaster:
             await self.remove_req(block_group_request_id)
         return
 
-    async def _merge_choice_generators(self, generators):
+    async def _merge_choice_generators(self, generators, timeout=None):
         """Merge independent n=1 PD generators into one multi-choice stream."""
         result_queue = asyncio.Queue()
         generator_done = object()
 
         async def forward_results(generator):
-            try:
+            async def consume():
                 async with aclosing(generator):
                     async for result in generator:
                         await result_queue.put(result)
 
+            try:
+                # 一个期限覆盖所有分段/重试，避免每次收到 token 就重置预算。
+                await asyncio.wait_for(consume(), timeout=timeout)
                 await result_queue.put(generator_done)
+            except asyncio.TimeoutError:
+                await result_queue.put(TimeoutError("PD request deadline exceeded"))
             except BaseException as error:
                 await result_queue.put(error)
 
@@ -461,12 +502,12 @@ class HttpServerManagerForPDMaster:
         self,
         event: asyncio.Event,
         request: Request,
-        timeout: float,
+        timeout: Optional[float],
         group_request_id: int,
         stage: str,
     ) -> None:
         """Wait for an asyncio.Event but abort early if the HTTP client disconnects."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout if timeout is not None else None
         disconnect_reason = f"fetch_pd_stream {stage} period check network disconnected"
 
         async def raise_if_disconnected() -> None:
@@ -478,7 +519,7 @@ class HttpServerManagerForPDMaster:
                 )
 
         while True:
-            remaining = deadline - time.time()
+            remaining = deadline - time.monotonic() if deadline is not None else 1.0
             if remaining <= 0:
                 raise ServerBusyError()
             await raise_if_disconnected()
@@ -526,7 +567,7 @@ class HttpServerManagerForPDMaster:
             await self._wait_for_event_or_disconnect(
                 prefill_prompt_ids_event,
                 request,
-                timeout=60,
+                timeout=None if sampling_params.pd_is_continuation else 60,
                 group_request_id=group_request_id,
                 stage="prefill",
             )
@@ -547,7 +588,7 @@ class HttpServerManagerForPDMaster:
             await self._wait_for_event_or_disconnect(
                 up_status_event,
                 request,
-                timeout=180,
+                timeout=None if sampling_params.pd_is_continuation else 180,
                 group_request_id=group_request_id,
                 stage="decode",
             )

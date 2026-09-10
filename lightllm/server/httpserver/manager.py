@@ -405,7 +405,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
                 )
                 try:
-                    await asyncio.wait_for(pd_event.wait(), timeout=180)
+                    # 续跑可能在 D 节点等资源；Master 的总期限/ABORT 负责取消。
+                    await asyncio.wait_for(pd_event.wait(), timeout=None if sampling_params.pd_is_continuation else 180)
                 except asyncio.TimeoutError:
                     logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
                     raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
@@ -431,12 +432,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 高优先级请求仍以更短的间隔重试；资源等待上限
-            # 完全由 PD Master 下发，与请求优先级无关。
+            # PD 按共享优先级整组申请资源；资源等待上限由 Master 下发。
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
                 pd_high_priority_request=sampling_params.pd_high_priority_request,
                 pd_node_resource_wait_timeout_seconds=sampling_params.pd_node_resource_wait_timeout_seconds,
+                pd_is_continuation=sampling_params.pd_is_continuation,
             )
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
@@ -548,11 +549,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_num: int,
         pd_high_priority_request: bool = False,
         pd_node_resource_wait_timeout_seconds: int = -1,
+        pd_is_continuation: bool = False,
     ) -> List[int]:
         """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
 
         PD Master 下发非负值时启用资源等待超时，负数表示无限等待。多机 TP slave
-        不独立限流，由 master 节点统一判断。请求优先级只影响重试间隔，不影响超时值。
+        不独立限流，由 master 节点统一判断。PD 请求按共享优先级整组分配。
         """
         alloced_req_indexes = []
         alloc_timeout_seconds = None
@@ -561,6 +563,23 @@ class HttpServerManager(HttpRlManagerHelper, object):
         if not self.is_multinode_tp_slave and pd_node_resource_wait_timeout_seconds >= 0:
             alloc_timeout_seconds = pd_node_resource_wait_timeout_seconds
         alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
+
+        if self.args.run_mode in ("prefill", "decode"):
+            priority = 0 if pd_is_continuation else (1 if pd_high_priority_request else 2)
+            self.shm_req_manager.register_pd_waiter(priority)
+            try:
+                while True:
+                    indexes = self.shm_req_manager.alloc_pd_req_indexes(req_num, priority)
+                    if indexes is not None:
+                        return indexes
+                    if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
+                        raise ServerBusyError(
+                            f"PD {self.args.run_mode} node is busy: unable to allocate shm_req objects "
+                            f"within {alloc_timeout_seconds} seconds"
+                        )
+                    await asyncio.sleep(0.01)
+            finally:
+                self.shm_req_manager.unregister_pd_waiter(priority)
 
         try:
             while len(alloced_req_indexes) < req_num:

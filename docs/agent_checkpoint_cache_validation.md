@@ -1,6 +1,50 @@
 # 精确前缀缓存：H100 验证记录
 
-日期：2026-09-10。基线为 upstream `1eb4810c78c6ea908b69c20c3c037b79979e1cd6`，候选按独立源码快照记录。最终R12在原MTP负载上消除了此前的大停顿，TTFT降低28.24%、总延迟降低20.88%，但**TPOT仍回退12.97%，尚未追平基线**。所有 benchmark/eval 经 `exp -m` 执行，保留失败运行、源码、启动日志、原始请求及逐 token 概率。**本功能默认关闭；恢复正确性、冷算差异和性能分别报告，不宣称全面提升或整体全绿。**
+日期：2026-09-10。基线为 upstream `1eb4810c78c6ea908b69c20c3c037b79979e1cd6`，候选按独立源码快照记录。最新R15合并了完整命中的恢复等待，降低搬运临时显存；**服务TPOT仍约2.54ms，尚未追平基线**。历史R12与最新R15的计时分别列出，不把不同轮次的baseline波动算作代码收益。所有 benchmark/eval 经 `exp -m` 执行，保留失败运行、源码、启动日志、原始请求及逐 token 概率。**本功能默认关闭；恢复正确性、冷算差异和性能分别报告，不宣称全面提升或整体全绿。**
+
+## R15：本轮恢复优化（2026-09-10）
+
+只保留两项相互配合的改动：normal完整命中时，KV、索引、conv/SSM和hidden异步排入同一stream，最后统一等待；逐页GPU临时tensor立即释放，让同一stream复用一页空间。`load_kv`默认仍等待，部分命中/PD保留原有屏障；异常路径在lease关闭前等待。发布请求长度和HEAD seed仍发生在完成屏障之后。
+
+候选基于R12 commit `213155bccc7e1fb761e35f6c38369b5228667e02`，部署tar SHA256 `3924999ad1712246ee50abdf5ae5b31ea55c6a5fb31eeab9cfec7c4bd8546df2`。最终docstring只澄清异步调用方的lease/索引生命周期要求，执行代码与该快照一致。H100 GPU3依次运行R12/R14/R15，原基线位于GPU6；计时窗口无其他测试请求或GPU专项。
+
+### 搬运及生命周期
+
+实际CPU cache和模型的state恢复方法、真实0.8B张量形状、合成数据的GPU专项中，8请求顺序恢复结果如下（3次预热、10次重复）：
+
+| 场景 | R12 | R15 |
+|---|---:|---:|
+| 仅缺末尾1个KV token，另恢复state/seed | 4.857ms | 4.687ms |
+| 8193-token完整CPU恢复，跨两页 | 23.416ms | 22.855ms |
+| 1/2/4页搬运的最大临时GPU空间 | 112 / 224 / 224MiB | 约112MiB / 112MiB / 112MiB |
+
+每请求conv/SSM约18.63MiB；一整页KV约112MiB。此专项不加载模型权重、不走HTTP调度，**不把微测改善等同于TPOT改善**。独立随机数据复验覆盖8请求×8193、start=127、非连续目标槽位、KV/conv/SSM/seed逐字节、未使用state bank不变、clear后的lease及第二次copy异常。CPU边界替代专项42场景/310检查通过；真实CPU缓存759检查通过，覆盖默认/显式wait及跨页恢复。它们不代替GPU和服务数值验证。
+
+### R15真实服务功能
+
+三套独立功能测试共85请求、344项checks、18组恢复/replay比较通过，HTTP错误0。Agent/EOS/stop/分支为28请求、124checks/15比较；Triton非greedy uniform/mixed为32请求、144checks，16个warm全部完整命中；GPU容量压力为25请求、76checks/3比较。
+
+压力请求使用正常缓存的fresh prefix，每轮10×8192，超过GPU容量65536；避免`disable_prompt_cache=True`的请求释放后不留radix、无法造成真实缓存淘汰。两轮日志均证明`GPU=0 CPU=8193`，分别验证8193完整命中和追加17-token后的8210输入恢复。临时测试脚本改动和原版同时归档，没有修改服务参数。
+
+严格cold比较独立报告：R15三组中两组失败。Agent立即续接的532-token输入命中S@512，与完整冷算的输出IDs相同，第2token标量logprob最大差0.0648808479；stop后270-token输入命中S@259，恢复首token为16（logprob −2.0264773），冷算首token为760（−1.9266164），输出序列不同。branch组逐位一致。恢复与完整冷算的等价性仍未成立，不能用普通功能suite的exit0遮盖这两项失败。功能测试首次并发长输出seed还记录约12.3秒TTFT，未删除、不纳入性能均值。
+
+随后在同一GPU3重启未改同步的R12，用相同run-id重跑28请求：输入摘要、cache命中长度、全部输出IDs及返回标量logprob与R15逐项相同；124checks/15恢复比较通过，严格cold的两例失败也完整复现。R12部署的1818个源码文件与其归档tar逐一核对。该对照证明这两例差异在R15之前已存在，不证明任意输入都与冷算等价。
+
+### 服务性能和未解决的问题
+
+原负载仍是8并发、257输入、MTP3、8输出。R15连续两次各20轮，每侧合计320个warm；704请求、1312比较通过，无样本剔除。两次candidate TPOT为2.5510/2.5227ms，合并结果：
+
+| 均值 | 同轮baseline | R15 |
+|---|---:|---:|
+| TTFT | 75.707ms | 50.320ms |
+| TPOT | 2.0995ms | 2.5369ms |
+| 总延迟 | 90.672ms | 68.350ms |
+
+TPOT比同轮baseline高20.8%，总延迟低24.6%。R15的TPOT与历史R12合并值2.5366ms几乎相同，不能据此称剩余TPOT回退得到改善。baseline历史值2.2454ms和本轮2.0995ms也说明必须区分计时轮次。
+
+两侧输出改为128的完整20轮中，baseline/R15为TTFT70.747/48.887ms、TPOT1.3941/1.5781ms、总延迟248.122/249.758ms。**该组退出1：656比较中4项失败**，来自2个warm请求的seed与cold比较；IDs一致，但第16个token标量logprob差0.033751875，超过原定0.03。R12独立长输出对照也出现同一位置、同一概率值和差值，说明问题在本次恢复合并之前已存在；不能因此忽略失败，也不能宣称与冷算完全等价。
+
+此前尝试的R13完整MTP预提案、R14单候选预提案均已撤回。8输出仍需3轮target验证，未得到稳定TPOT收益：R13两次2.6855/2.5948ms，R14两次2.6700/2.6238ms；同GPU的R12对照2.6181ms。既未用延迟发布首token美化TPOT，也未保留无收益的提案路径。原始失败和探索性运行一并保留。
 
 ## 环境与验证边界
 
@@ -9,11 +53,11 @@
 - Qwen3.5-27B：同一对 GPU 依次运行 baseline/candidate，TP2/DP1、MTP0、关闭 CUDA graph。两侧实际后端相同：Fa3 full-attention prefill、FlashInfer decode、FlashQLA linear prefill、Triton linear decode。
 - GPU KV 容量 65536 tokens，running requests 32，请求上限32768，chunk/batch预算8192；小页256、大页256×32、旧小页状态槽128。27B CPU预算8192 MiB/TP rank；MTP并发8和DP/CPU专项4096 MiB/rank；PD专项1024 MiB/rank。
 - R8上传tar SHA256：`fc329aa845f507fea9249707771c75276051aea8d200f84742b9e91e328f8da1`。R10：`46e489e9e9b85cf15a518708c27bc1eeced583e16c7b3cbf18fdfc389cc52466`。
-- 最终R12上传tar SHA256：`0c900118b9cbd83399f761cc8fb1052d4ef32c320b404b8728dce7d1cd31b6d9`。本轮14个变更Python文件与该快照逐文件SHA256一致。
+- 历史R12上传tar SHA256：`0c900118b9cbd83399f761cc8fb1052d4ef32c320b404b8728dce7d1cd31b6d9`。R12交付时的14个变更Python文件与该快照逐文件SHA256一致；R15改变了其中两个文件。
 
 早期0.8B对比曾出现baseline的FlashQLA降级到Triton，该组不用于性能归因。首次shape编译和拆批抖动保留在原始记录中，不通过删除异常波使结果变好。下述短输出负载不是饱和吞吐测试。
 
-## 本轮修复与证据
+## R3–R12修复与证据
 
 | 问题 | 修复及验证 |
 |---|---|
@@ -21,7 +65,7 @@
 | 任意终点与MTP状态 | 8193最后一个输入token进入decode时仍捕获prompt endpoint；保存实际accepted conv窗口/SSM row，私有packed尾槽重建后更新来源；HEAD使用独立输出缓冲命名空间。 |
 | 输出发布约49.56ms | 首次pinned页分配35.53ms、state分配9.03ms是主要热点。启动预留有界arena，消除请求内大块`cudaHostAlloc`；窗口拥有独立storage边界，lease/COW/flush/序列化及OOM生命周期已验证。 |
 | 折叠流水线额外等待/计算 | HEAD和aux修复批量执行；shared forward generation阻止伙伴已开始forward时仍睡20ms；max-output门控保留PASS握手和延迟释放，但不再白算达到输出上限后的整轮。 |
-| capture与搬运同步 | pinned元数据异步上传；最后一页KV与state/seed共用完成等待，多页GPU临时空间仍最多一页。normal模式后台准备CPU快照，主调度统一提交；onload和PD发布仍同步。 |
+| capture与搬运同步 | pinned元数据异步上传；offload的最后一页KV与state/seed共用完成等待；R15另修复onload逐页临时空间复用。normal模式后台准备CPU快照，主调度统一提交；onload和PD发布仍同步。 |
 | R8发布可见性竞态（P1） | R7后台commit可让两个TP rank在同tokens/length处取得不同历史：真实CPU cache＋TP2 Gloo复现rank0 origins222/state22、rank1 origins111/state11。R8 worker仅prepare，主调度交集完成epoch后commit/discard、释放hold并ACK。另修复candidate查询后被evict导致`acquire=None`的异常。 |
 | R9首轮MTP布局错误 | 只移除无效draft行，却遗漏GDN/FA3的fixed4布局假设。真实模型20轮有320项比较失败；该运行不是收益证据。R10让attention builder、page table及graph元数据按实际请求/候选边界构造。 |
 | 可变行数触发重复JIT | R11把实际行数改为runtime参数；H100改前/改后各384项检查通过，capture选择kernel变体32→4，MTP start-location变体89→6。R12启动预热有限BLOCK变体：独立空Triton cache的H100专项348项通过，预热后行数0..32及normal/prefill/DP局部边界无新变体，conv/SSM/KV及请求索引字节不变。 |
@@ -56,13 +100,13 @@ R12 DP2、每副本TP1、双微批、MTP3真实服务完成26请求、84项check
 
 27B非逐位一致的记录集中于拆批边界，主要影响首token及过渡处的第2/最后token，与batch3/5/7的计算形状相关；尚未用固定hidden seed纯head实验完成因果确认。返回token的标量logprob一致，也不等于全部vocabulary logits一致。
 
-PD证据明确来自R3。其20个PD/`pd_io_struct.py`文件与R8哈希相同，但共用ExactPrefixCache/CPU cache已有变化，不能据此冒充R8或最终R12整条PD路径重验。该TP1/MTP0组也不证明异构TP、PD＋MTP或跨机带宽性能。
+PD证据明确来自R3。其20个PD/`pd_io_struct.py`文件与R8哈希相同，但共用ExactPrefixCache/CPU cache已有变化，不能据此冒充R8或历史R12整条PD路径重验。该TP1/MTP0组也不证明异构TP、PD＋MTP或跨机带宽性能。
 
 ## 性能：历史回退与尚存问题
 
 原始0.8B、MTP step3、8并发257输入/8输出的历史回退是baseline TPOT **2.32ms→13.01ms**，总延迟99.96ms→192.09ms。它是本轮调查的起点，不是最终候选性能。
 
-**最终R12**使用同一原负载连续两次20轮，保留全部40波，每侧320个warm；共704个HTTP请求、1312项harness比较全部通过，HTTP错误0，候选320次warm全命中。seed→warm的320组IDs均相同；294组返回标量logprob逐位相同，其余最大绝对差0.0034699291，不能称为全部bitwise通过。其他服务无请求时执行的完整合并计时如下：
+**历史R12**使用同一原负载连续两次20轮，保留全部40波，每侧320个warm；共704个HTTP请求、1312项harness比较全部通过，HTTP错误0，候选320次warm全命中。seed→warm的320组IDs均相同；294组返回标量logprob逐位相同，其余最大绝对差0.0034699291，不能称为全部bitwise通过。其他服务无请求时执行的完整合并计时如下：
 
 | 指标 | baseline | R12 | 均值变化 |
 |---|---:|---:|---:|
@@ -80,7 +124,7 @@ PD证据明确来自R3。其20个PD/`pd_io_struct.py`文件与R8哈希相同，�
 |---|---|---|---|
 | R8 | 73.969 / 2.255 / 90.001 | 51.974 / 2.756 / 71.544 | TPOT仍约+20%，按全量均值为+22.2%。 |
 | R11首次 | 73.942 / 2.26816 / 90.053 | 52.964 / 3.65916 / 78.843 | 有限BLOCK首次JIT仍发生在请求内。 |
-| R11完整重跑 | 73.321 / 2.29844 / 89.680 | 50.877 / 2.65470 / 69.743 | TPOT仍+15.5%；不是最终R12结果。 |
+| R11完整重跑 | 73.321 / 2.29844 / 89.680 | 50.877 / 2.65470 / 69.743 | TPOT仍+15.5%；不是历史R12结果。 |
 
 R10完整运行另保留在工件中：candidate TPOT mean3.3826ms、median2.5008ms、p95为10.2915ms，baseline mean2.2164ms；round9/18约70ms停顿。R11首次运行median2.440ms、p95为10.122ms；缓存全量扫描确认请求窗口内新编译四个变体：start-location的BLOCK8/32及capture选择的BLOCK8/32，源文件到cubin间隔24/24/32/40ms，与round1/19的三个长gap重叠。这证明停顿内发生首次编译，不能把每一毫秒都归因于编译。`r11-tail-jit-audit`中的剔除波次分析仅用于诊断，**不替换任何完整性能结果**。
 
@@ -135,6 +179,12 @@ exp -m "MTP8 exact checkpoint original workload twenty waves" \
 
 | 内容 | 工件目录 | exp ID前缀 |
 |---|---|---|
+| R15原负载40轮及128输出20轮 | `r15-service-analysis/`（含原始请求、失败及汇总） | 本地`260910-123942/124116/124156`；最后一组exit1 |
+| R15 Agent/非greedy/CPU压力及严格cold | `r15-http-functional/` | 本地`260910-124918/125022/125104`；strict-cold单列在`diagnostic.json` |
+| R12同输入复核R15的严格cold失败 | `r15-http-functional/r12-same-input-async-control/` | 本地`260910-125547`；逐请求跨版本核对`root-r12-r15-comparison.json` |
+| R15恢复边界与真实CPU cache | `r15-restore-fence-contract/` | `260910-123055`红、`123147`绿；矩阵`123858`、cache `124129`；临时runner语法失败`123833`保留 |
+| R12/R15 GPU恢复、临时显存及随机槽位 | `r15-onload-gpu-contract/` | 远端`260910-123458/123638/123758/124545/124604` |
+| R13/R14未保留的MTP尝试 | `tpot-priming-analysis/`、`r14-one-candidate-contract/`、`r14-two-row-gpu-contract/` | 完整逐运行记录见目录内meta/analysis；源码在`source-snapshots-r13-r15/` |
 | R8 P1先红后绿 | `r8-review-regressions/` | `260910-093103`红；`093115/093243`绿 |
 | R8 MTP原负载20轮 | `tpot-candidate-twenty-r8/` | `260910-093658`，exit0 |
 | R9真实模型失败 | `tpot-candidate-twenty-r9/` | `260910-095145`，exit1 |
@@ -157,4 +207,4 @@ exp -m "MTP8 exact checkpoint original workload twenty waves" \
 | R8 DP/CPU及严格重放审计 | `dp-r8/` | `260910-094012`原DP exit1；`094051`CPU；`094130`审计 |
 | R3 PD短/长输入 | `pd-r3/` | `260910-083441/083442`、`083520/083521` |
 
-最终R12的性能、Agent恢复、非greedy和DP MTP各自保留独立原始工件；较早R3/R8的PD、CPU压力和27B证据保留其原快照范围，不冒充最终快照重验。
+历史R12的性能、Agent恢复、非greedy和DP MTP各自保留独立原始工件；较早R3/R8的PD、CPU压力和27B证据保留其原快照范围，不冒充最终快照重验。

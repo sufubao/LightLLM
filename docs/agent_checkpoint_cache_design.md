@@ -42,6 +42,8 @@
 
 MTP CPU 页键还记录 successor 或终端标记，因为 draft slot i 可能依赖 token[i+1]。恢复末槽到请求私有 KV，再用 H@L 和本次 token[L] 重建 draft 尾部，并为这个 packed 槽赋新来源；捕获还冻结 packed 尾槽，防止下一批 proposal 提前改写它。DP 的单批次 draft 修复不能重放双微批 CUDA Graph，采用已有的普通执行路径；正常 DP 双微批仍使用图重放。
 
+普通模式完整命中的恢复把缺失 KV、请求索引、conv/SSM 和 output seed 排在同一 CUDA stream 上，最后统一等待一次，然后发布请求恢复状态并关闭 CPU lease。`load_kv(wait=False)` 的调用方必须保持 lease 和源索引有效，直到这一等待完成；复制异常也必须等待后才能释放。逐页临时 GPU tensor 在该 stream 上循环复用，避免后一页分配时仍持有前一页。部分命中和 PD 保留各自的显式等待；该改动减少恢复屏障，不改变请求的 READY 协议，也不代表 onload 已能与活动 decode 并行。
+
 ### 当前限制
 
 - **CPU onload 和 PD 发布仍有同步屏障，CPU cache 锁会跨页拷贝等待。** 普通模式 offload 在后台完成，活动 decode 不等待该复制；新请求的目录查找仍可能等待 worker 持有的锁。尚未实现 `LOAD_WAIT`、HEAD_ONLY 与 onload 并行，不能称为全异步 CPU cache。

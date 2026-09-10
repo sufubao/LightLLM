@@ -4,9 +4,10 @@ The caller coordinates candidate selection and commit across its TP group.  This
 module never performs distributed collectives.  In particular, a successful
 ``prepare`` is private until every participating rank can commit the checkpoint.
 
-Transfers are synchronous on the producing CUDA stream in this first version.
+Transfers use the caller's current CUDA stream. KV onload waits by default;
+callers may defer that wait to a later fence covering KV and state together.
 Sources must already describe a frozen, committed model position; reading a live
-request's state after another forward has started is not safe.  Returned leases
+request's state after another forward has started is not safe. Returned leases
 own the CPU source until onload/export finishes, including across ``clear``.
 """
 
@@ -637,12 +638,14 @@ class CpuCheckpointCache:
             if entry.retired and entry.leases == 0:
                 self._drop_entry(entry)
 
-    def load_kv(self, lease, kv_buffer, mem_indexes, start=0):
+    def load_kv(self, lease, kv_buffer, mem_indexes, start=0, *, wait=True):
         """Load [start, lease.length) into the corresponding destination indexes.
 
         ``mem_indexes`` contains only that missing range, not the reused prefix.
-        The lease must remain open through this method.  Destination state is
-        restored separately by the model-specific committed-state adapter.
+        With wait=False the caller must retain the lease and keep mem_indexes
+        unchanged until the current stream finishes all readers. Copy errors
+        fence before returning.
+        Destination state is restored separately by the model-specific adapter.
         """
         with self._lock:
             lease._check_open()
@@ -660,15 +663,25 @@ class CpuCheckpointCache:
                     source = page.tensor[:, begin - page_start : end - page_start].to(
                         device=kv_buffer.device, non_blocking=kv_buffer.is_cuda
                     )
-                    indexes = mem_indexes[begin - start : end - start].to(device=kv_buffer.device, dtype=torch.long)
+                    # Upload pinned allocator indexes before converting their
+                    # dtype; a CPU cast would discard the pinned allocation.
+                    indexes = (
+                        mem_indexes[begin - start : end - start]
+                        .to(device=kv_buffer.device, non_blocking=kv_buffer.is_cuda)
+                        .long()
+                    )
                     kv_buffer.index_copy_(1, indexes, source)
-            finally:
-                # Even a later allocation/copy failure must finish H2D readers
-                # before the caller releases its lease on arena windows.
-                try:
+                    # Same-stream allocator reuse bounds scratch space to one
+                    # page without keeping a list of pending GPU page tensors.
+                    source = indexes = None
+            except BaseException:
+                self._finish_stream((kv_buffer,))
+                raise
+            else:
+                if wait:
                     self._finish_stream((kv_buffer,))
-                finally:
-                    source = indexes = page = None
+            finally:
+                source = indexes = page = None
 
     def export(self, lease, known_page_keys=()):
         """Return torch.save-compatible CPU payload; retain lease until serialized."""

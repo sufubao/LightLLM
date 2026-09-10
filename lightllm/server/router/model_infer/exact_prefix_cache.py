@@ -631,6 +631,10 @@ class ExactPrefixCache:
             return
         try:
             origins = lease.origins.tolist()
+            # A normal complete hit needs no draft repair before HEAD_ONLY.
+            # Queue its KV, canonical state and seed on one stream, then fence
+            # once while the CPU lease still protects every source window.
+            join_restore = self.args.run_mode == "normal" and length == len(tokens)
             # The last packed KV slot must be private before the draft adapter
             # rebuilds its sampling-dependent tail.
             shared_limit = length - 1 if self.args.mtp_step else length
@@ -654,23 +658,30 @@ class ExactPrefixCache:
             indexes = self.mem_manager.alloc(needed)
             if gpu_length:
                 self.req_manager.req_to_token_indexs[req.req_idx, :gpu_length] = values.to(
-                    device="cuda", dtype=torch.int32
+                    device="cuda", dtype=torch.int32, non_blocking=join_restore
                 )
             if needed:
-                self.cache.load_kv(lease, self.mem_manager.kv_buffer, indexes, start=gpu_length)
-                self.req_manager.req_to_token_indexs[req.req_idx, gpu_length:length] = indexes.to(device="cuda")
+                self.cache.load_kv(lease, self.mem_manager.kv_buffer, indexes, start=gpu_length, wait=not join_restore)
+                self.req_manager.req_to_token_indexs[req.req_idx, gpu_length:length] = indexes.to(
+                    device="cuda", non_blocking=join_restore
+                )
             req.shared_kv_node = node
             event = torch.cuda.Event()
             event.record()
             snapshot = LinearStateSnapshot(lease.conv_state, lease.ssm_state, length, event)
-            self.req_manager.restore_linear_state(snapshot, req.req_idx).synchronize()
+            restored = self.req_manager.restore_linear_state(snapshot, req.req_idx)
+            seed = lease.output_seed
+            if join_restore:
+                output_seed = seed.unsqueeze(0).to(device="cuda", non_blocking=True)
+                torch.cuda.current_stream().synchronize()
+            else:
+                restored.synchronize()
             req.cur_kv_len = length
             req.exact_kv_origins = origins
             req.shm_req.shm_cur_kv_len = length
             req.shm_req.prompt_cache_len = length
-            seed = lease.output_seed
             if length == len(tokens):
-                req.exact_output_seed = seed.unsqueeze(0).to(device="cuda")
+                req.exact_output_seed = output_seed if join_restore else seed.unsqueeze(0).to(device="cuda")
             elif self.args.mtp_step:
                 self.resume_auxiliary(req, seed.unsqueeze(0).to(device="cuda"), int(tokens[length]))
             self.stats["hits"] += 1

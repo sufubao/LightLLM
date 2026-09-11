@@ -327,7 +327,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-        sampling_params.verify_vocab_parallel_sampling(self.args)
+        SamplingParams.verify_vocab_parallel_sampling(sampling_params.to_dict(), self.args)
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)

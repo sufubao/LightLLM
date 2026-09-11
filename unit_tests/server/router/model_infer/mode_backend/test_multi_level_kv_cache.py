@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from collections import deque
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -12,6 +13,7 @@ from lightllm.server.multi_level_kv_cache import (
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as multi_level_kv_cache_impl
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
+from lightllm.server.core.objs import Req
 
 
 def test_cache_tiers_reassignment_is_rejected():
@@ -157,3 +159,57 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     assert freed_big_pages == [8, 9]
     assert req.tail_small_page_buffer_id is None
     assert req.hybrid_len_to_big_page_id == {}
+
+
+@pytest.mark.parametrize("cached_gpu_len", [0, 1024, 1280])
+@pytest.mark.parametrize("available_tokens", [0, 4096])
+def test_cpu_tail_load_uses_actual_endpoint_and_releases_pages(monkeypatch, cached_gpu_len, available_tokens):
+    shm_req = Req()
+    shm_req.input_len = 2049
+    shm_req.token_hash_page_len_list.fill([1024, 2048])
+    shm_req.cpu_cache_match_page_indexes.fill([10, 11])
+    shm_req.cpu_cache_match_tail_len = 1792
+    req = SimpleNamespace(
+        shm_req=shm_req,
+        cur_kv_len=cached_gpu_len,
+        req_idx=0,
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+    )
+    original_indexes = torch.arange(2048, dtype=torch.int32) + 1000
+    req_manager = SimpleNamespace(
+        req_to_token_indexs=original_indexes.clone().unsqueeze(0),
+        mem_manager=SimpleNamespace(alloc=lambda need_size: torch.arange(need_size, dtype=torch.int32) + 3000),
+    )
+    context = SimpleNamespace(get_can_alloc_token_num=lambda: available_tokens, req_manager=req_manager)
+    monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
+    # Exercise the loading plan on CPU; the transfer kernel itself is unchanged.
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", Mock())
+    operator = Mock()
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(
+        is_master_in_dp=True,
+        radix_cache=None,
+        model=SimpleNamespace(mem_manager=SimpleNamespace(operator=operator), req_manager=req_manager),
+    )
+    module.need_sync_compute_stream = lambda: False
+    module.cpu_cache_client = Mock()
+    module.init_sync_group = object()
+
+    module.load_cpu_cache_to_reqs([req])
+
+    assert shm_req.token_hash_page_len_list.get_all() == [1024, 2048]
+    module.cpu_cache_client.deref_pages.assert_called_once_with(page_list=[10, 11])
+    module.cpu_cache_client.lock.release.assert_called_once()
+    if available_tokens:
+        assert req.cur_kv_len == shm_req.shm_cur_kv_len == 1792
+        assert shm_req.cpu_prompt_cache_len == 1792 - cached_gpu_len
+        kwargs = operator.load_cpu_cache_to_gpu.call_args.kwargs
+        start = 0 if cached_gpu_len < 1024 else 1024
+        expected = torch.cat([original_indexes[start:cached_gpu_len], torch.arange(1792 - cached_gpu_len) + 3000])
+        assert torch.equal(kwargs["mem_indexes"], expected)
+        assert kwargs["page_indexes"].tolist() == ([10, 11] if start == 0 else [11])
+    else:
+        assert req.cur_kv_len == cached_gpu_len
+        operator.load_cpu_cache_to_gpu.assert_not_called()

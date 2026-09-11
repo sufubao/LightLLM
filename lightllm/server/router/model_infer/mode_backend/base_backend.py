@@ -780,7 +780,8 @@ class ModeBackend:
         g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
-        if recover_paused:
+        # D 已无可运行请求时立即尝试恢复，避免空转 100 轮（每轮 sleep 20ms）。
+        if recover_paused or (paused_reqs and self.args.run_mode == "decode" and not prefill_reqs and not decode_reqs):
             self._recover_paused_reqs(paused_reqs, can_alloc_token_num)
 
         # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，

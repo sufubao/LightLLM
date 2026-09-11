@@ -62,7 +62,9 @@ class PDDecodeNode(ChunkedPrefillBackend):
             # 计入重新引用的缓存和下一轮 decode 所需空间，避免刚恢复就再次暂停。
             reserve = req.get_cur_total_len() - 1 + req.decode_need_token_num()
             if reserve > can_alloc_token_num:
-                break
+                # 后面的短请求可能有足够空间恢复；暂停期间 Router 不再接纳新请求，
+                # 继续扫描不会让新请求持续插队而饿死当前长请求。
+                continue
             prompt_cache_len = req.shm_req.prompt_cache_len
             if g_infer_context.is_hybrid_att_model:
                 req._hybrid_match_radix_cache()

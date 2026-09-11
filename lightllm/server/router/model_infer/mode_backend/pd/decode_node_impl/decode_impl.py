@@ -65,26 +65,39 @@ class PDDecodeNode(ChunkedPrefillBackend):
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
-            if self.is_master_in_dp and req_obj.infer_aborted and req_obj.pd_task_num != 0:
+            # D 节点的请求未结束时会反复进入该过滤逻辑，最多发送 6 次
+            # PDAbortReq，既提高 abort 消息被传输层处理的概率，也避免持续重复发送。
+            pd_abort_req_send_count = getattr(req_obj, "pd_abort_req_send_count", 0)
+            if (
+                self.is_master_in_dp
+                and req_obj.infer_aborted
+                and req_obj.pd_task_num != 0
+                and pd_abort_req_send_count < 6
+            ):
                 self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
+                req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
 
             if req_obj.pd_task_num != (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                 continue
 
             if req_obj.pd_task_failed_num > 0:
-                # 强制停止
+                # KV 传输失败：强制补 finish token 并结束。
+                # abort 优先标 ABORTED；纯传输错误标 ERROR（不再误用 STOP）。
                 if not req_obj.finish_status.is_finished():
-                    req_obj.cur_output_len += 1
-                    req_obj.set_next_gen_token_id(next_token_id=0, logprob=0.0, output_len=req_obj.cur_output_len)
-                    req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
-
+                    finish_status = (
+                        FinishStatus.FINISHED_ABORTED if req_obj.infer_aborted else FinishStatus.FINISHED_ERROR
+                    )
+                    req_obj.finish_status.set_status(finish_status)
                     if self.is_master_in_dp:
-                        req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-                        req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                        req_obj.shm_req.finish_status.set_status(FinishStatus.FINISHED_STOP)
-                        req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
-                        logger.error(f"req_id: {req_obj.req_id} forced to finished, it exits kv transfer error")
+                        # 内部统一在已有输出末尾追加 EOS 作为 finish token。
+                        req_obj.shm_req.mark_simulated_finished(
+                            finish_status,
+                            output_len=req_obj.cur_output_len,
+                        )
+                        logger.error(
+                            f"req_id: {req_obj.req_id} forced to finished "
+                            f"(reason={req_obj.finish_status.get_finish_reason()}), kv transfer error"
+                        )
 
                 # 提前释放有问题的 mem_index
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
@@ -145,15 +158,16 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
                 req_obj.cur_kv_len += len(mem_indexes)
 
-                # 如果当前是linear att 混合模型，则需要创建一个linear att 状态的传输任务
-                if g_infer_context.is_linear_att_mixed_model:
+                # 混合注意力模型还需接收请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
+                # 通过本地 req_idx 定位运行态 buffer 的恢复位置。
+                if g_infer_context.is_hybrid_att_model:
                     self._create_pd_trans_task(
                         req_obj=req_obj,
                         mem_indexes=[],
                         kv_start_index=input_len,
                         kv_end_index=input_len,
                         group=group,
-                        page_kind="linear_att_state",
+                        page_kind="att_state",
                     )
         else:
             assert req_obj.cur_kv_len == input_len - 1
@@ -192,7 +206,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
         if page_kind == "kv":
             req_idx = None
-        elif page_kind == "linear_att_state":
+        elif page_kind == "att_state":
             req_idx = req_obj.req_idx
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")

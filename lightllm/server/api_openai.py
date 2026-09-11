@@ -23,20 +23,22 @@ from typing import Any, AsyncGenerator, Optional, Union, List, Dict, Tuple
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.error_utils import ClientDisconnected
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
+from .api_errors import create_error_response
+from .api_stream_obj import CustomStreamingResponse
 from .api_models import (
     ChatCompletionRequest,
     CompletionRequest,
@@ -49,6 +51,7 @@ from .api_models import (
     ToolCall,
     UsageInfo,
     PromptTokensDetails,
+    CompletionTokensDetails,
     ChatMessage,
     ChatCompletionResponseChoice,
     ChatCompletionResponse,
@@ -61,14 +64,38 @@ logger = init_logger(__name__)
 
 
 async def _safe_stream_wrapper(stream_generator):
-    """Wrap a streaming generator to catch ValueError (e.g. input too long) and yield an SSE error
-    event instead of letting the exception propagate to Starlette which prints a long traceback."""
+    """Convert generation errors to SSE events after the response has started."""
+    first_chunk_sent = False
     try:
         async for item in stream_generator:
+            first_chunk_sent = True
             yield item
-    except ValueError as e:
+    except InvalidRequestError as e:
+        if not first_chunk_sent:
+            raise
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except ValueError as e:
+        if not first_chunk_sent:
+            # Request setup is lazy for streaming responses, so validation
+            # errors raised here bypass the endpoint's normal ValueError
+            # handler. Convert them to the dedicated request-error type so
+            # the application-level handler returns HTTP 400.
+            raise InvalidRequestError(str(e)) from e
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except ServerBusyError as e:
+        logger.debug("Server busy detail: %s", e.message)
+        if not first_chunk_sent:
+            raise
+        error_data = json.dumps(
+            {"error": {"message": SERVER_BUSY_MESSAGE, "type": "server_error", "code": "stream_error"}},
+            ensure_ascii=False,
+        )
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
     except ClientDisconnected as e:
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
@@ -85,26 +112,6 @@ def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
     for field in response_nulls:
         d[field] = None
     return json.dumps(d, ensure_ascii=False)
-
-
-def create_error_response(
-    status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
-) -> JSONResponse:
-    from .api_http import g_objs
-
-    if err_type is None:
-        if status_code.value >= 500:
-            err_type = "InternalServerError"
-        elif status_code == HTTPStatus.NOT_FOUND:
-            err_type = "NotFoundError"
-        else:
-            err_type = "BadRequestError"
-
-    g_objs.metric_client.counter_inc("lightllm_request_failure")
-    return JSONResponse(
-        {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
-        status_code=status_code.value,
-    )
 
 
 def _process_tool_call_id(
@@ -178,19 +185,21 @@ def _process_reasoning_stream(
     index: int,
     delta: str,
     reasoning_parser_dict: Dict[int, ReasoningParser],
-    content: Dict[str, Any],
+    metadata: Dict[str, Any],
     request: ChatCompletionRequest,
 ) -> tuple[Optional[str], str]:
-    """Process reasoning content in streaming response"""
+    """Process reasoning content and update its token usage."""
     if index not in reasoning_parser_dict:
-        request_enable_reasoning = _is_force_thinking_mode(request)
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
-            request_enable_reasoning,
+            _is_force_thinking_mode(request),
         )
-    reasoning_parser = reasoning_parser_dict[index]
-    return reasoning_parser.parse_stream_chunk(delta)
+    parser = reasoning_parser_dict[index]
+    token_id = metadata.get("id")
+    if token_id is not None:
+        parser.update_reasoning_token_count(int(token_id))
+    return parser.parse_stream_chunk(delta)
 
 
 def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest):
@@ -226,20 +235,8 @@ def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
     return [arguments]
 
 
-async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    from .api_http import g_objs
-
-    if request.logit_bias is not None:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The logit_bias parameter is not currently supported",
-        )
-
-    if request.function_call != "none":
-        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
-
-    created_time = int(time.time())
-
+def _build_multimodal_params(request: ChatCompletionRequest) -> MultimodalParams:
+    """Build LightLLM multimodal inputs from chat content parts."""
     multimodal_params_dict = {"images": [], "audios": []}
     for message in request.messages:
         if isinstance(message.content, list):
@@ -284,6 +281,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     else:
                         raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
 
+    return MultimodalParams(**multimodal_params_dict)
+
+
+def _select_chat_template_tools(request: ChatCompletionRequest) -> Optional[List[dict]]:
+    """Select the tool schemas exposed to the model's chat template."""
     tools = None
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False
@@ -302,6 +304,24 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         else:
             tools = [item.function.model_dump(exclude_none=True) for item in request.tools]
 
+    return tools
+
+
+async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
+    from .api_http import g_objs
+
+    if request.logit_bias is not None:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logit_bias parameter is not currently supported",
+        )
+
+    if request.function_call != "none":
+        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
+
+    created_time = int(time.time())
+    multimodal_params = _build_multimodal_params(request)
+    tools = _select_chat_template_tools(request)
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
         "do_sample": request.do_sample,
@@ -349,58 +369,60 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
     sampling_params.verify()
-    multimodal_params = MultimodalParams(**multimodal_params_dict)
-
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
 
     # Non-streaming case
     if not request.stream:
+        reasoning_parser = get_env_start_args().reasoning_parser
+        request_enable_reasoning = _is_force_thinking_mode(request) if reasoning_parser else False
         final_output_dict = collections.defaultdict(list)
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
         prompt_tokens_dict = {}
         prompt_cache_len_dict = {}
         completion_tokens = 0
+        reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             from .req_id_generator import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             count_output_tokens_dict[sub_req_id] += 1
             final_output_dict[sub_req_id].append(request_output)
+            if reasoning_parser:
+                parser = reasoning_parser_dict.get(sub_req_id)
+                if parser is None:
+                    parser = ReasoningParser(
+                        reasoning_parser,
+                        stream_reasoning=False,
+                        force_reasoning=request_enable_reasoning,
+                    )
+                    reasoning_parser_dict[sub_req_id] = parser
+                token_id = metadata.get("id")
+                if token_id is not None:
+                    parser.update_reasoning_token_count(int(token_id))
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
                 prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
+        prompt_tokens = prompt_tokens_dict[sub_ids[0]]
+        completion_tokens = sum(count_output_tokens_dict[sub_req_id] for sub_req_id in sub_ids)
+        cached_tokens = prompt_cache_len_dict.get(sub_ids[0], 0)
+        reasoning_tokens = sum(reasoning_parser_dict[sub_req_id].reasoning_tokens for sub_req_id in sub_ids)
+
         for i in range(request.n):
             sub_req_id = sub_ids[i]
-            prompt_tokens = prompt_tokens_dict[sub_req_id]
-            completion_tokens = count_output_tokens_dict[sub_req_id]
-            cached_tokens = prompt_cache_len_dict.get(sub_req_id, 0)
-            usage = UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
-            )
-
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
 
             # Handle reasoning content
             reasoning_text = None
-            reasoning_parser = get_env_start_args().reasoning_parser
             if reasoning_parser:
-                request_enable_reasoning = _is_force_thinking_mode(request)
                 try:
-                    parser = ReasoningParser(
-                        model_type=reasoning_parser,
-                        stream_reasoning=False,
-                        force_reasoning=request_enable_reasoning,
-                    )
+                    parser = reasoning_parser_dict[sub_req_id]
                     reasoning_text, text = parser.parse_non_stream(text)
                 except Exception as e:
                     logger.error(f"Reasoning parsing error: {e}")
@@ -454,6 +476,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 finish_reason=finish_reason,
             )
             choices.append(choice)
+        completion_tokens_details = None
+        if reasoning_parser:
+            completion_tokens_details = CompletionTokensDetails(reasoning_tokens=reasoning_tokens)
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+            completion_tokens_details=completion_tokens_details,
+        )
         resp = ChatCompletionResponse(
             id=group_request_id, created=created_time, model=request.model, choices=choices, usage=usage
         )
@@ -511,7 +543,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # Handle reasoning content
             if get_env_start_args().reasoning_parser:
                 reasoning_text, delta = _process_reasoning_stream(
-                    choice_index, delta, reasoning_parser_dict, request_output, request
+                    choice_index, delta, reasoning_parser_dict, metadata, request
                 )
                 if reasoning_text:
                     if request.separate_reasoning:
@@ -747,11 +779,17 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 )
                 yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls)}\n\n"
 
+        reasoning_parser = get_env_start_args().reasoning_parser
+        completion_tokens_details = None
+        if reasoning_parser:
+            reasoning_tokens = sum(parser.reasoning_tokens for parser in reasoning_parser_dict.values())
+            completion_tokens_details = CompletionTokensDetails(reasoning_tokens=reasoning_tokens)
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
             prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+            completion_tokens_details=completion_tokens_details,
         )
         usage_chunk = ChatCompletionStreamResponse(
             id=chat_completion_id,
@@ -765,7 +803,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         yield "data: [DONE]\n\n".encode("utf-8")
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(
+    return CustomStreamingResponse(
         _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
     )
 
@@ -876,7 +914,7 @@ async def _process_prompts_completion(
             prompts[0], sampling_params, multimodal_params, raw_request, request, created_time
         )
 
-    async def process_single_prompt(prompt: Union[str, List[int]], prompt_index: int):
+    async def process_single_prompt(prompt: Union[str, List[int]]):
         if len(prompts) > 1:
             individual_sampling_params = SamplingParams()
             individual_sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
@@ -893,14 +931,12 @@ async def _process_prompts_completion(
             prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
-        return await _collect_generation_results(
-            generator, request, prompt_str, prompt_index, individual_sampling_params
-        )
+        return await _collect_generation_results(generator, request, prompt_str, individual_sampling_params)
 
-    tasks = [asyncio.create_task(process_single_prompt(prompt, i)) for i, prompt in enumerate(prompts)]
+    tasks = [asyncio.create_task(process_single_prompt(prompt)) for prompt in prompts]
 
-    results = await asyncio.gather(*tasks)
-    return _build_completion_response(results, request, created_time, len(prompts) > 1)
+    results_by_prompt = await asyncio.gather(*tasks)
+    return _build_completion_response(results_by_prompt, request, created_time, len(prompts) > 1)
 
 
 async def _handle_streaming_completion(
@@ -973,72 +1009,82 @@ async def _handle_streaming_completion(
         yield "data: [DONE]\n\n"
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(
+    return CustomStreamingResponse(
         _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
     )
 
 
 async def _collect_generation_results(
-    generator, request: CompletionRequest, prompt: str, prompt_index: int, sampling_params: SamplingParams
+    generator, request: CompletionRequest, prompt: str, sampling_params: SamplingParams
 ):
-    final_output = []
-    count_output_tokens = 0
-    finish_reason = None
-    prompt_tokens = 0
-    prompt_cache_len = 0
-    token_infos = [] if request.logprobs is not None else None
-    prompt_logprobs = None
-    prompt_token_ids = None
-    is_first_metadata = True
+    final_outputs = collections.defaultdict(list)
+    output_token_counts = collections.defaultdict(int)
+    finish_reasons = {}
+    prompt_tokens = {}
+    prompt_cache_lens = {}
+    token_infos = collections.defaultdict(list)
+    prompt_logprobs = {}
+    prompt_token_ids = {}
 
     async for sub_req_id, request_output, metadata, finish_status in generator:
-        if is_first_metadata:
-            prompt_logprobs = metadata.get("prompt_logprobs", None)
-            prompt_token_ids = metadata.get("prompt_token_ids", None)
-            is_first_metadata = False
+        if sub_req_id not in prompt_token_ids:
+            prompt_logprobs[sub_req_id] = metadata.get("prompt_logprobs")
+            prompt_token_ids[sub_req_id] = metadata.get("prompt_token_ids")
 
-        count_output_tokens += 1
-        final_output.append(request_output)
+        output_token_counts[sub_req_id] += 1
+        final_outputs[sub_req_id].append(request_output)
 
-        if request.logprobs is not None and token_infos is not None:
-            token_info = {
-                "text": request_output,
-                "logprob": metadata.get("logprob", None),
-                "id": metadata.get("id", None),
-            }
-            token_infos.append(token_info)
+        if request.logprobs is not None:
+            token_infos[sub_req_id].append(
+                {
+                    "text": request_output,
+                    "logprob": metadata.get("logprob"),
+                    "id": metadata.get("id"),
+                }
+            )
 
         if finish_status.is_finished():
-            finish_reason = finish_status.get_finish_reason()
-            prompt_tokens = metadata["prompt_tokens"]
-            prompt_cache_len = metadata.get("prompt_cache_len", 0)
+            finish_reasons[sub_req_id] = finish_status.get_finish_reason()
+            prompt_tokens[sub_req_id] = metadata["prompt_tokens"]
+            prompt_cache_lens[sub_req_id] = metadata.get("prompt_cache_len", 0)
 
-    # 处理停止序列剔除
-    final_text = "".join(final_output)
-    if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
-        valid_stop_strings = sampling_params.stop_sequences.to_strings()
-        for stop_str in valid_stop_strings:
-            stop_index = final_text.rfind(stop_str, max(0, len(final_text) - len(stop_str) - 20), len(final_text))
-            if stop_index != -1:
-                logger.debug(f"removed stop sequence in tail: '{final_text[stop_index:]}'")
-                final_text = final_text[:stop_index]
-                break
+    results = []
+    for sub_req_id in sorted(final_outputs)[: request.n]:
+        final_text = "".join(final_outputs[sub_req_id])
+        finish_reason = finish_reasons.get(sub_req_id)
 
-    return {
-        "index": prompt_index,
-        "text": final_text,
-        "finish_reason": finish_reason,
-        "prompt_tokens": prompt_tokens,
-        "prompt_cache_len": prompt_cache_len,
-        "completion_tokens": count_output_tokens,
-        "token_infos": token_infos,
-        "prompt_logprobs": prompt_logprobs,
-        "prompt_token_ids": prompt_token_ids,
-        "prompt_text": prompt,
-    }
+        if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
+            for stop_str in sampling_params.stop_sequences.to_strings():
+                stop_index = final_text.rfind(
+                    stop_str,
+                    max(0, len(final_text) - len(stop_str) - 20),
+                    len(final_text),
+                )
+                if stop_index != -1:
+                    logger.debug("removed stop sequence in tail: '%s'", final_text[stop_index:])
+                    final_text = final_text[:stop_index]
+                    break
+
+        results.append(
+            {
+                "text": final_text,
+                "finish_reason": finish_reason,
+                "prompt_tokens": prompt_tokens.get(sub_req_id, 0),
+                "prompt_cache_len": prompt_cache_lens.get(sub_req_id, 0),
+                "completion_tokens": output_token_counts[sub_req_id],
+                "token_infos": (token_infos[sub_req_id] if request.logprobs is not None else None),
+                "prompt_logprobs": prompt_logprobs[sub_req_id],
+                "prompt_token_ids": prompt_token_ids[sub_req_id],
+                "prompt_text": prompt,
+            }
+        )
+
+    return results
 
 
-def _build_completion_response(results: List[Dict], request: CompletionRequest, created_time: int, is_batch: bool):
+def _build_completion_response(
+    results_by_prompt: List[List[Dict]], request: CompletionRequest, created_time: int, is_batch: bool
+):
     from .api_http import g_objs
 
     choices = []
@@ -1046,24 +1092,28 @@ def _build_completion_response(results: List[Dict], request: CompletionRequest, 
     total_completion_tokens = 0
     total_cached_tokens = 0
 
-    for result in results:
-        text = result["text"]
-        if request.echo:
-            text = result["prompt_text"] + text
+    for prompt_results in results_by_prompt:
+        if not prompt_results:
+            continue
 
-        logprobs_data = _build_logprobs_data(result, request, g_objs.httpserver_manager.tokenizer)
+        total_prompt_tokens += prompt_results[0]["prompt_tokens"]
+        total_cached_tokens += prompt_results[0].get("prompt_cache_len", 0)
 
-        choice = CompletionChoice(
-            index=result["index"],
-            text=text,
-            finish_reason=result["finish_reason"],
-            logprobs=CompletionLogprobs(**logprobs_data) if logprobs_data else None,
-        )
-        choices.append(choice)
+        for result in prompt_results:
+            text = result["text"]
+            if request.echo:
+                text = result["prompt_text"] + text
 
-        total_prompt_tokens += result["prompt_tokens"]
-        total_completion_tokens += result["completion_tokens"]
-        total_cached_tokens += result.get("prompt_cache_len", 0)
+            logprobs_data = _build_logprobs_data(result, request, g_objs.httpserver_manager.tokenizer)
+            choices.append(
+                CompletionChoice(
+                    index=len(choices),
+                    text=text,
+                    finish_reason=result["finish_reason"],
+                    logprobs=CompletionLogprobs(**logprobs_data) if logprobs_data else None,
+                )
+            )
+            total_completion_tokens += result["completion_tokens"]
 
     usage = UsageInfo(
         prompt_tokens=total_prompt_tokens,

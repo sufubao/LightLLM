@@ -146,6 +146,44 @@ def auto_set_max_req_total_len(args) -> None:
     logger.info(f"auto derived max_req_total_len={args.max_req_total_len} from model config")
 
 
+def auto_set_fused_shared_experts(args) -> None:
+    """
+    Route fused shared experts to supported model families and write the final
+    decision to `args.enable_fused_shared_experts`.
+    """
+
+    if args.enable_fused_shared_experts:
+        logger.info("skip auto setting fused shared experts: already enabled")
+        return
+
+    if args.enable_ep_moe:
+        logger.info("do not enable fused shared experts: EP MoE uses a separate implementation")
+        return
+
+    model_dir = args.model_dir
+    if not model_dir:
+        logger.info("do not enable fused shared experts: model_dir is empty")
+        return
+
+    model_type = get_model_type(model_dir)
+    supported_model_types = {
+        "deepseek_v3",
+        "deepseek_v31",
+        "deepseek_v32",
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+    if model_type not in supported_model_types:
+        logger.info(f"do not enable fused shared experts: unsupported model_type={model_type}")
+        return
+
+    args.enable_fused_shared_experts = True
+    logger.info(f"auto enable fused shared experts for model_type={model_type}")
+
+
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
     for key in key_name:
@@ -157,8 +195,11 @@ def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
                 value = config_json["llm_config"][key]
             except:
                 value = config_json.get("text_config", {}).get(key)
-        if config_json.get("thinker_config") is not None:
-            value = config_json.get("thinker_config", {}).get("text_config").get(key)
+        thinker_config = config_json.get("thinker_config")
+        if isinstance(thinker_config, dict):
+            thinker_text_config = thinker_config.get("text_config")
+            if isinstance(thinker_text_config, dict):
+                value = thinker_text_config.get(key, value)
         if value is not None:
             return value
 
@@ -279,6 +320,12 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
 
     assert False, "error eos_token_id format in config.json"
     return
+
+
+def get_token_id(token: str) -> int:
+    from lightllm.server.build_prompt import tokenizer
+
+    return int(tokenizer.convert_tokens_to_ids(token))
 
 
 def get_model_architectures(model_path: str):
@@ -421,6 +468,11 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         return False
 
 
+def is_hybrid_att_model(model_path: str) -> bool:
+    """Models whose non-full attention state follows hybrid checkpoint pages."""
+    return is_linear_att_mixed_model(model_path)
+
+
 def get_model_type(model_path: str) -> Optional[str]:
     """Get model type from config.json"""
     try:
@@ -449,7 +501,15 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
         return "qwen3_coder"
 
     # Qwen3 series
-    if model_type in ["qwen3", "qwen3_moe", "qwen3_vl", "qwen3_vl_moe", "qwen3_vl_text", "qwen3_vl_moe_text"]:
+    if model_type in [
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_omni_moe",
+        "qwen3_vl",
+        "qwen3_vl_moe",
+        "qwen3_vl_text",
+        "qwen3_vl_moe_text",
+    ]:
         return "qwen25"
 
     # DeepSeek V3
@@ -481,6 +541,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_vl_moe",
         "qwen3_vl_text",
         "qwen3_vl_moe_text",
+        "qwen3_omni_moe",
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_text",
@@ -501,6 +562,19 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         return "gemma4"
 
     return None
+
+
+def auto_set_response_parsers(args) -> None:
+    """Infer response parsers from model config unless explicitly configured."""
+    if args.tool_call_parser is None:
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    if args.reasoning_parser is None:
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
 
 
 @lru_cache(maxsize=None)

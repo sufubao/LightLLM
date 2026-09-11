@@ -17,11 +17,14 @@ description: >-
 **`pd_master`**、**`prefill`**、**`decode`**。评测和 warmup 只访问
 **`pd_master` 的 HTTP 端口 `8089`**。
 
+`--pd_trans_mode` 可选 `nccl`（默认）和 `nixl`。本 skill 测试 NIXL，所以下面的
+prefill 和 decode 的启动命令必须统一显式传入 **`--pd_trans_mode nixl`**。
+
 Qwen3.5 与 Qwen3-8B 的关键差异：
 
 | 项 | Qwen3.5-0.8B NIXL PD 要点 |
 |---|---|
-| linear-att 状态 | PD 传输除了 KV page，还会传 `linear_att_state` 特殊页 |
+| attention 状态 | PD 传输除了 KV page，还会传 `att_state` 续算状态页（本模型为 conv/SSM） |
 | NIXL page size | 建议固定 **`--pd_kv_page_size 2048`**；`1024` 可能不足以容纳 linear-att 状态 |
 | page num | 建议 **`--pd_kv_page_num 16`** 起步，避免 page 池过大导致显存压力 |
 | cache 判断 | repeated prompt 可能只在 prefill 侧命中，decode 侧不一定 decode-only 命中 |
@@ -139,6 +142,7 @@ LOADWORKER=18 CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --run_mode prefill \
+  --pd_trans_mode nixl \
   --tp "${TP}" \
   --dp 1 \
   --host "${HOST}" \
@@ -158,6 +162,7 @@ LOADWORKER=18 CUDA_VISIBLE_DEVICES="${DECODE_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --run_mode decode \
+  --pd_trans_mode nixl \
   --tp "${TP}" \
   --dp 1 \
   --host "${HOST}" \
@@ -237,7 +242,7 @@ rg -n 'flexible-extract|strict-match|exact_match|Traceback|ERROR|can not find wa
 
 - prefill 侧会按 512 token 粒度逐步命中，例如 513 的第二次可命中 512。
 - decode 侧可能仍为 `gpu cache hit: False`、`gpu_prompt_cache_len:0`。
-- 只要 decode 未全命中，仍会出现 `recv WRITE request from prefill` 和 `linear_att_state` 传输。
+- 只要 decode 未全命中，仍会出现 `recv WRITE request from prefill` 和 `att_state` 传输。
 
 ### 简单重复 prompt
 
@@ -270,7 +275,7 @@ done
 ### 判定信号
 
 ```bash
-rg -n 'gpu cache hit:|recv WRITE request from prefill|start WRITE to decode node|linear_att_state|trans task ret success' \
+rg -n 'gpu cache hit:|recv WRITE request from prefill|start WRITE to decode node|att_state|trans task ret success' \
   "${LOG_DIR}/prefill.log" "${LOG_DIR}/decode.log" \
   | tee -a "${LOG_DIR}/summary.txt"
 ```
@@ -310,4 +315,3 @@ fuser -k 8089/tcp 8001/tcp 8002/tcp || true
 ps -eo pid,ppid,stat,cmd | rg 'lightllm::|api_server|hypercorn'
 nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 ```
-

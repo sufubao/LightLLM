@@ -9,6 +9,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
     SliceMixinTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
+from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
@@ -134,8 +135,11 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        infer_state=None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Backward compatible method that routes to platform-specific implementation."""
+        # Captures MoE topk expert ids for routed-experts metadata when enabled.
+        moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         return self.fuse_moe_impl(
             input_tensor=input_tensor,
             router_logits=router_logits,
@@ -149,7 +153,9 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
+            moe_capture_callback=moe_capture_callback,
             per_expert_scale=self.per_expert_scale,
+            shared_expert_gate=shared_expert_gate,
         )
 
     def low_latency_dispatch(
@@ -220,20 +226,26 @@ class FusedMoeWeight(BaseWeightTpl):
     def prefilled_group_gemm(
         self,
         num_recv_tokens_per_expert_list,
+        num_unaligned_recv_tokens_per_expert: torch.Tensor,
+        recv_src_metadata: torch.Tensor,
         recv_x: Tuple[torch.Tensor],
         recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
+        microbatch_index: int = 0,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
             num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
+            num_unaligned_recv_tokens_per_expert=num_unaligned_recv_tokens_per_expert,
+            recv_src_metadata=recv_src_metadata,
             recv_x=recv_x,
             recv_topk_idx=recv_topk_idx,
             recv_topk_weights=recv_topk_weights,
             w13=self.w13,
             w2=self.w2,
             hidden_dtype=hidden_dtype,
+            microbatch_index=microbatch_index,
         )
 
     def low_latency_combine(
@@ -317,6 +329,7 @@ class FusedMoeWeight(BaseWeightTpl):
             device_id=self.device_id_,
             num_experts=self.local_n_routed_experts,
         )
+        self.w1, self.w3 = w13_param_list
         self.w1_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[0])
         self.w3_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[1])
         self.w2_list: List[WeightPack] = self._get_expert_weight_list(self.w2)
@@ -339,7 +352,6 @@ class FusedMoeWeight(BaseWeightTpl):
         return weight_list
 
     def _load_weight(self, expert_idx_to_local_idx: Dict[int, int], weights: Dict[str, torch.Tensor]):
-        # Load each expert with TP slicing
         for expert_idx, local_expert_idx in expert_idx_to_local_idx.items():
             with self.lock:
                 self._load_expert(expert_idx, local_expert_idx, weights)

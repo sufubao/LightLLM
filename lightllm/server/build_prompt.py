@@ -132,6 +132,13 @@ def get_effective_chat_template_kwargs(request) -> dict:
     default_kwargs = getattr(get_env_start_args(), "default_chat_template_kwargs", None)
     if default_kwargs:
         kwargs.update(default_kwargs)
+    # Match ChatCompletionRequest's alias handling before applying request overrides.
+    if "thinking" not in kwargs and "enable_thinking" in kwargs:
+        kwargs["thinking"] = kwargs["enable_thinking"]
+    elif "enable_thinking" not in kwargs and "thinking" in kwargs:
+        kwargs["enable_thinking"] = kwargs["thinking"]
+    if request.reasoning_effort is not None:
+        kwargs["reasoning_effort"] = request.reasoning_effort
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
     return kwargs

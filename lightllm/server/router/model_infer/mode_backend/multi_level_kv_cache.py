@@ -6,8 +6,9 @@ import bisect
 from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
+from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.config_utils import is_linear_att_mixed_model
+from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
@@ -64,6 +65,15 @@ class MultiLevelKvCacheModule(object):
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
+            # 需要返回 prompt logprobs 的请求不应加载 cpu cache：
+            # 命中后会复用缓存 kv、跳过推理，拿不到对应 logprobs。
+            # match 侧通常已跳过；这里仍要 deref 已 match 的 page，避免引用泄漏。
+            if req.sampling_param.shm_param.prompt_logprobs >= 0:
+                if is_master_in_dp:
+                    req.shm_req.cpu_prompt_cache_len = 0
+                all_page_list.extend(page_list)
+                continue
+
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
             page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
@@ -105,8 +115,7 @@ class MultiLevelKvCacheModule(object):
                     page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
                         non_blocking=True
                     )
-                    # 因为在支持 linear att 以后，所有的页面加载必须要按照 page页面的整数倍来做，
-                    # 不然可能导致页面数据不完整，导致无法从kv中恢复完整的 linear att状态，所以
+                    # hybrid 页面加载必须按完整 page 处理，否则可能缺失恢复运行态所需的 checkpoint，所以
                     # 这里需要进行pad操作，使操作的页面是完整的。
                     _start = page_len_start_list[ready_page_num]
 
@@ -166,7 +175,7 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
-            if g_infer_context.is_linear_att_mixed_model:
+            if g_infer_context.is_hybrid_att_model:
                 offload_limit_size = self.args.linear_att_hash_page_size
             else:
                 offload_limit_size = self.args.cpu_cache_token_page_size
@@ -208,6 +217,8 @@ class MultiLevelKvCacheModule(object):
     def _start_kv_cache_offload_task(
         self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
     ) -> Optional["TransTask"]:
+        assert CacheTier.CPU in req.cache_tiers
+        disk_offload_enable = CacheTier.DISK in req.cache_tiers
         with torch.cuda.stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
@@ -219,8 +230,8 @@ class MultiLevelKvCacheModule(object):
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
-                # 对于 linear att 模型， 如果最后一个页面是碎页，需要做特殊处理，判断该碎页是否满足卸载条件。
-                move_block_size = self._handle_linear_att_last_page(
+                # hybrid 模型的最后一个页面可能是碎页，需判断该碎页是否满足卸载条件。
+                move_block_size = self._handle_hybrid_att_last_page(
                     req=req, move_block_size=move_block_size, page_len_list=page_len_list
                 )
 
@@ -233,7 +244,7 @@ class MultiLevelKvCacheModule(object):
                     self.cpu_cache_client.lock.acquire_sleep1ms()
                     page_list, ready_list = self.cpu_cache_client.allocate_pages(
                         token_hash_list[:move_block_size],
-                        disk_offload_enable=self.args.enable_disk_cache,
+                        disk_offload_enable=disk_offload_enable,
                     )
                 finally:
                     self.cpu_cache_client.lock.release()
@@ -296,8 +307,8 @@ class MultiLevelKvCacheModule(object):
 
         return trans_task
 
-    def _handle_linear_att_last_page(self, req: InferReq, move_block_size: int, page_len_list: List[int]) -> int:
-        if not g_infer_context.is_linear_att_mixed_model:
+    def _handle_hybrid_att_last_page(self, req: InferReq, move_block_size: int, page_len_list: List[int]) -> int:
+        if not g_infer_context.is_hybrid_att_model:
             return move_block_size
 
         if move_block_size == 0:
@@ -310,7 +321,7 @@ class MultiLevelKvCacheModule(object):
                 if self.args.disable_linear_att_small_page_cpu_cache:
                     return move_block_size - 1
                 # 说明是碎页，碎页需要判定是否满足cpu cache 的offload条件。
-                if req.tail_linear_att_small_page_buffer_id is None:
+                if req.tail_small_page_buffer_id is None:
                     return move_block_size - 1
         return move_block_size
 
@@ -338,11 +349,11 @@ class MultiLevelKvCacheModule(object):
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
                 # 分组update，避免不同请求的page交叉，导致disk cache hash不一致
-                for pages, move_token_num in zip(page_array_list, move_token_nums):
+                for task, pages, move_token_num in zip(trans_ok_tasks, page_array_list, move_token_nums):
                     self.cpu_cache_client.update_pages_status_to_ready(
                         page_list=pages,
                         deref=True,
-                        disk_offload_enable=self.args.enable_disk_cache,
+                        disk_offload_enable=CacheTier.DISK in task.req_obj.cache_tiers,
                         token_num_in_page_list=move_token_num,
                     )
                 self.cpu_cache_client.lock.release()

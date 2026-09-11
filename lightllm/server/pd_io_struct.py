@@ -10,6 +10,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+
 # 节点的行为
 class NodeRole(enum.Enum):
     P = "prefill"
@@ -39,6 +40,9 @@ class ObjType(enum.Enum):
     TOKEN_PACKS = 3
     PD_UPLOAD_PREFILL_PROMPT_IDS = 4  # prefill 节点上报生成的 prompt ids 信息。
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
+    HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
+    PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
+    PD_UPLOAD_SERVER_BUSY = 8  # P/D 节点向 pd master 上报本地服务繁忙。
 
 
 @dataclass
@@ -54,6 +58,10 @@ class PD_Client_Obj:
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
+    # cache-aware 选点用：当前派发到该节点且尚未产出首 token 的 prompt 字符数。
+    dispatched_prompt_chars: int = 0
+    # 当前派发到该节点且尚未产出首 token 的请求数。
+    dispatched_req_num: int = 0
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
@@ -171,6 +179,10 @@ class PDChunckedTransTask:
 
     error_info: Optional[str] = None
     transfer_time_out_secs: int = 66
+    # kv: 通过 mem_indexes 传输 [start_kv_index, end_kv_index) 的 token KV。
+    # att_state: 混合注意力模型的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
+    # start_kv_index == end_kv_index 标记状态对应的 token 位置，mem_indexes 为空。
+    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 mem_manager 负责。
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
@@ -182,7 +194,7 @@ class PDChunckedTransTask:
             raise ValueError(error_info)
         if self.page_kind == "kv":
             assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
-        elif self.page_kind == "linear_att_state":
+        elif self.page_kind == "att_state":
             assert self.start_kv_index == self.end_kv_index
             assert len(self.mem_indexes) == 0
         else:
@@ -208,6 +220,7 @@ class PDChunckedTransTask:
         return time.time() - self.start_trans_time
 
     def get_key(self) -> str:
+        # page_kind 参与 P/D 任务匹配，发送端和接收端必须使用一致的协议取值。
         return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
 
     def to_str(self):
@@ -229,6 +242,7 @@ class PDChunckedTransTask:
         return self.end_kv_index - self.start_kv_index
 
     def need_transfer_page(self):
+        # att_state 虽然没有 token 区间，仍需传一页；空 kv 任务仅用于完成通知。
         return self.page_kind != "kv" or self.transfer_kv_num() != 0
 
     def createRetObj(self) -> "PDChunckedTransTaskRet":

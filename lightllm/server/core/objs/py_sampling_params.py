@@ -6,6 +6,7 @@ import os
 from typing import List, Optional, Union, Tuple
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
+from .sampling_params import MAX_SEED
 
 
 _SAMPLING_EPS = 1e-5
@@ -92,7 +93,7 @@ class SamplingParams:
         self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.suggested_dp_index = suggested_dp_index
-        self.seed = seed
+        self.seed = self._normalize_and_verify_seed(seed)
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -111,13 +112,18 @@ class SamplingParams:
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-            cls._do_sample = generation_cfg.get("do_sample", False)
-            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
-            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
-            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
-            cls._temperature = generation_cfg.get("temperature", 1.0)
-            cls._top_p = generation_cfg.get("top_p", 1.0)
-            cls._top_k = generation_cfg.get("top_k", -1)
+
+            def _cfg(key, default):
+                v = generation_cfg.get(key)
+                return v if v is not None else default
+
+            cls._do_sample = _cfg("do_sample", False)
+            cls._presence_penalty = _cfg("presence_penalty", 0.0)
+            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
+            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
+            cls._temperature = _cfg("temperature", 1.0)
+            cls._top_p = _cfg("top_p", 1.0)
+            cls._top_k = _cfg("top_k", -1)
             cls._stop_sequences = generation_cfg.get("stop", None)
         except:
             pass
@@ -149,7 +155,6 @@ class SamplingParams:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
-
         if len(self.exponential_decay_length_penalty) != 2:
             raise ValueError(
                 f"exponential_decay_length_penalty must be a tuple of (int, float), \
@@ -197,6 +202,13 @@ class SamplingParams:
         self._verify_allowed_token_ids()
 
         return
+
+    @staticmethod
+    def _normalize_and_verify_seed(seed: Optional[int]) -> int:
+        seed = -1 if seed is None else seed
+        if not -1 <= seed <= MAX_SEED:
+            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {seed}")
+        return seed
 
     def _verify_allowed_token_ids(self):
         if self.allowed_token_ids is not None:

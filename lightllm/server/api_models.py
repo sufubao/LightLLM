@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
 from transformers import GenerationConfig
 
+MAX_SEED = (1 << 63) - 1
+
 
 class ImageURL(BaseModel):
     url: str
@@ -151,7 +153,7 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
-    seed: Optional[int] = -1
+    seed: Optional[int] = Field(default=None, ge=-1, le=MAX_SEED)
 
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
@@ -221,7 +223,7 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
-    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
@@ -231,7 +233,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
-    seed: Optional[int] = -1
+    seed: Optional[int] = Field(default=None, ge=-1, le=MAX_SEED)
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
 
@@ -269,7 +271,13 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def sync_thinking_chat_template_kwargs(self):
-        """Mirror thinking <-> enable_thinking when only one is set (Qwen vs DeepSeek templates)."""
+        """Resolve reasoning effort and mirror the thinking template aliases."""
+        if self.reasoning_effort is not None:
+            if self.chat_template_kwargs is None:
+                self.chat_template_kwargs = {}
+            if "thinking" not in self.chat_template_kwargs and "enable_thinking" not in self.chat_template_kwargs:
+                self.chat_template_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+
         if not self.chat_template_kwargs:
             return self
         if "thinking" not in self.chat_template_kwargs and "enable_thinking" in self.chat_template_kwargs:
@@ -284,11 +292,16 @@ class PromptTokensDetails(BaseModel):
     audio_tokens: int = 0
 
 
+class CompletionTokensDetails(BaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: Optional[int] = 0
     total_tokens: int = 0
     prompt_tokens_details: Optional[PromptTokensDetails] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
 
 
 class ChatMessage(BaseModel):

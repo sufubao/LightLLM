@@ -3,9 +3,6 @@ import numpy as np
 from typing import Tuple
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class PDQueue(BaseQueue):
@@ -14,7 +11,14 @@ class PDQueue(BaseQueue):
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
-        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+        if self.args.run_mode == "decode":
+            estimated_output_len = min(
+                self.router.router_statics.ema_req_out_len,
+                req.sample_params.max_new_tokens,
+            )
+        else:
+            estimated_output_len = req.sample_params.max_new_tokens
+        estimated_peak_token_num += req.input_len + estimated_output_len
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -41,7 +45,14 @@ class PDQueue(BaseQueue):
                             req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                         )
                     else:
-                        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+                        if self.args.run_mode == "decode":
+                            estimated_output_len = min(
+                                self.router.router_statics.ema_req_out_len,
+                                req.sample_params.max_new_tokens,
+                            )
+                        else:
+                            estimated_output_len = req.sample_params.max_new_tokens
+                        estimated_peak_token_num += req.input_len + estimated_output_len
 
         if decoding_req_list:
             decoding_req_list.sort(key=lambda x: -x[1])
@@ -64,38 +75,31 @@ class PDQueue(BaseQueue):
         if req_is_full:
             return None
 
+        self.filter_aborted_reqs()
+        if len(self.waiting_req_list) == 0:
+            return None
+
         estimated_peak_token_num = self._caclu_batch_estimated_peak_token_num(current_batch)
         batch_req_num = exist_req_num
 
         can_run_list = []
-        abort_req_list = []
-        aborted_count = 0
+        consumed_req_count = 0
 
         waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
-            if req.is_aborted:
-                # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
-                # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
-                aborted_count += 1
-                abort_req_list.append(req)
-                continue
             ok_insert, estimated_peak_token_num, batch_req_num = self._can_add_new_req(
                 req=req, estimated_peak_token_num=estimated_peak_token_num, batch_req_num=batch_req_num
             )
             if ok_insert:
+                consumed_req_count += 1
                 can_run_list.append(req)
             else:
                 break
         new_batch = None
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
-        for req in abort_req_list:
-            req: Req = req
-            logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
-            self.free_aborted_req_cpu_cache_pages(req)
-            self.router.shm_req_manager.put_back_req_obj(req)
-        self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
+        self.waiting_req_list = self.waiting_req_list[consumed_req_count:]
         return new_batch
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):

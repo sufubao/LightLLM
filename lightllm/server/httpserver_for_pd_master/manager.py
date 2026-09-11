@@ -149,6 +149,7 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
+        sampling_params.verify_vocab_parallel_sampling(self.args)
         await self._wait_for_pd_master_request_slot()
 
         was_idle = self.running_request_count == 0

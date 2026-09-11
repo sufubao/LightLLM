@@ -317,6 +317,13 @@ class SamplingParams(ctypes.Structure):
     _top_k: int = -1  # -1 is for all
 
     def init(self, tokenizer, **kwargs):
+        self._init(tokenizer, True, **kwargs)
+
+    def init_for_tokenization(self, tokenizer, **kwargs):
+        self._init(tokenizer, False, **kwargs)
+
+    def _init(self, tokenizer, for_generation, /, **kwargs):
+        # Positional-only mode keeps request kwargs from disabling generation validation.
         super().__init__()
         self.best_of = kwargs.get("best_of", 1)
         self.n = kwargs.get("n", self.best_of)
@@ -351,6 +358,10 @@ class SamplingParams(ctypes.Structure):
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
+
+        # Check effective model defaults and raw constraints before compiling them or allocating request resources.
+        if for_generation:
+            self.verify_vocab_parallel_sampling(request_params=kwargs)
 
         self.pd_kv_trans_params = PDKVTransParamObj()
         self.pd_kv_trans_params.set(kwargs.get("pd_kv_trans_params", None))
@@ -453,6 +464,46 @@ class SamplingParams(ctypes.Structure):
         self._verify_grammar_constraint()
 
         return
+
+    def verify_vocab_parallel_sampling(self, start_args=None, request_params=None):
+        if start_args is None:
+            if "LIGHTLLM_START_ARGS" not in os.environ:
+                return
+            start_args = get_env_start_args()
+        if getattr(start_args, "vocab_parallel_sampling", "draft") != "both":
+            return
+
+        unsupported = []
+        for name, neutral in (("presence_penalty", 0.0), ("frequency_penalty", 0.0), ("repetition_penalty", 1.0)):
+            if getattr(self, name) != neutral:
+                unsupported.append(name)
+        if self.exponential_decay_length_penalty.item1 != 1.0:
+            unsupported.append("exponential_decay_length_penalty")
+        if self.min_new_tokens > 1:
+            unsupported.append("min_new_tokens")
+        if self.prompt_logprobs >= 0:
+            unsupported.append("prompt_logprobs")
+        for name in ("allowed_token_ids", "invalid_token_ids"):
+            if getattr(self, name).size:
+                unsupported.append(name)
+        for name in ("regular_constraint", "guided_grammar", "guided_json"):
+            if getattr(self, name).length:
+                unsupported.append(name)
+        if request_params is not None:
+            for name in (
+                "allowed_token_ids",
+                "invalid_token_ids",
+                "logit_bias",
+                "regular_constraint",
+                "guided_grammar",
+                "guided_json",
+            ):
+                if request_params.get(name) and name not in unsupported:
+                    unsupported.append(name)
+        if unsupported:
+            raise ValueError(
+                f"--vocab_parallel_sampling both does not support {', '.join(unsupported)}; use draft or off"
+            )
 
     @staticmethod
     def _normalize_and_verify_seed(seed: Optional[int]) -> int:

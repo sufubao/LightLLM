@@ -1339,7 +1339,7 @@ async def anthropic_count_tokens_impl(raw_request: Request) -> Response:
     await multimodal_params.verify_and_preload(raw_request)
 
     sampling_params = SamplingParams()
-    sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, add_special_tokens=False)
+    sampling_params.init_for_tokenization(tokenizer=g_objs.httpserver_manager.tokenizer, add_special_tokens=False)
     sampling_params.verify()
     input_tokens = g_objs.httpserver_manager.tokens(
         prompt,

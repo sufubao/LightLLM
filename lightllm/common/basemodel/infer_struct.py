@@ -110,6 +110,14 @@ class InferStateInfo:
         self.dp_input_split_sizes: List[List[int]] = None
 
     def init_some_extra_state(self, model):
+        args = get_env_start_args()
+        vocab_topk_arg = (
+            args.draft_vocab_topk_sampling
+            if model.is_mtp_draft_model
+            else args.target_vocab_topk_sampling
+        )
+        self.vocab_parallel_top_k = vocab_topk_arg or 0
+
         if self.is_prefill:
             (
                 self.b_q_seq_len,

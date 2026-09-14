@@ -100,10 +100,6 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
-        vocab_topk_arg = (
-            self.args.draft_vocab_topk_sampling if self.is_mtp_draft_model else self.args.target_vocab_topk_sampling
-        )
-        self.vocab_parallel_top_k = vocab_topk_arg or 0
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -330,7 +326,6 @@ class TpPartBaseModel:
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
-        infer_state.vocab_parallel_top_k = getattr(self, "vocab_parallel_top_k", 0)
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len

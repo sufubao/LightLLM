@@ -692,6 +692,7 @@ class TpPartBaseModel:
         hidden_collector = infer_state.hidden_collector
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = self._create_model_output(post_output, infer_state)
+        del post_output
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -717,6 +718,7 @@ class TpPartBaseModel:
 
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = self._create_model_output(post_output, infer_state)
+        del post_output
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -969,6 +971,7 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
+        del post_output, post_output1
 
         return model_output, model_output1
 
@@ -1010,6 +1013,7 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
+        del post_output, post_output1
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()

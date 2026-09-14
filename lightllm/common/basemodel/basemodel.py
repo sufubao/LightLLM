@@ -243,7 +243,6 @@ class TpPartBaseModel:
     def _init_infer_layer(self, start_layer_index=0):
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
-        self.post_infer.is_mtp_draft_model = self.is_mtp_draft_model
         self.layers_infer = [
             self.transformer_layer_infer_class(i, network_config=self.config)
             for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
@@ -326,6 +325,7 @@ class TpPartBaseModel:
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
+        infer_state.is_draft_model = self.is_mtp_draft_model
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num

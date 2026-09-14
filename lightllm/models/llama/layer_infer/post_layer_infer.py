@@ -18,7 +18,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def __init__(self, network_config):
         super().__init__(network_config)
         self.eps_ = network_config["rms_norm_eps"]
-        self.is_mtp_draft_model = False
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
@@ -90,7 +89,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             args = get_env_start_args()
             top_k = (
                 args.draft_vocab_topk_sampling
-                if self.is_mtp_draft_model
+                if infer_state.is_draft_model
                 else args.target_vocab_topk_sampling
             )
         else:

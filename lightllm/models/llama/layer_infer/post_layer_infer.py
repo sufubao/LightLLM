@@ -66,7 +66,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if prompt_logics_hiddens is not None:
             prompt_token_num = prompt_logics_hiddens.shape[0]
             infer_state.prompt_logics = self._lm_head_and_gather(
-                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state, use_candidates=False
+                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state, allow_vocab_candidates=False
             )
 
         return ans_logics
@@ -77,7 +77,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         token_num: int,
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
-        use_candidates: bool = True,
+        allow_vocab_candidates: bool = True,
     ) -> torch.Tensor:
         normed = self._norm(hidden, infer_state, layer_weight)
         normed = normed.permute(1, 0).view(-1, token_num)
@@ -85,13 +85,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         normed = None
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
-        if use_candidates:
+        if allow_vocab_candidates:
             args = get_env_start_args()
-            top_k = (
-                args.draft_vocab_topk_sampling
-                if infer_state.is_draft_model
-                else args.target_vocab_topk_sampling
-            )
+            top_k = args.draft_vocab_topk_sampling if infer_state.is_draft_model else args.target_vocab_topk_sampling
         else:
             top_k = None
         if top_k:

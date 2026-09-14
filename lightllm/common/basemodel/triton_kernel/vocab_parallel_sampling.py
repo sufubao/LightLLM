@@ -1,6 +1,6 @@
 """Communicate vocabulary candidates instead of dense logits.
 
-Temporary candidate buffers use int64 slots: logits/statistics are bitcast to
+Temporary candidate buffers use int64 slots: logits are bitcast to
 int32 before storage, while token IDs retain their integer representation.
 Merges view buffers as [batch, part/rank, candidate slots]. Explicit strides
 preserve coalesced local reads and describe gathered data without a copy.
@@ -22,7 +22,6 @@ def _local_top1(
     START: tl.constexpr,
     S0: tl.constexpr,
     S1: tl.constexpr,
-    PROBS: tl.constexpr,
     BLOCK: tl.constexpr = 2048,
 ):
     batch, part = tl.program_id(0), tl.program_id(1)
@@ -30,23 +29,17 @@ def _local_top1(
     x = tl.load(X + offsets * S0 + batch * S1, offsets < V, other=-float("inf")).to(tl.float32)
     maximum = tl.max(x, 0)
     token = tl.min(tl.where((offsets < V) & (x == maximum), offsets.to(tl.int64) + START, 0x7FFFFFFFFFFFFFFF), 0)
-    width: tl.constexpr = 2 + PROBS
+    width: tl.constexpr = 2
     parts: tl.constexpr = triton.cdiv(V, BLOCK) if V > 0 else 1
     out = P + (batch * parts + part) * width
     tl.store(out, maximum.to(tl.int32, bitcast=True).to(tl.int64))
     tl.store(out + 1, token)
-    if PROBS:
-        safe_max = tl.where(maximum == -float("inf"), 0.0, maximum)
-        denominator = tl.sum(tl.exp(x - safe_max), 0)
-        tl.store(out + 2, denominator.to(tl.int32, bitcast=True).to(tl.int64))
 
 
 @triton.jit
-def _merge_top1(
-    P, OUT, PARTS: tl.constexpr, PROBS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr, IDS=None, PROB=None
-):
+def _merge_top1(P, OUT, PARTS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr):
     batch = tl.program_id(0)
-    width: tl.constexpr = 2 + PROBS
+    width: tl.constexpr = 2
     offsets = tl.arange(0, triton.next_power_of_2(PARTS))
     ptr = P + batch * S0 + offsets * S1
     bits = tl.load(ptr, offsets < PARTS, other=0).to(tl.int32)
@@ -54,20 +47,19 @@ def _merge_top1(
     ids = tl.load(ptr + 1, offsets < PARTS, other=0x7FFFFFFFFFFFFFFF)
     maximum = tl.max(x, 0)
     token = tl.min(tl.where(x == maximum, ids, 0x7FFFFFFFFFFFFFFF), 0)
-    if PROBS:
-        sums = tl.load(ptr + 2, offsets < PARTS, other=0).to(tl.int32).to(tl.float32, bitcast=True)
-        safe_max = tl.where(maximum == -float("inf"), 0.0, maximum)
-        denominator = tl.sum(sums * tl.exp(x - safe_max), 0)
-    if IDS is None:
-        tl.store(OUT + batch * width, maximum.to(tl.int32, bitcast=True).to(tl.int64))
-        tl.store(OUT + batch * width + 1, token)
-        if PROBS:
-            tl.store(OUT + batch * width + 2, denominator.to(tl.int32, bitcast=True).to(tl.int64))
-    else:
-        tl.store(OUT + batch, maximum)
-        tl.store(IDS + batch, token)
-        if PROBS:
-            tl.store(PROB + batch, 1.0 / denominator)
+    tl.store(OUT + batch * width, maximum.to(tl.int32, bitcast=True).to(tl.int64))
+    tl.store(OUT + batch * width + 1, token)
+
+
+@triton.jit
+def _unpack_top1(P, OUT, IDS, RANKS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr):
+    batch = tl.program_id(0)
+    ranks = tl.arange(0, triton.next_power_of_2(RANKS))
+    ptr = P + batch * S0 + ranks * S1
+    values = tl.load(ptr, ranks < RANKS, other=0).to(tl.int32).to(tl.float32, bitcast=True)
+    ids = tl.load(ptr + 1, ranks < RANKS, other=0)
+    tl.store(OUT + batch * RANKS + ranks, values, ranks < RANKS)
+    tl.store(IDS + batch * RANKS + ranks, ids, ranks < RANKS)
 
 
 @triton.jit
@@ -126,21 +118,21 @@ def vocab_parallel_candidates(
     vocab_start: int,
     vocab_size: int,
     top_k: int = 1,
-    need_probs: bool = False,
     group=None,
     world_size: int = 1,
     alloc_func=None,
 ):
-    """Return ``(logits[B,K], global_ids[B,K], top1_probs[B] | None)``.
+    """Return candidate logits and global token IDs.
 
     ``local_logits`` is native ``[local_vocab, batch]`` with arbitrary strides.
-    ``K = min(top_k, vocab_size)``; supported modes are top1 (optionally with
-    full-vocabulary softmax probability) and top128. Finite ties select the
-    smallest global ID. Every rank must use the same arguments except its
-    shard and ``vocab_start``. The supplied allocator follows ``torch.empty``.
+    Top1 returns ``[batch, world_size]``, retaining each rank's local winner in
+    rank order for downstream argmax and approximate probability calculation.
+    Top128 returns global candidates of shape ``[batch, min(128, vocab_size)]``.
+    Finite ties select the smallest global ID. Every rank must use the same
+    arguments except its shard and ``vocab_start``. The supplied allocator follows ``torch.empty``.
     """
     assert local_logits.is_cuda and local_logits.ndim == 2
-    assert top_k in (1, 128) and (not need_probs or top_k == 1)
+    assert top_k in (1, 128)
     assert 0 < vocab_size <= 0xFFFFFFFF and world_size >= 1
     assert 0 <= vocab_start <= vocab_size
     assert vocab_start + local_logits.shape[0] <= vocab_size
@@ -151,18 +143,18 @@ def vocab_parallel_candidates(
 
     local_vocab, batch = local_logits.shape
     k = min(top_k, vocab_size)
-    values, ids = alloc((batch, k), torch.float32), alloc((batch, k))
-    probs = alloc((batch,), torch.float32) if need_probs else None
+    output_width = world_size if top_k == 1 else k
+    values, ids = alloc((batch, output_width), torch.float32), alloc((batch, output_width))
     if batch == 0:
-        return values, ids, probs
-    width = 2 * k + int(need_probs)
+        return values, ids
+    width = 2 * k
     block = 2048 if top_k == 1 else 1024
     parts = max(1, triton.cdiv(local_vocab, block))
     packed = alloc((batch, parts, width))
     if top_k == 1:
-        _local_top1[(batch, parts)](local_logits, packed, local_vocab, vocab_start, *local_logits.stride(), need_probs)
+        _local_top1[(batch, parts)](local_logits, packed, local_vocab, vocab_start, *local_logits.stride())
         reduced = alloc((batch, width))
-        _merge_top1[(batch,)](packed, reduced, parts, need_probs, *packed.stride()[:2])
+        _merge_top1[(batch,)](packed, reduced, parts, *packed.stride()[:2])
         packed = reduced
     else:
         _topk_tiles[(batch, parts)](local_logits, packed, local_vocab, k, *local_logits.stride(), START=vocab_start)
@@ -180,7 +172,7 @@ def vocab_parallel_candidates(
         gathered = packed
     gathered = gathered.view(world_size, batch, width).transpose(0, 1)
     if top_k == 1:
-        _merge_top1[(batch,)](gathered, values, world_size, need_probs, *gathered.stride()[:2], IDS=ids, PROB=probs)
+        _unpack_top1[(batch,)](gathered, values, ids, world_size, *gathered.stride()[:2])
     else:
         _topk_tiles[(batch, 1)](
             gathered,
@@ -191,4 +183,4 @@ def vocab_parallel_candidates(
             IDS=ids,
             BLOCK=triton.next_power_of_2(world_size * k),
         )
-    return values, ids, probs
+    return values, ids

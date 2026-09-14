@@ -13,7 +13,6 @@ async def lightllm_get_score(request: Request, httpserver_manager: HttpServerMan
     request_dict = await request.json()
     prompt = request_dict.pop("chat")
     sample_params_dict = {"max_new_tokens": 1}
-    SamplingParams.verify_vocab_parallel_sampling(sample_params_dict)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
@@ -39,7 +38,6 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     return_routed_experts = sample_params_dict.pop(
         "return_routed_experts", httpserver_manager.args.enable_return_routed_experts
     )
-    SamplingParams.verify_vocab_parallel_sampling(sample_params_dict)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
@@ -122,7 +120,6 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
     sample_params_dict = request_dict["parameters"]
     _ = sample_params_dict.pop("return_details", False)
     _ = sample_params_dict.pop("return_routed_experts", None)
-    SamplingParams.verify_vocab_parallel_sampling(sample_params_dict)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()

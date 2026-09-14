@@ -18,8 +18,10 @@ APIServer 参数详解
     * ``both``：同时启用 draft 优化，以及 target 的全局 top-128 候选采样。
       TP=1 时 target 仍截取最多 128 个候选，因此同样具有近似语义。
 
-    动态 MTP 额外以 FP32 归约恢复全词表 softmax 的 top-1 概率，供原调度逻辑使用；
-    固定 MTP 不计算该概率。候选和统计量共用一次通信，只减少通信数据量，不减少通信次数。
+    启用优化的 draft 输出保留 all-gather 后各 TP rank 的 top-1 logits 和全局 token ID。
+    动态 MTP 在这些候选上做 softmax，生成供调度使用的模拟概率；它不是全词表概率，
+    可能改变动态步数选择。模型不再计算或输出 token 概率，固定 MTP 只取全局 argmax。
+    候选共用一次通信，只减少通信数据量，不减少通信次数。
     输出布局在模型初始化时固定，不随请求参数切换，也不新增 CUDA Graph 捕获布局。
 
     ``both`` 在温度、top-k、top-p 处理之前，先从原始 target logits 选取全局 top-128。
@@ -32,11 +34,11 @@ APIServer 参数详解
 
     ``both`` 不兼容 ``--enable_prompt_logprobs``、``--enable_rl``（需要完整词表 token rank）、
     ``--use_reward_model``、``--first_token_constraint_mode`` 和非 ``none`` 的
-    ``--output_constraint_mode``，启动时直接报错。内部 ``return_all_prompt_logics`` 也不支持。
-    请求入口在排队及共享内存分配之前检查有效采样参数，包括模型 generation config 默认值：
-    presence/frequency penalty 必须为 0，repetition penalty 必须为 1，
-    exponential_decay_length_penalty 的倍率必须为 1，min_new_tokens 必须为 1。
-    非空 allowed_token_ids、invalid_token_ids、logit_bias，以及正则、grammar、JSON 约束均被拒绝。
+    ``--output_constraint_mode``。内部 ``return_all_prompt_logics`` 也不支持。
+    候选采样跳过 presence/frequency/repetition penalty、exponential_decay_length_penalty、
+    min_new_tokens 的 EOS 屏蔽和 invalid_token_ids 屏蔽；也不支持 allowed_token_ids、
+    logit_bias、正则、grammar 和 JSON 约束。需要这些功能时使用 ``draft`` 或 ``off``。
+    启动和请求入口不再执行词表并行采样专用兼容性校验。
     PD 部署应在 master、prefill 和 decode 上使用相同配置。
 
     仅支持使用 Llama 标准 ``token_forward``、``_token_forward`` 和 ``_lm_head_and_gather``

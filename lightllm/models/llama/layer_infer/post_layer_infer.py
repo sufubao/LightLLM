@@ -85,18 +85,16 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
         if use_candidates and infer_state.vocab_parallel_top_k:
-            logits, token_ids, token_probs = vocab_parallel_candidates(
+            logits, token_ids = vocab_parallel_candidates(
                 local_logits=logic_batch,
                 vocab_start=layer_weight.lm_head_weight_.tp_vocab_start_id,
                 vocab_size=vocab_size,
                 top_k=infer_state.vocab_parallel_top_k,
-                need_probs=infer_state.vocab_parallel_need_probs,
                 group=infer_state.dist_group,
                 world_size=self.tp_world_size_,
                 alloc_func=self.alloc_tensor,
             )
             infer_state.logits_token_ids = token_ids
-            infer_state.draft_token_probs = token_probs
             return logits
         if self.tp_world_size_ == 1:
             gather_data = logic_batch

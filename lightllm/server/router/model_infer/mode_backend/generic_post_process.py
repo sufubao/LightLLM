@@ -29,7 +29,7 @@ def sample(
         skip_top_p,
         exist_req_use_random_seed,
     ) = _get_post_sample_tensors(reqs, logits_width=logits.shape[-1] if logits_token_ids is not None else None)
-    # Candidate mode rejects vocabulary-indexed penalties and masks at admission.
+    # Vocabulary-indexed penalties and masks only apply to dense logits.
     if logits_token_ids is None:
         eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 

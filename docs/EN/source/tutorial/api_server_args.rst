@@ -19,9 +19,11 @@ Vocabulary Parallel Sampling
     * ``both`` also samples the target from global top-128 candidates. At TP=1 the target
       still keeps at most 128 candidates, so sampling remains approximate.
 
-    Dynamic MTP additionally uses FP32 reductions to recover the full-vocabulary softmax top-1
-    probability for the existing scheduler. Fixed MTP does not compute this probability.
-    Candidates and statistics share one collective: communication volume decreases, while its count stays the same.
+    Optimized draft outputs retain each TP rank's top-1 logits and global token IDs after all-gather.
+    Dynamic MTP applies softmax over these candidates to approximate scheduling confidence.
+    This is not a full-vocabulary probability and can change dynamic step selection.
+    The model no longer computes or outputs token probabilities; fixed MTP only takes the global argmax.
+    Candidates share one collective: communication volume decreases, while its count stays the same.
     Each model fixes its output layout at initialization without adding CUDA Graph capture layouts.
 
     ``both`` selects global top-128 from raw target logits before temperature, top-k, and top-p.
@@ -34,14 +36,14 @@ Vocabulary Parallel Sampling
     Seed support follows the existing sampling backend; the same seed need not produce the same
     token sequence as the full-vocabulary path.
 
-    Startup rejects ``both`` with ``--enable_prompt_logprobs``, ``--enable_rl`` (full-vocabulary token rank),
+    ``both`` is incompatible with ``--enable_prompt_logprobs``, ``--enable_rl`` (full-vocabulary token rank),
     ``--use_reward_model``, ``--first_token_constraint_mode``, or an ``--output_constraint_mode`` other
     than ``none``. Internal ``return_all_prompt_logics`` is also unsupported.
-    Request validation runs before admission or shared-memory allocation and includes effective model
-    generation-config defaults: presence/frequency penalties must be 0, repetition penalty must be 1,
-    exponential_decay_length_penalty must have multiplier 1, and min_new_tokens must be 1.
-    Nonempty allowed_token_ids, invalid_token_ids, logit_bias, regex, grammar, and JSON constraints
-    are rejected. Use matching settings on PD master, prefill, and decode services.
+    Candidate sampling skips presence/frequency/repetition penalties, exponential_decay_length_penalty,
+    min_new_tokens EOS masking, and invalid_token_ids masking. It also does not support allowed_token_ids,
+    logit_bias, regex, grammar, or JSON constraints. Use ``draft`` or ``off`` for these features.
+    Startup and request entry points no longer perform vocabulary sampling compatibility validation.
+    Use matching settings on PD master, prefill, and decode services.
 
     Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
     ``_lm_head_and_gather`` implementations; normalization overrides are allowed.

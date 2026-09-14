@@ -892,17 +892,18 @@ class ModeBackend:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
+        token_indices = torch.argmax(model_output.logits, dim=-1)
         if model_output.logits_token_ids is not None:
-            assert model_output.logits_token_ids.shape[1] == 1
-            # Draft candidates are already global top-1. Snapshot graph-owned
-            # output because the next draft step replays into the same storage.
-            return model_output.logits_token_ids.view(-1).clone()
-        return torch.argmax(model_output.logits, dim=-1)
+            # Candidates follow vocab-shard rank order, so argmax ties retain
+            # the smallest global ID. Gather snapshots graph-owned IDs before replay.
+            return model_output.logits_token_ids.gather(1, token_indices.view(-1, 1)).view(-1)
+        return token_indices
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         if model_output.logits_token_ids is not None:
-            assert model_output.draft_token_probs is not None
-            return self._gen_argmax_token_ids(model_output), model_output.draft_token_probs.clone()
+            # Approximate scheduling confidence from the gathered rank-local winners.
+            probs = torch.softmax(model_output.logits, dim=-1)
+            return self._gen_argmax_token_ids(model_output), probs.amax(dim=-1)
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)

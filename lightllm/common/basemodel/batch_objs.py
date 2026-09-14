@@ -202,8 +202,6 @@ class ModelOutput:
 
     # Present only for the model's statically selected vocabulary candidate layout.
     logits_token_ids: Optional[torch.Tensor] = None
-    # Full-vocabulary top-1 probability used by dynamic draft scheduling.
-    draft_token_probs: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
@@ -214,15 +212,10 @@ class ModelOutput:
         return ModelOutput(
             logits=self.logits.index_select(0, rows),
             logits_token_ids=self.logits_token_ids.index_select(0, rows) if self.logits_token_ids is not None else None,
-            draft_token_probs=self.draft_token_probs.index_select(0, rows)
-            if self.draft_token_probs is not None
-            else None,
         )
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
         if self.logits_token_ids is not None:
             self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
-        if self.draft_token_probs is not None:
-            self.draft_token_probs = tensor_to_no_ref_tensor(self.draft_token_probs)
         self.mtp_collector.to_no_ref_tensor()

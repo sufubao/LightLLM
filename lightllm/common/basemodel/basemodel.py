@@ -172,7 +172,6 @@ class TpPartBaseModel:
 
         mode = getattr(self.args, "vocab_parallel_sampling", "draft")
         self.vocab_parallel_top_k = 0
-        self.vocab_parallel_need_probs = False
         requested = mode != "off" if self.is_mtp_draft_model else mode == "both"
         if not requested:
             return
@@ -192,10 +191,8 @@ class TpPartBaseModel:
         if not self.is_mtp_draft_model and self.return_all_prompt_logics:
             raise ValueError("vocab_parallel_sampling=both does not support prompt logprobs")
         self.vocab_parallel_top_k = 1 if self.is_mtp_draft_model else 128
-        self.vocab_parallel_need_probs = self.is_mtp_draft_model and self.args.mtp_dynamic_verify
         logger.info(
-            f"Vocabulary candidate optimization: draft={self.is_mtp_draft_model}, "
-            f"top_k={self.vocab_parallel_top_k}, draft_probs={self.vocab_parallel_need_probs}"
+            f"Vocabulary candidate optimization: draft={self.is_mtp_draft_model}, top_k={self.vocab_parallel_top_k}"
         )
 
     def _init_quant(self):
@@ -359,7 +356,6 @@ class TpPartBaseModel:
         infer_state.is_prefill = model_input.is_prefill
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.vocab_parallel_top_k = getattr(self, "vocab_parallel_top_k", 0)
-        infer_state.vocab_parallel_need_probs = getattr(self, "vocab_parallel_need_probs", False)
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
@@ -510,12 +506,10 @@ class TpPartBaseModel:
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=infer_state.logits_token_ids,
-            draft_token_probs=infer_state.draft_token_probs,
         )
         # Graph outputs own these views; retaining originals on the captured state
         # would defeat to_no_ref_tensor and prevent the graph pool from reusing memory.
         infer_state.logits_token_ids = None
-        infer_state.draft_token_probs = None
         return output
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
@@ -526,8 +520,6 @@ class TpPartBaseModel:
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        if new_model_output.draft_token_probs is not None:
-            new_model_output.draft_token_probs = new_model_output.draft_token_probs[:origin_batch_size]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -542,8 +534,6 @@ class TpPartBaseModel:
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        if new_model_output.draft_token_probs is not None:
-            new_model_output.draft_token_probs = new_model_output.draft_token_probs[:origin_batch_size]
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )

@@ -241,20 +241,3 @@ class StartArgs:
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)
     linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
-
-    def verify_vocab_parallel_sampling(self):
-        if self.vocab_parallel_sampling not in ("off", "draft", "both"):
-            raise ValueError("vocab_parallel_sampling must be off, draft, or both")
-        if self.vocab_parallel_sampling != "both":
-            return
-        for name in (
-            "enable_prompt_logprobs",
-            "return_all_prompt_logics",
-            "enable_rl",
-            "use_reward_model",
-            "first_token_constraint_mode",
-        ):
-            if getattr(self, name, False):
-                raise ValueError(f"--vocab_parallel_sampling both does not support --{name}; use draft or off")
-        if self.output_constraint_mode != "none":
-            raise ValueError("--vocab_parallel_sampling both requires --output_constraint_mode none")

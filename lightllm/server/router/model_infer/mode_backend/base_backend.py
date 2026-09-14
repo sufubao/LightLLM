@@ -42,6 +42,7 @@ from lightllm.distributed.communication_op import (
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.vocab_candidate_post_process import sample_vocab_candidates
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.multi_level_kv_cache import (
@@ -909,6 +910,16 @@ class ModeBackend:
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
         return draft_next_token_ids_gpu, max_probs
 
+    def _sample_logits(
+        self,
+        logits: torch.Tensor,
+        run_reqs: List[InferReq],
+        logits_token_ids: Optional[torch.Tensor] = None,
+    ):
+        if logits_token_ids is None:
+            return sample(logits, run_reqs, self.eos_id)
+        return sample_vocab_candidates(logits, logits_token_ids, run_reqs)
+
     def _sample_and_scatter_token(
         self,
         logits: torch.Tensor,
@@ -924,7 +935,7 @@ class ModeBackend:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
 
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id, logits_token_ids=logits_token_ids)
+        next_token_ids, next_token_logprobs = self._sample_logits(logits, run_reqs, logits_token_ids)
         next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
         b_has_out = None
         if is_prefill:

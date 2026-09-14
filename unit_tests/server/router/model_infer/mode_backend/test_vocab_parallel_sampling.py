@@ -1,9 +1,11 @@
 import math
+from types import SimpleNamespace
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+from lightllm.server.router.model_infer.mode_backend import vocab_candidate_post_process
 
 
 def test_draft_candidates_map_global_ids_and_approximate_confidence():
@@ -42,3 +44,38 @@ def test_dense_draft_output_keeps_full_vocabulary_probability():
     token_ids, probs = backend._gen_argmax_token_ids_and_prob(output)
     torch.testing.assert_close(token_ids, torch.tensor([0, 1]))
     torch.testing.assert_close(probs, torch.tensor([0.25, 0.5]))
+
+
+def test_target_candidate_sampling_maps_columns_outside_generic_sample(monkeypatch):
+    class FakePinnedTensor:
+        def __init__(self, data, dtype):
+            self.tensor = torch.tensor(data, dtype=dtype)
+
+        def cuda(self, non_blocking=True):
+            return self.tensor
+
+    class FakePinMemoryManager:
+        def gen_from_list(self, key, data, dtype):
+            return FakePinnedTensor(data, dtype)
+
+    monkeypatch.setattr(vocab_candidate_post_process, "g_pin_mem_manager", FakePinMemoryManager())
+    reqs = [
+        SimpleNamespace(
+            sampling_param=SimpleNamespace(shm_param=SimpleNamespace(temperature=1.0, top_p=1.0, top_k=1)),
+            generator=None,
+        ),
+        SimpleNamespace(
+            sampling_param=SimpleNamespace(shm_param=SimpleNamespace(temperature=1.0, top_p=1.0, top_k=1)),
+            generator=None,
+        ),
+    ]
+    logits = torch.tensor([[1.0, 3.0, 2.0], [5.0, 4.0, 6.0]])
+    token_ids = torch.tensor([[10, 20, 30], [40, 50, 60]])
+
+    sampled_ids, sampled_logprobs = vocab_candidate_post_process.sample_vocab_candidates(
+        logits.clone(), token_ids, reqs
+    )
+
+    torch.testing.assert_close(sampled_ids, torch.tensor([20, 60]))
+    expected_logprobs = torch.log_softmax(logits, dim=-1).gather(1, torch.tensor([[1], [2]])).view(-1)
+    torch.testing.assert_close(sampled_logprobs, expected_logprobs)

@@ -9,7 +9,6 @@ from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
 )
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
@@ -65,9 +64,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             )
             b_mtp_index = model_input.b_mtp_index[batch_idx]
 
-            next_token_ids, next_token_logprobs = sample(
-                logits, run_reqs, self.eos_id, logits_token_ids=logits_token_ids
-            )
+            next_token_ids, next_token_logprobs = self._sample_logits(logits, run_reqs, logits_token_ids)
             next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
 
             scatter_token(

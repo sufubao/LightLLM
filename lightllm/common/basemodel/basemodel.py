@@ -100,6 +100,10 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
+        vocab_topk_arg = (
+            self.args.draft_vocab_topk_sampling if self.is_mtp_draft_model else self.args.target_vocab_topk_sampling
+        )
+        self.vocab_parallel_top_k = vocab_topk_arg or 0
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -107,7 +111,6 @@ class TpPartBaseModel:
         self._init_config()
         self._verify_must()
         self._verify_params()
-        self._init_vocab_parallel_sampling()
         self._init_quant()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
@@ -166,34 +169,6 @@ class TpPartBaseModel:
         assert self.load_way == "HF", "only support HF format weights"
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
         return
-
-    def _init_vocab_parallel_sampling(self):
-        from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
-
-        mode = getattr(self.args, "vocab_parallel_sampling", "draft")
-        self.vocab_parallel_top_k = 0
-        requested = mode != "off" if self.is_mtp_draft_model else mode == "both"
-        if not requested:
-            return
-        head = self.post_layer_infer_class
-        supported = issubclass(head, LlamaPostLayerInfer) and all(
-            getattr(head, name) is getattr(LlamaPostLayerInfer, name)
-            for name in ("token_forward", "_token_forward", "_lm_head_and_gather")
-        )
-        if not supported:
-            if not self.is_mtp_draft_model:
-                raise ValueError(f"vocab_parallel_sampling=both does not support {head.__name__}")
-            logger.info(f"Vocabulary candidate optimization disabled for draft head {head.__name__}")
-            return
-        if self.is_mtp_draft_model and self.tp_world_size_ == 1:
-            logger.info("Vocabulary candidate optimization disabled for TP=1 draft")
-            return
-        if not self.is_mtp_draft_model and self.return_all_prompt_logics:
-            raise ValueError("vocab_parallel_sampling=both does not support prompt logprobs")
-        self.vocab_parallel_top_k = 1 if self.is_mtp_draft_model else 128
-        logger.info(
-            f"Vocabulary candidate optimization: draft={self.is_mtp_draft_model}, top_k={self.vocab_parallel_top_k}"
-        )
 
     def _init_quant(self):
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)

@@ -8,42 +8,40 @@ APIServer 参数详解
 词表并行采样
 ------------
 
-.. option:: --vocab_parallel_sampling {off,draft,both}
+.. option:: --target_vocab_topk_sampling {16,32,64,128,256,512}
 
-    默认 ``draft``，该参数同时控制固定步数和动态步数的 draft 推测解码：
+    主模型 target 的全局输出候选数，默认 ``None``，即关闭候选输出。
 
-    * ``off``：保持完整词表 logits 通信和现有采样路径。
-    * ``draft``：draft 使用分布式精确 argmax，保留全局 token ID；target 保持完整词表采样。
-      无推测解码时不改变 target 路径，TP=1 时 draft 不启用通信优化。
-    * ``both``：同时启用 draft 优化，以及 target 的全局 top-128 候选采样。
-      TP=1 时 target 仍截取最多 128 个候选，因此同样具有近似语义。
+.. option:: --draft_vocab_topk_sampling {16,32,64,128,256,512}
 
-    启用优化的 draft 输出保留 all-gather 后各 TP rank 的 top-1 logits 和全局 token ID。
-    动态 MTP 在这些候选上做 softmax，生成供调度使用的模拟概率；它不是全词表概率，
-    可能改变动态步数选择。模型不再计算或输出 token 概率，固定 MTP 只取全局 argmax。
-    候选共用一次通信，只减少通信数据量，不减少通信次数。
-    输出布局在模型初始化时固定，不随请求参数切换，也不新增 CUDA Graph 捕获布局。
+    draft 模型的全局输出候选数，默认 ``None``，即关闭候选输出。
+    两个参数分别控制主模型 target 和 draft 模型的输出候选数。
+    未设置时，对应模型保持完整词表 logits 通信和原采样路径；设置后，每个 TP rank 先选取
+    本地候选，经一次 all-gather 后合并为全局 top-k logits 和全局 token ID。
+    两个参数相互独立，也适用于 TP=1。
 
-    ``both`` 在温度、top-k、top-p 处理之前，先从原始 target logits 选取全局 top-128。
+    draft 的固定步数路径在候选中取 argmax；由于每个分片的最大值都包含在候选中，最终 token
+    仍是完整词表上的精确 argmax。动态 MTP 在全局 top-k 候选上做 softmax，生成供调度使用的
+    模拟概率；它不是全词表概率，可能改变动态步数选择。模型不计算或输出完整词表 token 概率。
+
+    target 在温度、请求 top-k 和 top-p 处理之前，先从原始 logits 选取配置的全局候选数，
     然后在候选集合上归一化并执行现有采样后端。支持 greedy、temperature、top-k、top-p、seed、
-    普通 stop 序列和 EOS 终止；top-k=-1 或 top-k>128 仍只能覆盖候选集合。
-    生成 token 的 logprob 是候选集合上的归一化概率对应的对数，沿用现有后端在 top-k/top-p
-    过滤前取概率的语义，不是完整词表上的 logprob；top-p 也不代表完整词表累计概率。
-    ``both`` 是显式启用的近似采样，不能视为完整分布等价。
-    seed 沿用现有采样后端的支持范围，不保证相同 seed 与完整词表路径逐 token 一致。
+    普通 stop 序列和 EOS 终止；请求 top-k=-1 或大于输出候选数时，仍只能覆盖候选集合。
+    生成 token 的 logprob 是候选集合上的归一化概率对应的对数，不是完整词表上的 logprob；
+    top-p 也不代表完整词表累计概率。启用 target 候选是显式的近似采样。
 
-    ``both`` 不兼容 ``--enable_prompt_logprobs``、``--enable_rl``（需要完整词表 token rank）、
+    ``--target_vocab_topk_sampling`` 不兼容 ``--enable_rl``（需要完整词表 token rank）、
     ``--use_reward_model``、``--first_token_constraint_mode`` 和非 ``none`` 的
-    ``--output_constraint_mode``。内部 ``return_all_prompt_logics`` 也不支持。
+    ``--output_constraint_mode``。
     候选采样跳过 presence/frequency/repetition penalty、exponential_decay_length_penalty、
     min_new_tokens 的 EOS 屏蔽和 invalid_token_ids 屏蔽；也不支持 allowed_token_ids、
-    logit_bias、正则、grammar 和 JSON 约束。需要这些功能时使用 ``draft`` 或 ``off``。
+    logit_bias、正则、grammar 和 JSON 约束。需要这些功能时不要设置 target 候选参数。
     启动和请求入口不再执行词表并行采样专用兼容性校验。
     PD 部署应在 master、prefill 和 decode 上使用相同配置。
 
     仅支持使用 Llama 标准 ``token_forward``、``_token_forward`` 和 ``_lm_head_and_gather``
-    实现的输出层；允许模型覆盖归一化实现。特殊 draft 输出层在启动时回退到原完整词表路径；
-    ``both`` 遇到不支持的 target 输出层则在启动时报错。
+    实现的输出层；允许模型覆盖归一化实现。模型初始化不再检查输出层兼容性，
+    特殊输出层不要设置对应的候选参数。
 
 基础配置参数
 ------------

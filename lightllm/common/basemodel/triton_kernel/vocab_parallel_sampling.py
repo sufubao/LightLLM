@@ -127,12 +127,13 @@ def vocab_parallel_candidates(
     ``local_logits`` is native ``[local_vocab, batch]`` with arbitrary strides.
     Top1 returns ``[batch, world_size]``, retaining each rank's local winner in
     rank order for downstream argmax and approximate probability calculation.
-    Top128 returns global candidates of shape ``[batch, min(128, vocab_size)]``.
+    Other supported values return global candidates of shape
+    ``[batch, min(top_k, vocab_size)]``.
     Finite ties select the smallest global ID. Every rank must use the same
     arguments except its shard and ``vocab_start``. The supplied allocator follows ``torch.empty``.
     """
     assert local_logits.is_cuda and local_logits.ndim == 2
-    assert top_k in (1, 128)
+    assert top_k in (1, 16, 32, 64, 128, 256, 512)
     assert 0 < vocab_size <= 0xFFFFFFFF and world_size >= 1
     assert 0 <= vocab_start <= vocab_size
     assert vocab_start + local_logits.shape[0] <= vocab_size

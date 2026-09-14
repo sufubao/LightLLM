@@ -8,47 +8,42 @@ This document provides detailed information about all startup parameters and the
 Vocabulary Parallel Sampling
 ----------------------------
 
-.. option:: --vocab_parallel_sampling {off,draft,both}
+.. option:: --target_vocab_topk_sampling {16,32,64,128,256,512}
 
-    Defaults to ``draft`` and applies to both fixed-step and dynamic-step speculative decoding:
+    Global output candidate count for the target model. The default ``None`` disables candidate output.
 
-    * ``off`` retains full-vocabulary logits communication and existing sampling.
-    * ``draft`` uses exact distributed argmax for draft tokens, preserving global token IDs.
-      Target sampling is unchanged. Without speculative decoding it has no target effect;
-      draft communication optimization is disabled at TP=1.
-    * ``both`` also samples the target from global top-128 candidates. At TP=1 the target
-      still keeps at most 128 candidates, so sampling remains approximate.
+.. option:: --draft_vocab_topk_sampling {16,32,64,128,256,512}
 
-    Optimized draft outputs retain each TP rank's top-1 logits and global token IDs after all-gather.
-    Dynamic MTP applies softmax over these candidates to approximate scheduling confidence.
-    This is not a full-vocabulary probability and can change dynamic step selection.
-    The model no longer computes or outputs token probabilities; fixed MTP only takes the global argmax.
-    Candidates share one collective: communication volume decreases, while its count stays the same.
-    Each model fixes its output layout at initialization without adding CUDA Graph capture layouts.
+    Global output candidate count for the draft model. The default ``None`` disables candidate output.
+    The two options independently control the target-model and draft-model output widths.
+    When unset, the corresponding model retains full-vocabulary logits communication and sampling.
+    When set, every TP rank selects local candidates, then one all-gather merges them into global top-k
+    logits and global token IDs. The settings also apply at TP=1.
 
-    ``both`` selects global top-128 from raw target logits before temperature, top-k, and top-p.
-    The existing sampling backend then normalizes and samples within those candidates.
-    Greedy, temperature, top-k, top-p, seed, ordinary stop sequences, and EOS termination are supported.
-    With top-k=-1 or top-k>128, sampling still only considers the candidate set.
-    Generated-token logprobs are normalized over candidates, following the existing backend's
-    pre-top-k/top-p probability semantics. They are not full-vocabulary logprobs, and top-p does
-    not measure full-vocabulary cumulative probability. ``both`` explicitly opts into approximate sampling.
-    Seed support follows the existing sampling backend; the same seed need not produce the same
-    token sequence as the full-vocabulary path.
+    Fixed-step draft decoding takes argmax over the candidates. The result remains the exact
+    full-vocabulary argmax because every shard contributes its local maximum. Dynamic MTP applies
+    softmax over the global top-k candidates to produce simulated scheduling confidence; this is not
+    a full-vocabulary probability and can change dynamic step selection.
 
-    ``both`` is incompatible with ``--enable_prompt_logprobs``, ``--enable_rl`` (full-vocabulary token rank),
+    The target model selects the configured global candidate count from raw logits before temperature,
+    request top-k, and top-p processing. The existing sampling backend normalizes and samples within
+    that candidate set. A request top-k of -1 or larger than the output candidate count still only covers
+    the candidates. Generated-token logprobs and top-p mass are relative to the candidate set, so enabling
+    target candidates explicitly opts into approximate sampling.
+
+    ``--target_vocab_topk_sampling`` is incompatible with ``--enable_rl`` (full-vocabulary token rank),
     ``--use_reward_model``, ``--first_token_constraint_mode``, or an ``--output_constraint_mode`` other
-    than ``none``. Internal ``return_all_prompt_logics`` is also unsupported.
+    than ``none``.
     Candidate sampling skips presence/frequency/repetition penalties, exponential_decay_length_penalty,
     min_new_tokens EOS masking, and invalid_token_ids masking. It also does not support allowed_token_ids,
-    logit_bias, regex, grammar, or JSON constraints. Use ``draft`` or ``off`` for these features.
+    logit_bias, regex, grammar, or JSON constraints. Leave the target candidate option unset for these features.
     Startup and request entry points no longer perform vocabulary sampling compatibility validation.
     Use matching settings on PD master, prefill, and decode services.
 
     Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
     ``_lm_head_and_gather`` implementations; normalization overrides are allowed.
-    Unsupported draft heads fall back to the original full-vocabulary path at startup.
-    An unsupported target head with ``both`` fails at startup.
+    Model initialization no longer checks output-layer compatibility.
+    Leave the corresponding candidate option unset for nonstandard output heads.
 
 Basic Configuration Parameters
 ------------------------------

@@ -5,7 +5,6 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_star
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
@@ -512,11 +511,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
 
             if req_num > 0:
-                next_token_ids, next_token_logprobs = sample(
+                next_token_ids, next_token_logprobs = self._sample_logits(
                     model_output.logits,
                     run_reqs,
-                    self.eos_id,
-                    logits_token_ids=model_output.logits_token_ids,
+                    model_output.logits_token_ids,
                 )
                 next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
@@ -807,9 +805,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
                 logits[:verify_row_num0, :].copy_(logits0, non_blocking=True)
                 logits[verify_row_num0:, :].copy_(logits1, non_blocking=True)
-                next_token_ids, next_token_logprobs = sample(
-                    logits, run_reqs, self.eos_id, logits_token_ids=logits_token_ids
-                )
+                next_token_ids, next_token_logprobs = self._sample_logits(logits, run_reqs, logits_token_ids)
                 next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
                 (
                     next_token_ids_cpu,

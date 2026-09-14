@@ -207,13 +207,6 @@ class ModelOutput:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
 
-    def select_logits_rows(self, rows: torch.Tensor) -> "ModelOutput":
-        """Copy selected sampling rows; hidden states and prompt logits are not included."""
-        return ModelOutput(
-            logits=self.logits.index_select(0, rows),
-            logits_token_ids=self.logits_token_ids.index_select(0, rows) if self.logits_token_ids is not None else None,
-        )
-
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
         if self.logits_token_ids is not None:

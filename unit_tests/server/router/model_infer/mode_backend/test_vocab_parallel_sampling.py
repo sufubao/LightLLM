@@ -26,7 +26,11 @@ def test_draft_candidates_map_global_ids_and_approximate_confidence():
     torch.testing.assert_close(probs, expected_probs)
 
     rows = torch.tensor([2, 0])
-    selected_ids, selected_probs = backend._gen_argmax_token_ids_and_prob(output.select_logits_rows(rows))
+    selected_output = ModelOutput(
+        logits=output.logits.index_select(0, rows),
+        logits_token_ids=output.logits_token_ids.index_select(0, rows),
+    )
+    selected_ids, selected_probs = backend._gen_argmax_token_ids_and_prob(selected_output)
     torch.testing.assert_close(selected_ids, expected_ids[rows])
     torch.testing.assert_close(selected_probs, expected_probs[rows])
 

@@ -478,9 +478,6 @@ class TpPartBaseModel:
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=infer_state.logits_token_ids,
         )
-        # Graph outputs own these views; retaining originals on the captured state
-        # would defeat to_no_ref_tensor and prevent the graph pool from reusing memory.
-        infer_state.logits_token_ids = None
         return output
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):

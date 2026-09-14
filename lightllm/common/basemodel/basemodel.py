@@ -122,6 +122,9 @@ class TpPartBaseModel:
         self.req_manager.mem_manager = self.mem_manager
         self._check_mem_size()
         self._init_infer_layer()
+        self.post_infer.vocab_topk_sampling = (
+            self.args.draft_vocab_topk_sampling if self.is_mtp_draft_model else self.args.target_vocab_topk_sampling
+        )
         self._init_some_value()
         self._init_custom()
         self.load_weights(self.weight_dict)
@@ -325,7 +328,6 @@ class TpPartBaseModel:
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
-        infer_state.is_draft_model = self.is_mtp_draft_model
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num

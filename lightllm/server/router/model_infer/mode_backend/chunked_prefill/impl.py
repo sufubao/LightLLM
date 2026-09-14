@@ -9,6 +9,7 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
 )
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
@@ -111,7 +112,6 @@ class ChunkedPrefillBackend(ModeBackend):
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
-                logits_token_ids=model_output.logits_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -156,7 +156,6 @@ class ChunkedPrefillBackend(ModeBackend):
             model_output = self.model.forward(model_input)
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
-                logits_token_ids=model_output.logits_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -202,7 +201,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ranks_cpu,
             ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
-                logits_token_ids=model_output.logits_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -273,11 +271,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 async_selected_row_mask_cpu.wait()
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
-            next_token_ids, next_token_logprobs = self._sample_logits(
-                model_output.logits,
-                run_reqs,
-                model_output.logits_token_ids,
-            )
+            next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)

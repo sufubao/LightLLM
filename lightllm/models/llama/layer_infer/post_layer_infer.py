@@ -9,6 +9,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
 from lightllm.distributed.communication_op import all_gather
 from lightllm.common.basemodel.triton_kernel.vocab_parallel_sampling import vocab_parallel_candidates
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class LlamaPostLayerInfer(PostLayerInferTpl):
@@ -17,6 +18,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def __init__(self, network_config):
         super().__init__(network_config)
         self.eps_ = network_config["rms_norm_eps"]
+        self.is_mtp_draft_model = False
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
@@ -84,12 +86,21 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         normed = None
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
-        if use_candidates and infer_state.vocab_parallel_top_k:
+        if use_candidates:
+            args = get_env_start_args()
+            top_k = (
+                args.draft_vocab_topk_sampling
+                if self.is_mtp_draft_model
+                else args.target_vocab_topk_sampling
+            )
+        else:
+            top_k = None
+        if top_k:
             logits, token_ids = vocab_parallel_candidates(
                 local_logits=logic_batch,
                 vocab_start=layer_weight.lm_head_weight_.tp_vocab_start_id,
                 vocab_size=vocab_size,
-                top_k=infer_state.vocab_parallel_top_k,
+                top_k=top_k,
                 group=infer_state.dist_group,
                 world_size=self.tp_world_size_,
                 alloc_func=self.alloc_tensor,

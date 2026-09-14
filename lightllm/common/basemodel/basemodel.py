@@ -243,6 +243,7 @@ class TpPartBaseModel:
     def _init_infer_layer(self, start_layer_index=0):
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
+        self.post_infer.is_mtp_draft_model = self.is_mtp_draft_model
         self.layers_infer = [
             self.transformer_layer_infer_class(i, network_config=self.config)
             for i in range(start_layer_index, start_layer_index + self.config["n_layer"])

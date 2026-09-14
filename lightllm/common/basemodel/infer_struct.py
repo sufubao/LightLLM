@@ -56,8 +56,6 @@ class InferStateInfo:
         # token 位置的 logits，供后续回传 prompt logprobs 信息使用。
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
         self.prompt_logics: Optional[torch.Tensor] = None
-        # Model-static configuration; never selected from request sampling parameters.
-        self.vocab_parallel_top_k: int = 0
         self.logits_token_ids: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None
         self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
@@ -110,14 +108,6 @@ class InferStateInfo:
         self.dp_input_split_sizes: List[List[int]] = None
 
     def init_some_extra_state(self, model):
-        args = get_env_start_args()
-        vocab_topk_arg = (
-            args.draft_vocab_topk_sampling
-            if model.is_mtp_draft_model
-            else args.target_vocab_topk_sampling
-        )
-        self.vocab_parallel_top_k = vocab_topk_arg or 0
-
         if self.is_prefill:
             (
                 self.b_q_seq_len,

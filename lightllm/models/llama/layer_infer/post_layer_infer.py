@@ -8,8 +8,11 @@ from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerW
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
-from lightllm.distributed.communication_op import all_gather
-from lightllm.common.basemodel.triton_kernel.vocab_parallel_sampling import vocab_parallel_candidates
+from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor
+from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
+    pack_vocab_parallel_topk,
+    unpack_vocab_parallel_topk,
+)
 from lightllm.utils.envs_utils import get_env_start_args
 
 _MASKED_LOGIT_VALUE = -10000000.0
@@ -119,7 +122,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         gather_data = None
         return PostLayerOutput(logits=ans_logics)
 
-    def _get_vocab_parallel_candidates(
+    def _vocab_parallel_topk(
         self,
         hidden: torch.Tensor,
         token_num: int,
@@ -127,18 +130,72 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         top_k: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """使用 PyTorch 在各 TP 词表分片上选取并合并全局 top-k。"""
+
         local_logits = self._project_local_logits(hidden, token_num, layer_weight, infer_state)
-        logits, token_ids = vocab_parallel_candidates(
-            local_logits=local_logits,
-            vocab_start=layer_weight.lm_head_weight_.tp_vocab_start_id,
-            vocab_size=layer_weight.lm_head_weight_.vocab_size,
-            top_k=top_k,
-            group=infer_state.dist_group,
-            world_size=self.tp_world_size_,
-            alloc_func=self.alloc_tensor,
+        vocab_size = layer_weight.lm_head_weight_.vocab_size
+        candidate_count = min(top_k, vocab_size)
+        local_vocab_size = local_logits.shape[0]
+        assert vocab_size <= torch.iinfo(torch.int32).max, f"vocabulary size {vocab_size} exceeds int32 token ID range"
+        assert local_vocab_size >= candidate_count, (
+            f"local vocabulary size {local_vocab_size} must be at least the candidate count {candidate_count}"
         )
+
+        if self.tp_world_size_ == 1:
+            values, token_ids = torch.topk(
+                local_logits.permute(1, 0),
+                k=candidate_count,
+                dim=1,
+                sorted=False,
+            )
+            values = values.float()
+            return values, token_ids
+
+        # 先减少每个 rank 的通信宽度；输入保持 [local_vocab, batch] 布局。
+        local_values, local_token_ids = torch.topk(
+            local_logits,
+            k=candidate_count,
+            dim=0,
+            sorted=False,
+        )
+        packed_candidates = self.alloc_tensor(
+            (token_num, candidate_count * 2),
+            dtype=torch.float32,
+        )
+        pack_vocab_parallel_topk(
+            local_values,
+            local_token_ids,
+            layer_weight.lm_head_weight_.tp_vocab_start_id,
+            packed_candidates,
+        )
+        local_values = None
+        local_token_ids = None
         local_logits = None
-        return logits, token_ids
+
+        gathered_candidates = self.alloc_tensor(
+            (self.tp_world_size_ * token_num, candidate_count * 2),
+            dtype=torch.float32,
+        )
+        all_gather_into_tensor(gathered_candidates, packed_candidates, group=infer_state.dist_group)
+        packed_candidates = None
+
+        gathered_values = self.alloc_tensor(
+            (token_num, self.tp_world_size_ * candidate_count),
+            dtype=torch.float32,
+        )
+        gathered_token_ids = self.alloc_tensor(
+            (token_num, self.tp_world_size_ * candidate_count),
+            dtype=torch.int64,
+        )
+        unpack_vocab_parallel_topk(
+            gathered_candidates,
+            gathered_values,
+            gathered_token_ids,
+            candidate_count,
+            self.tp_world_size_,
+        )
+        gathered_candidates = None
+        return gathered_values, gathered_token_ids
 
     def _target_lm_head_and_gather(
         self,
@@ -153,7 +210,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if top_k is None:
             return self._lm_head_and_gather(hidden, token_num, layer_weight, infer_state)
 
-        candidate_logits, candidate_token_ids = self._get_vocab_parallel_candidates(
+        candidate_logits, candidate_token_ids = self._vocab_parallel_topk(
             hidden, token_num, layer_weight, infer_state, top_k
         )
         logits = self.alloc_tensor(
@@ -179,7 +236,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if top_k is None:
             return self._lm_head_and_gather(hidden, token_num, layer_weight, infer_state)
 
-        logits, token_ids = self._get_vocab_parallel_candidates(
+        logits, token_ids = self._vocab_parallel_topk(
             hidden, token_num, layer_weight, infer_state, top_k
         )
         return PostLayerOutput(logits=logits, logits_token_ids=token_ids)

@@ -8,29 +8,29 @@ This document provides detailed information about all startup parameters and the
 Vocabulary Parallel Sampling
 ----------------------------
 
-.. option:: --target_vocab_topk_sampling {16,32,64,128,256,512}
+.. option:: --target_vocab_topk_sampling {2,8,16,32,64,128,256,512}
 
-    Global candidate count communicated for target-model logits. The default ``None`` disables candidate communication.
+    Candidate count communicated by each TP rank for target-model logits. The default ``None`` disables candidate communication.
 
-.. option:: --draft_vocab_topk_sampling {16,32,64,128,256,512}
+.. option:: --draft_vocab_topk_sampling {2,8,16,32,64,128,256,512}
 
-    Global output candidate count for the draft model. The default ``None`` disables candidate output.
+    Output candidate count from each TP rank for the draft model. The default ``None`` disables candidate output.
     The two options independently control the target-model and draft-model output widths.
     When unset, the corresponding model retains full-vocabulary logits communication and sampling.
-    When set, every TP rank selects local candidates, then one all-gather merges them into global top-k
-    logits and global token IDs. The settings also apply at TP=1.
+    When set, every TP rank selects local candidates, then one all-gather returns the logits and global
+    token IDs from all TP ranks. The settings also apply at TP=1.
 
     Fixed-step draft decoding takes argmax over the candidates. The result remains the exact
     full-vocabulary argmax because every shard contributes its local maximum. Dynamic MTP applies
-    softmax over the global top-k candidates to produce simulated scheduling confidence; this is not
+    softmax over the gathered candidates to produce simulated scheduling confidence; this is not
     a full-vocabulary probability and can change dynamic step selection.
 
-    The target model selects the configured global candidate count from raw logits before temperature,
+    The target model selects the configured candidate count from each TP vocabulary shard before temperature,
     request top-k, and top-p processing. The output layer then creates full-vocabulary logits, fills
     non-candidate positions with ``-10000000.0``, and scatters candidate values by global token ID.
     Downstream code continues through the existing full-vocabulary sampling path without a candidate-ID
     mapping, so existing penalties, masks, and constraints still run. A request top-k of -1 or larger than
-    the output candidate count still only covers the candidates. Generated-token logprobs and top-p mass
+    the gathered candidate count still only covers the candidates. Generated-token logprobs and top-p mass
     are relative to the candidate set, so enabling target candidates explicitly opts into approximate sampling.
 
     Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary

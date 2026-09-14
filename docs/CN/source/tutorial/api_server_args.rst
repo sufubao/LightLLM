@@ -8,26 +8,26 @@ APIServer 参数详解
 词表并行采样
 ------------
 
-.. option:: --target_vocab_topk_sampling {16,32,64,128,256,512}
+.. option:: --target_vocab_topk_sampling {2,8,16,32,64,128,256,512}
 
-    主模型 target 的全局 logits 通信候选数，默认 ``None``，即关闭候选通信。
+    主模型 target 每个 TP rank 的 logits 通信候选数，默认 ``None``，即关闭候选通信。
 
-.. option:: --draft_vocab_topk_sampling {16,32,64,128,256,512}
+.. option:: --draft_vocab_topk_sampling {2,8,16,32,64,128,256,512}
 
-    draft 模型的全局输出候选数，默认 ``None``，即关闭候选输出。
+    draft 模型每个 TP rank 的输出候选数，默认 ``None``，即关闭候选输出。
     两个参数分别控制主模型 target 和 draft 模型的输出候选数。
     未设置时，对应模型保持完整词表 logits 通信和原采样路径；设置后，每个 TP rank 先选取
-    本地候选，经一次 all-gather 后合并为全局 top-k logits 和全局 token ID。
+    本地候选，经一次 all-gather 后输出所有 TP rank 的 logits 和全局 token ID。
     两个参数相互独立，也适用于 TP=1。
 
     draft 的固定步数路径在候选中取 argmax；由于每个分片的最大值都包含在候选中，最终 token
-    仍是完整词表上的精确 argmax。动态 MTP 在全局 top-k 候选上做 softmax，生成供调度使用的
+    仍是完整词表上的精确 argmax。动态 MTP 在收集到的候选上做 softmax，生成供调度使用的
     模拟概率；它不是全词表概率，可能改变动态步数选择。模型不计算或输出完整词表 token 概率。
 
-    target 在温度、请求 top-k 和 top-p 处理之前，先从原始 logits 选取配置的全局候选数。
+    target 在温度、请求 top-k 和 top-p 处理之前，先从每个 TP 词表分片选取配置数量的候选。
     输出层随后创建完整词表 logits，将非候选位置填为 ``-10000000.0``，并按全局 token ID
     回填候选值。下游继续使用原有完整词表采样路径，无需处理候选 token ID 映射；已有的
-    penalty、mask 和约束逻辑也会照常执行。请求 top-k=-1 或大于输出候选数时，仍只能覆盖候选集合。
+    penalty、mask 和约束逻辑也会照常执行。请求 top-k=-1 或大于 all-gather 后的候选总数时，仍只能覆盖候选集合。
     生成 token 的 logprob 是候选集合上的归一化概率对应的对数，不是完整词表上的 logprob；
     top-p 也不代表完整词表累计概率。启用 target 候选是显式的近似采样。
 

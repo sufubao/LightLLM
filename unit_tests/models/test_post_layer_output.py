@@ -27,30 +27,49 @@ def test_output_head_returns_candidates_without_mutating_state(monkeypatch, draf
             return dense
 
     values, ids = dense.T[:, :2], torch.tensor([[0, 1]] * 3)
-    monkeypatch.setattr(llama_post, "vocab_parallel_candidates", lambda **kwargs: (values, ids))
+    captured_top_k = []
+
+    def candidates(**kwargs):
+        captured_top_k.append(kwargs["top_k"])
+        return values, ids
+
+    monkeypatch.setattr(llama_post, "vocab_parallel_candidates", candidates)
     args = SimpleNamespace(target_vocab_topk_sampling=None, draft_vocab_topk_sampling=None)
     setattr(args, "draft_vocab_topk_sampling" if draft else "target_vocab_topk_sampling", 16 if enabled else None)
     monkeypatch.setattr(llama_post, "get_env_start_args", lambda: args)
     state = SimpleNamespace(is_draft_model=draft, dist_group=None)
     weight = SimpleNamespace(lm_head_weight_=Weight())
-    output = head._lm_head_and_gather(torch.ones(3, 2), 3, weight, state)
+    method = head._draft_lm_head_and_gather if draft else head._target_lm_head_and_gather
+    output = method(torch.ones(3, 2), 3, weight, state)
     assert not hasattr(state, "logits_token_ids")
-    torch.testing.assert_close(output.logits, values if enabled else dense.T)
-    assert output.logits_token_ids is (ids if enabled else None)
-    prompt = head._lm_head_and_gather(torch.ones(3, 2), 3, weight, state, allow_vocab_candidates=False)
+    if enabled and not draft:
+        expected_logits = torch.full_like(dense.T, llama_post._MASKED_LOGIT_VALUE)
+        expected_logits.scatter_(1, ids, values)
+    else:
+        expected_logits = values if enabled else dense.T
+    torch.testing.assert_close(output.logits, expected_logits)
+    assert output.logits_token_ids is (ids if enabled and draft else None)
+    assert captured_top_k == ([16] if enabled else [])
+    prompt = head._lm_head_and_gather(torch.ones(3, 2), 3, weight, state)
     torch.testing.assert_close(prompt.logits, dense.T)
     assert prompt.logits_token_ids is None
 
 
-def test_prefill_prompt_logits_do_not_replace_candidate_output() -> None:
+@pytest.mark.parametrize("draft", [False, True])
+def test_prefill_prompt_logits_do_not_replace_candidate_output(draft) -> None:
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
-    state = SimpleNamespace(prompt_logics=torch.ones(5, 2))
+    state = SimpleNamespace(is_draft_model=draft, prompt_logics=torch.ones(5, 2))
     head._slice_get_last_input = lambda *args: (torch.ones(1, 2), 1)
-    candidates = PostLayerOutput(torch.ones(1, 2), torch.tensor([[10, 20]]))
-    prompt = torch.ones(5, 32)
-    head._lm_head_and_gather = lambda *args, **kwargs: (
-        candidates if kwargs.get("allow_vocab_candidates", True) else PostLayerOutput(prompt)
+    candidates = PostLayerOutput(
+        torch.ones(1, 2),
+        torch.tensor([[10, 20]]) if draft else None,
     )
+    prompt = torch.ones(5, 32)
+    if draft:
+        head._draft_lm_head_and_gather = lambda *args: candidates
+    else:
+        head._target_lm_head_and_gather = lambda *args: candidates
+    head._lm_head_and_gather = lambda *args: PostLayerOutput(prompt)
     assert head.token_forward(None, state, None) is candidates
     assert state.prompt_logics is prompt
 

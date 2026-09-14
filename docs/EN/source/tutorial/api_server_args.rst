@@ -10,7 +10,7 @@ Vocabulary Parallel Sampling
 
 .. option:: --target_vocab_topk_sampling {16,32,64,128,256,512}
 
-    Global output candidate count for the target model. The default ``None`` disables candidate output.
+    Global candidate count communicated for target-model logits. The default ``None`` disables candidate communication.
 
 .. option:: --draft_vocab_topk_sampling {16,32,64,128,256,512}
 
@@ -26,17 +26,16 @@ Vocabulary Parallel Sampling
     a full-vocabulary probability and can change dynamic step selection.
 
     The target model selects the configured global candidate count from raw logits before temperature,
-    request top-k, and top-p processing. The existing sampling backend normalizes and samples within
-    that candidate set. A request top-k of -1 or larger than the output candidate count still only covers
-    the candidates. Generated-token logprobs and top-p mass are relative to the candidate set, so enabling
-    target candidates explicitly opts into approximate sampling.
+    request top-k, and top-p processing. The output layer then creates full-vocabulary logits, fills
+    non-candidate positions with ``-10000000.0``, and scatters candidate values by global token ID.
+    Downstream code continues through the existing full-vocabulary sampling path without a candidate-ID
+    mapping, so existing penalties, masks, and constraints still run. A request top-k of -1 or larger than
+    the output candidate count still only covers the candidates. Generated-token logprobs and top-p mass
+    are relative to the candidate set, so enabling target candidates explicitly opts into approximate sampling.
 
-    ``--target_vocab_topk_sampling`` is incompatible with ``--enable_rl`` (full-vocabulary token rank),
-    ``--use_reward_model``, ``--first_token_constraint_mode``, or an ``--output_constraint_mode`` other
-    than ``none``.
-    Candidate sampling skips presence/frequency/repetition penalties, exponential_decay_length_penalty,
-    min_new_tokens EOS masking, and invalid_token_ids masking. It also does not support allowed_token_ids,
-    logit_bias, regex, grammar, or JSON constraints. Leave the target candidate option unset for these features.
+    Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary
+    results. Examples include the complete token ranks required by ``--enable_rl`` or a large logit bias that
+    would have promoted a non-candidate token into the selected set.
     Startup and request entry points no longer perform vocabulary sampling compatibility validation.
     Use matching settings on PD master, prefill, and decode services.
 

@@ -12,6 +12,8 @@ from lightllm.distributed.communication_op import all_gather
 from lightllm.common.basemodel.triton_kernel.vocab_parallel_sampling import vocab_parallel_candidates
 from lightllm.utils.envs_utils import get_env_start_args
 
+_MASKED_LOGIT_VALUE = -10000000.0
+
 
 class LlamaPostLayerInfer(PostLayerInferTpl):
     """ """
@@ -57,7 +59,10 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         input_embdings = None
 
         # 正常采样使用的 logits，始终只对应每个请求最后一个位置。
-        post_output = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
+        if infer_state.is_draft_model:
+            post_output = self._draft_lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
+        else:
+            post_output = self._target_lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
         # 在 return_all_prompt_logics 模式下，prompt_logics 保存的是完整 prefill
         # 的 hidden state，需要在 norm/lm_head 之前取出来，避免被 input_embdings 置空。
         prompt_logics_hiddens = infer_state.prompt_logics
@@ -67,10 +72,22 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if prompt_logics_hiddens is not None:
             prompt_token_num = prompt_logics_hiddens.shape[0]
             infer_state.prompt_logics = self._lm_head_and_gather(
-                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state, allow_vocab_candidates=False
+                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state
             ).logits
 
         return post_output
+
+    def _project_local_logits(
+        self,
+        hidden: torch.Tensor,
+        token_num: int,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        infer_state: LlamaInferStateInfo,
+    ) -> torch.Tensor:
+        normed = self._norm(hidden, infer_state, layer_weight)
+        normed = normed.permute(1, 0).view(-1, token_num)
+        local_logits = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
+        return local_logits
 
     def _lm_head_and_gather(
         self,
@@ -78,47 +95,94 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         token_num: int,
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
-        allow_vocab_candidates: bool = True,
     ) -> PostLayerOutput:
-        normed = self._norm(hidden, infer_state, layer_weight)
-        normed = normed.permute(1, 0).view(-1, token_num)
-        logic_batch = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
-        normed = None
+        """执行原始 lm-head，并收集完整词表 logits。"""
+
+        local_logits = self._project_local_logits(hidden, token_num, layer_weight, infer_state)
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
-        if allow_vocab_candidates:
-            args = get_env_start_args()
-            top_k = args.draft_vocab_topk_sampling if infer_state.is_draft_model else args.target_vocab_topk_sampling
-        else:
-            top_k = None
-        if top_k is not None:
-            logits, token_ids = vocab_parallel_candidates(
-                local_logits=logic_batch,
-                vocab_start=layer_weight.lm_head_weight_.tp_vocab_start_id,
-                vocab_size=vocab_size,
-                top_k=top_k,
-                group=infer_state.dist_group,
-                world_size=self.tp_world_size_,
-                alloc_func=self.alloc_tensor,
-            )
-            return PostLayerOutput(logits=logits, logits_token_ids=token_ids)
         if self.tp_world_size_ == 1:
-            gather_data = logic_batch
+            gather_data = local_logits
         else:
             gather_data = self.alloc_tensor((vocab_size, token_num), dtype=hidden.dtype)
             split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
             all_gather(
                 [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
-                logic_batch,
+                local_logits,
                 group=infer_state.dist_group,
                 async_op=False,
             )
-        logic_batch = None
+        local_logits = None
 
         ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
         return PostLayerOutput(logits=ans_logics)
+
+    def _get_vocab_parallel_candidates(
+        self,
+        hidden: torch.Tensor,
+        token_num: int,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        infer_state: LlamaInferStateInfo,
+        top_k: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        local_logits = self._project_local_logits(hidden, token_num, layer_weight, infer_state)
+        logits, token_ids = vocab_parallel_candidates(
+            local_logits=local_logits,
+            vocab_start=layer_weight.lm_head_weight_.tp_vocab_start_id,
+            vocab_size=layer_weight.lm_head_weight_.vocab_size,
+            top_k=top_k,
+            group=infer_state.dist_group,
+            world_size=self.tp_world_size_,
+            alloc_func=self.alloc_tensor,
+        )
+        local_logits = None
+        return logits, token_ids
+
+    def _target_lm_head_and_gather(
+        self,
+        hidden: torch.Tensor,
+        token_num: int,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        infer_state: LlamaInferStateInfo,
+    ) -> PostLayerOutput:
+        """按 target 配置减少词表通信，并重建完整词表 logits。"""
+
+        top_k = get_env_start_args().target_vocab_topk_sampling
+        if top_k is None:
+            return self._lm_head_and_gather(hidden, token_num, layer_weight, infer_state)
+
+        candidate_logits, candidate_token_ids = self._get_vocab_parallel_candidates(
+            hidden, token_num, layer_weight, infer_state, top_k
+        )
+        logits = self.alloc_tensor(
+            (token_num, layer_weight.lm_head_weight_.vocab_size),
+            dtype=torch.float32,
+        )
+        logits.fill_(_MASKED_LOGIT_VALUE)
+        logits.scatter_(dim=1, index=candidate_token_ids, src=candidate_logits)
+        candidate_logits = None
+        candidate_token_ids = None
+        return PostLayerOutput(logits=logits)
+
+    def _draft_lm_head_and_gather(
+        self,
+        hidden: torch.Tensor,
+        token_num: int,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        infer_state: LlamaInferStateInfo,
+    ) -> PostLayerOutput:
+        """按 draft 配置返回候选 logits，未开启时回退到完整词表。"""
+
+        top_k = get_env_start_args().draft_vocab_topk_sampling
+        if top_k is None:
+            return self._lm_head_and_gather(hidden, token_num, layer_weight, infer_state)
+
+        logits, token_ids = self._get_vocab_parallel_candidates(
+            hidden, token_num, layer_weight, infer_state, top_k
+        )
+        return PostLayerOutput(logits=logits, logits_token_ids=token_ids)
 
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight

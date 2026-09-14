@@ -208,7 +208,8 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
-    # 仅在模型启用候选词表输出时提供。
+    # 仅在 draft 模型直接返回紧凑候选词表时提供。
+    # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
     logits_token_ids: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:

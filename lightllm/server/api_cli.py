@@ -384,7 +384,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         choices=vocab_topk_choices,
         default=None,
-        help="Global top-k candidate count for target-model sampling; disabled by default.",
+        help="Global top-k communication width for target-model logits; disabled by default.",
     )
     parser.add_argument(
         "--draft_vocab_topk_sampling",

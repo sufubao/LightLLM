@@ -10,7 +10,7 @@ APIServer 参数详解
 
 .. option:: --target_vocab_topk_sampling {16,32,64,128,256,512}
 
-    主模型 target 的全局输出候选数，默认 ``None``，即关闭候选输出。
+    主模型 target 的全局 logits 通信候选数，默认 ``None``，即关闭候选通信。
 
 .. option:: --draft_vocab_topk_sampling {16,32,64,128,256,512}
 
@@ -24,18 +24,15 @@ APIServer 参数详解
     仍是完整词表上的精确 argmax。动态 MTP 在全局 top-k 候选上做 softmax，生成供调度使用的
     模拟概率；它不是全词表概率，可能改变动态步数选择。模型不计算或输出完整词表 token 概率。
 
-    target 在温度、请求 top-k 和 top-p 处理之前，先从原始 logits 选取配置的全局候选数，
-    然后在候选集合上归一化并执行现有采样后端。支持 greedy、temperature、top-k、top-p、seed、
-    普通 stop 序列和 EOS 终止；请求 top-k=-1 或大于输出候选数时，仍只能覆盖候选集合。
+    target 在温度、请求 top-k 和 top-p 处理之前，先从原始 logits 选取配置的全局候选数。
+    输出层随后创建完整词表 logits，将非候选位置填为 ``-10000000.0``，并按全局 token ID
+    回填候选值。下游继续使用原有完整词表采样路径，无需处理候选 token ID 映射；已有的
+    penalty、mask 和约束逻辑也会照常执行。请求 top-k=-1 或大于输出候选数时，仍只能覆盖候选集合。
     生成 token 的 logprob 是候选集合上的归一化概率对应的对数，不是完整词表上的 logprob；
     top-p 也不代表完整词表累计概率。启用 target 候选是显式的近似采样。
 
-    ``--target_vocab_topk_sampling`` 不兼容 ``--enable_rl``（需要完整词表 token rank）、
-    ``--use_reward_model``、``--first_token_constraint_mode`` 和非 ``none`` 的
-    ``--output_constraint_mode``。
-    候选采样跳过 presence/frequency/repetition penalty、exponential_decay_length_penalty、
-    min_new_tokens 的 EOS 屏蔽和 invalid_token_ids 屏蔽；也不支持 allowed_token_ids、
-    logit_bias、正则、grammar 和 JSON 约束。需要这些功能时不要设置 target 候选参数。
+    依赖非候选原始分数的功能无法恢复完整词表的精确结果，例如 ``--enable_rl`` 所需的完整
+    token rank，或通过较大 logit bias 将非候选 token 提升到候选范围内的场景。
     启动和请求入口不再执行词表并行采样专用兼容性校验。
     PD 部署应在 master、prefill 和 decode 上使用相同配置。
 

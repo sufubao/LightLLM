@@ -31,6 +31,7 @@ async def lightllm_get_score(request: Request, httpserver_manager: HttpServerMan
 
 
 async def lightllm_generate(request: Request, httpserver_manager: HttpServerManager) -> Response:
+
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
@@ -115,6 +116,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
 
 
 async def lightllm_generate_stream(request: Request, httpserver_manager: HttpServerManager) -> Response:
+
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]

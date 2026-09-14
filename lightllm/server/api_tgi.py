@@ -57,6 +57,7 @@ def format_tgi_params(params, num_beam: int = 1):
 
 
 async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerManager) -> Response:
+
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     num_beam = request_dict.get("num_beam", 1)
@@ -137,6 +138,7 @@ async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerMana
 
 
 async def tgi_generate_stream_impl(request: Request, httpserver_manager: HttpServerManager) -> Response:
+
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = format_tgi_params(request_dict["parameters"])

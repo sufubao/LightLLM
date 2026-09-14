@@ -460,6 +460,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
+
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)

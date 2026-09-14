@@ -699,6 +699,7 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
+
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -931,6 +932,7 @@ class ModeBackend:
         mask_func: Optional[Callable] = None,
         logits_token_ids: Optional[torch.Tensor] = None,
     ):
+
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

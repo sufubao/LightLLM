@@ -57,7 +57,6 @@ class InferStateInfo:
         # token 位置的 logits，供后续回传 prompt logprobs 信息使用。
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
         self.prompt_logics: Optional[torch.Tensor] = None
-        self.logits_token_ids: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None
         self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
         self.dist_group: CustomProcessGroup = None

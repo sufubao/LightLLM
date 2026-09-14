@@ -174,13 +174,14 @@ def test_dspark_post_layer_publishes_head_results_through_collector():
     )
     layer_weight = SimpleNamespace(lm_head_weight_=LMHead())
 
-    logits = post_infer.token_forward(
+    output = post_infer.token_forward(
         input_embdings=torch.randn(4, 3),
         infer_state=infer_state,
         layer_weight=layer_weight,
     )
 
-    assert logits.shape == (4, 1)
+    assert output.logits.shape == (4, 1)
+    assert output.logits_token_ids is None
     assert torch.equal(collector.outputs["draft_token_ids"], torch.tensor([1, 2, 3, 4]))
     assert collector.outputs["confidence_logits"] is confidence_logits
 

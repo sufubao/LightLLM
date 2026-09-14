@@ -1,4 +1,5 @@
 import torch
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 
 from lightllm.distributed.communication_op import all_gather_into_tensor
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
@@ -177,10 +178,10 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
                 confidence_logits=confidence_logits,
             )
             # Graph unpadding still uses the leading logits dimension when token ids are returned directly.
-            return local_logits.new_empty((token_num, 1))
+            return PostLayerOutput(logits=local_logits.new_empty((token_num, 1)))
 
-        logits = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
-        block_logits = logits.reshape(num_reqs, self.block_size_, -1)
+        post_output = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
+        block_logits = post_output.logits.reshape(num_reqs, self.block_size_, -1)
         sampled_tokens = torch.argmax(block_logits, dim=-1)
         confidence_logits = self.predict_confidence_logits(
             block_hidden,
@@ -192,4 +193,4 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
             draft_token_ids=None,
             confidence_logits=confidence_logits,
         )
-        return logits
+        return post_output

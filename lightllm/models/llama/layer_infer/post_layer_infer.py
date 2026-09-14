@@ -1,5 +1,6 @@
 import os
 import torch
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
@@ -51,12 +52,12 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
     def _token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
-    ):
+    ) -> PostLayerOutput:
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
         input_embdings = None
 
         # 正常采样使用的 logits，始终只对应每个请求最后一个位置。
-        ans_logics = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
+        post_output = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
         # 在 return_all_prompt_logics 模式下，prompt_logics 保存的是完整 prefill
         # 的 hidden state，需要在 norm/lm_head 之前取出来，避免被 input_embdings 置空。
         prompt_logics_hiddens = infer_state.prompt_logics
@@ -67,9 +68,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             prompt_token_num = prompt_logics_hiddens.shape[0]
             infer_state.prompt_logics = self._lm_head_and_gather(
                 prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state, allow_vocab_candidates=False
-            )
+            ).logits
 
-        return ans_logics
+        return post_output
 
     def _lm_head_and_gather(
         self,
@@ -78,7 +79,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
         allow_vocab_candidates: bool = True,
-    ) -> torch.Tensor:
+    ) -> PostLayerOutput:
         normed = self._norm(hidden, infer_state, layer_weight)
         normed = normed.permute(1, 0).view(-1, token_num)
         logic_batch = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
@@ -100,8 +101,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 world_size=self.tp_world_size_,
                 alloc_func=self.alloc_tensor,
             )
-            infer_state.logits_token_ids = token_ids
-            return logits
+            return PostLayerOutput(logits=logits, logits_token_ids=token_ids)
         if self.tp_world_size_ == 1:
             gather_data = logic_batch
         else:
@@ -118,11 +118,11 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
-        return ans_logics
+        return PostLayerOutput(logits=ans_logics)
 
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
-    ):
+    ) -> PostLayerOutput:
 
         return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
@@ -133,10 +133,10 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
-    ):
+    ) -> tuple[PostLayerOutput, PostLayerOutput]:
 
-        logics = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
+        output = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
-        logics1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
+        output1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
 
-        return logics, logics1
+        return output, output1

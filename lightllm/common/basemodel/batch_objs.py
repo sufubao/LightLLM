@@ -184,6 +184,14 @@ class ModelMtpOutputCollector:
 
 
 @dataclass
+class PostLayerOutput:
+    """Output-head logits and optional candidate-column to token-ID mapping."""
+
+    logits: torch.Tensor
+    logits_token_ids: Optional[torch.Tensor] = None
+
+
+@dataclass
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor

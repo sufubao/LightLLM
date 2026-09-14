@@ -15,7 +15,7 @@ def sample_vocab_candidates(
     logits_token_ids: torch.Tensor,
     reqs: List[InferReq],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Sample candidate logits and translate candidate columns to global token IDs."""
+    """对候选 logits 采样，并将选中的候选列映射为全局 token ID。"""
     logits_width = logits.shape[-1]
     temperatures = []
     top_ps = []

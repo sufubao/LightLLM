@@ -1,10 +1,9 @@
-"""Communicate vocabulary candidates instead of dense logits.
+"""通过通信传递词表候选，替代完整词表 logits。
 
-Temporary candidate buffers use int64 slots: logits are bitcast to
-int32 before storage, while token IDs retain their integer representation.
-Merges view buffers as [batch, part/rank, candidate slots]. Explicit strides
-preserve coalesced local reads and describe gathered data without a copy.
-All reductions read native projection strides and use only tile-sized fp32 data.
+候选临时缓冲区使用 int64 槽位：logits 先按位转换为 int32 再存储，token ID 保持整数表示。
+合并时将缓冲区视为 [batch, part/rank, candidate slots]。通过显式步长保持本地合并访存，
+并直接描述聚合后的数据布局，避免额外复制。
+所有归约均按输出投影的原始步长读取，仅使用分块大小的 fp32 数据。
 """
 
 import torch
@@ -23,7 +22,7 @@ def _local_top1(
     S0: tl.constexpr,
     S1: tl.constexpr,
     BLOCK: tl.constexpr = 2048,
-):
+) -> None:
     batch, part = tl.program_id(0), tl.program_id(1)
     offsets = part * BLOCK + tl.arange(0, BLOCK)
     x = tl.load(X + offsets * S0 + batch * S1, offsets < V, other=-float("inf")).to(tl.float32)
@@ -37,7 +36,7 @@ def _local_top1(
 
 
 @triton.jit
-def _merge_top1(P, OUT, PARTS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr):
+def _merge_top1(P, OUT, PARTS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr) -> None:
     batch = tl.program_id(0)
     width: tl.constexpr = 2
     offsets = tl.arange(0, triton.next_power_of_2(PARTS))
@@ -52,7 +51,7 @@ def _merge_top1(P, OUT, PARTS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr)
 
 
 @triton.jit
-def _unpack_top1(P, OUT, IDS, RANKS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr):
+def _unpack_top1(P, OUT, IDS, RANKS: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr) -> None:
     batch = tl.program_id(0)
     ranks = tl.arange(0, triton.next_power_of_2(RANKS))
     ptr = P + batch * S0 + ranks * S1
@@ -63,8 +62,8 @@ def _unpack_top1(P, OUT, IDS, RANKS: tl.constexpr, S0: tl.constexpr, S1: tl.cons
 
 
 @triton.jit
-def _candidate_key(values, ids):
-    # Normalize signed zero so ties always prefer the lowest token ID.
+def _candidate_key(values, ids) -> tl.tensor:
+    # 统一正零和负零的表示，保证分数相同时优先选择最小的 token ID。
     bits = tl.where(values == 0, 0.0, values).to(tl.uint32, bitcast=True)
     ordered = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
     return (ordered.to(tl.uint64) << 32) | (0xFFFFFFFF - ids.to(tl.uint32)).to(tl.uint64)
@@ -81,7 +80,7 @@ def _topk_tiles(
     START: tl.constexpr = None,
     IDS=None,
     BLOCK: tl.constexpr = 1024,
-):
+) -> None:
     batch, part = tl.program_id(0), tl.program_id(1)
     lane = tl.arange(0, BLOCK)
     offsets = part * BLOCK + lane
@@ -121,16 +120,15 @@ def vocab_parallel_candidates(
     group=None,
     world_size: int = 1,
     alloc_func=None,
-):
-    """Return candidate logits and global token IDs.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """返回候选 logits 和全局 token ID。
 
-    ``local_logits`` is native ``[local_vocab, batch]`` with arbitrary strides.
-    Top1 returns ``[batch, world_size]``, retaining each rank's local winner in
-    rank order for downstream argmax and approximate probability calculation.
-    Other supported values return global candidates of shape
-    ``[batch, min(top_k, vocab_size)]``.
-    Finite ties select the smallest global ID. Every rank must use the same
-    arguments except its shard and ``vocab_start``. The supplied allocator follows ``torch.empty``.
+    ``local_logits`` 保持原始的 ``[local_vocab, batch]`` 布局，支持任意步长。
+    Top1 返回 ``[batch, world_size]``，按 rank 顺序保留各分片的局部最大值，
+    供下游执行 argmax 和计算近似概率。
+    其他支持的候选数返回形状为 ``[batch, min(top_k, vocab_size)]`` 的全局候选。
+    有限分数相同时选择最小的全局 ID。除本地分片和 ``vocab_start`` 外，各 rank 的参数必须一致。
+    传入的分配器须遵循 ``torch.empty`` 的调用接口。
     """
     assert local_logits.is_cuda and local_logits.ndim == 2
     assert top_k in (1, 16, 32, 64, 128, 256, 512)
@@ -139,7 +137,7 @@ def vocab_parallel_candidates(
     assert vocab_start + local_logits.shape[0] <= vocab_size
     allocate = torch.empty if alloc_func is None else alloc_func
 
-    def alloc(shape, dtype=torch.int64):
+    def alloc(shape, dtype=torch.int64) -> torch.Tensor:
         return allocate(shape, dtype=dtype, device=local_logits.device)
 
     local_vocab, batch = local_logits.shape

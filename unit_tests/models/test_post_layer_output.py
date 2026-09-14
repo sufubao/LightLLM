@@ -11,7 +11,7 @@ from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerI
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_output_head_returns_candidates_without_mutating_state(monkeypatch, enabled):
+def test_output_head_returns_candidates_without_mutating_state(monkeypatch, enabled) -> None:
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
     head.tp_world_size_ = 1
     head.alloc_tensor = lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype)
@@ -22,7 +22,7 @@ def test_output_head_returns_candidates_without_mutating_state(monkeypatch, enab
         vocab_size = 4
         tp_vocab_start_id = 0
 
-        def __call__(self, **kwargs):
+        def __call__(self, **kwargs) -> torch.Tensor:
             return dense
 
     values, ids = dense.T[:, :2], torch.tensor([[0, 1]] * 3)
@@ -39,7 +39,7 @@ def test_output_head_returns_candidates_without_mutating_state(monkeypatch, enab
     assert prompt.logits_token_ids is None
 
 
-def test_prefill_prompt_logits_do_not_replace_candidate_output():
+def test_prefill_prompt_logits_do_not_replace_candidate_output() -> None:
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
     state = SimpleNamespace(prompt_logics=torch.ones(5, 2))
     head._slice_get_last_input = lambda *args: (torch.ones(1, 2), 1)
@@ -52,7 +52,7 @@ def test_prefill_prompt_logits_do_not_replace_candidate_output():
     assert state.prompt_logics is prompt
 
 
-def test_model_output_and_unpadding_preserve_candidate_mapping():
+def test_model_output_and_unpadding_preserve_candidate_mapping() -> None:
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     logits = torch.randn(3, 2)
     ids = torch.tensor([[10, 20], [30, 40], [50, 60]])
@@ -63,7 +63,7 @@ def test_model_output_and_unpadding_preserve_candidate_mapping():
     torch.testing.assert_close(unpadded.logits_token_ids, ids[:2])
 
 
-def test_gemma_softcap_preserves_candidate_ids(monkeypatch):
+def test_gemma_softcap_preserves_candidate_ids(monkeypatch) -> None:
     ids = torch.tensor([[10, 20]])
     logits = torch.tensor([[1.0, 4.0]])
     monkeypatch.setattr(llama_post.LlamaPostLayerInfer, "token_forward", lambda *args: PostLayerOutput(logits, ids))
@@ -75,7 +75,7 @@ def test_gemma_softcap_preserves_candidate_ids(monkeypatch):
     assert output.logits_token_ids is ids
 
 
-def test_overlap_keeps_each_microbatch_mapping():
+def test_overlap_keeps_each_microbatch_mapping() -> None:
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
     outputs = [PostLayerOutput(torch.ones(1, 2), torch.tensor([[10, 20]])), PostLayerOutput(torch.ones(1, 3))]
     head.token_forward = lambda hidden, state, layer_weight: outputs[state]

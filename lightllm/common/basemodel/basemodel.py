@@ -473,7 +473,7 @@ class TpPartBaseModel:
         new_model_input.check_input()
         return new_model_input
 
-    def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo):
+    def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo) -> ModelOutput:
         output = ModelOutput(
             logits=post_output.logits.contiguous(),
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),

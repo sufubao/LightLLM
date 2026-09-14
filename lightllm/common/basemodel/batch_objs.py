@@ -185,7 +185,7 @@ class ModelMtpOutputCollector:
 
 @dataclass
 class PostLayerOutput:
-    """Output-head logits and optional candidate-column to token-ID mapping."""
+    """输出层 logits，以及可选的候选列到 token ID 的映射。"""
 
     logits: torch.Tensor
     logits_token_ids: Optional[torch.Tensor] = None
@@ -208,7 +208,7 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
-    # Present only for the model's statically selected vocabulary candidate layout.
+    # 仅在模型启用候选词表输出时提供。
     logits_token_ids: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:

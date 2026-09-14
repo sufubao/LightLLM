@@ -10,8 +10,9 @@ from lightllm.models.llama.layer_infer import post_layer_infer as llama_post
 from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerInfer
 
 
+@pytest.mark.parametrize("draft", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_output_head_returns_candidates_without_mutating_state(monkeypatch, enabled) -> None:
+def test_output_head_returns_candidates_without_mutating_state(monkeypatch, draft, enabled) -> None:
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
     head.tp_world_size_ = 1
     head.alloc_tensor = lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype)
@@ -27,8 +28,10 @@ def test_output_head_returns_candidates_without_mutating_state(monkeypatch, enab
 
     values, ids = dense.T[:, :2], torch.tensor([[0, 1]] * 3)
     monkeypatch.setattr(llama_post, "vocab_parallel_candidates", lambda **kwargs: (values, ids))
-    head.vocab_topk_sampling = 16 if enabled else None
-    state = SimpleNamespace(dist_group=None)
+    args = SimpleNamespace(target_vocab_topk_sampling=None, draft_vocab_topk_sampling=None)
+    setattr(args, "draft_vocab_topk_sampling" if draft else "target_vocab_topk_sampling", 16 if enabled else None)
+    monkeypatch.setattr(llama_post, "get_env_start_args", lambda: args)
+    state = SimpleNamespace(is_draft_model=draft, dist_group=None)
     weight = SimpleNamespace(lm_head_weight_=Weight())
     output = head._lm_head_and_gather(torch.ones(3, 2), 3, weight, state)
     assert not hasattr(state, "logits_token_ids")

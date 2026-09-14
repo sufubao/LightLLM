@@ -7,5 +7,4 @@ class PostLayerInfer(BaseLayerInfer):
     def __init__(self, network_config):
         super().__init__()
         self.network_config_ = network_config
-        self.vocab_topk_sampling = None
         return

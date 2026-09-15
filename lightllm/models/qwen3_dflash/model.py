@@ -7,7 +7,6 @@ from lightllm.common.basemodel.attention import (
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
 from lightllm.models.qwen3_dflash.layer_infer.pre_layer_infer import Qwen3DFlashPreLayerInfer
@@ -16,7 +15,6 @@ from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
 
 
-@DraftModelRegistry(model_type="qwen3", spec_modes="dflash")
 class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 

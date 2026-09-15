@@ -1,5 +1,5 @@
 import torch
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
@@ -96,19 +96,13 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         return batch_next_token_ids.view(-1), batch_next_token_logprobs.view(-1)
 
 
-def _top_p_top_k(
-    probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor, max_top_k: Optional[int] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if max_top_k is not None and max_top_k * 4 <= probs.shape[-1] and probs.dtype == torch.float32:
-        # 概率仍按完整词表归一化；top-k 限定了最终支持集，只需排序这个前缀。
-        probs_sort, probs_idx = torch.topk(probs, k=max_top_k, dim=-1, sorted=True)
-    else:
-        probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):
+    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
 
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
-    probs_sort[torch.arange(0, probs_sort.shape[-1], device=probs.device).view(1, -1) >= top_ks.view(-1, 1)] = 0.0
+    probs_sort[torch.arange(0, probs.shape[-1], device="cuda").view(1, -1) >= top_ks.view(-1, 1)] = 0.0
 
     return probs_sort, probs_idx
 
@@ -123,14 +117,7 @@ def _top_p_top_k_sample(
     sampling_backend = get_env_start_args().sampling_backend
 
     if sampling_backend == "triton":
-        # 缩短张量会改变随机数分配及同分次序；带种子或混有 greedy 请求时保留原路径。
-        # 单请求实测没有收益，继续使用完整排序。
-        max_top_k = None
-        if not exist_req_use_random_seed and probs.shape[0] > 1:
-            request_top_ks = [req.sampling_param.shm_param.top_k for req in reqs]
-            if min(request_top_ks) > 1:
-                max_top_k = max(request_top_ks)
-        probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks, max_top_k=max_top_k)
+        probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         if not exist_req_use_random_seed:
             sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
         else:

@@ -149,8 +149,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             alloc_func=self.alloc_tensor,
         )
         if self.tp_world_size_ == 1:
-            # 本地筛选已返回 [B, K]；无通信时只需将分数转为输出层要求的 FP32。
-            return local_values.float(), local_token_ids
+            # 分数转为 FP32；将回退路径的转置视图连续化，保证 token ID 的 [B, K] 输出连续。
+            return local_values.float(), local_token_ids.contiguous()
 
         packed_candidates = self.alloc_tensor(
             (token_num, candidate_count * 2),

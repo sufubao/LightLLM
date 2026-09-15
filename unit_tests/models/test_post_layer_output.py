@@ -98,12 +98,13 @@ def test_vocab_parallel_topk_returns_candidates_on_single_rank(monkeypatch) -> N
 
     expected_logits, expected_token_ids = torch.topk(local_logits, k=2, dim=0, sorted=False)
     assert logits.dtype == torch.float32 and token_ids.dtype == torch.int64
+    assert token_ids.is_contiguous()
     torch.testing.assert_close(logits, expected_logits.permute(1, 0))
     torch.testing.assert_close(token_ids, expected_token_ids.permute(1, 0))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("vocab_size, token_num, top_k", [(257, 16, 512), (257, 65, 64), (248320, 64, 64)])
+@pytest.mark.parametrize("vocab_size, token_num, top_k", [(257, 15, 512), (257, 65, 64), (248320, 64, 64)])
 def test_single_rank_vocab_topk_graph_preserves_output_contract(vocab_size, token_num, top_k) -> None:
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
     head.tp_world_size_ = 1
@@ -126,6 +127,7 @@ def test_single_rank_vocab_topk_graph_preserves_output_contract(vocab_size, toke
     expected_values = torch.topk(local_logits.T, k=candidate_count, dim=1, sorted=True).values.float()
     assert values.shape == token_ids.shape == (token_num, candidate_count)
     assert values.dtype == torch.float32 and token_ids.dtype == torch.int64
+    assert token_ids.is_contiguous()
     assert torch.all((token_ids >= 0) & (token_ids < vocab_size))
     assert torch.all(token_ids.sort(dim=1).values.diff(dim=1) > 0)
     torch.testing.assert_close(values, local_logits.T.gather(1, token_ids).float(), rtol=0, atol=0)

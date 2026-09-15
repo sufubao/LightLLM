@@ -88,6 +88,8 @@ def local_vocab_topk(
         values, token_ids = torch.topk(local_logits, k=top_k, dim=0, sorted=False)
         return values.T, token_ids.T
 
+    # TODO: 开发并调优融合转置与 top-k 筛选的 Triton 算子，减少中间缓冲和访存，
+    # 在保持候选分数与 token ID 正确性的前提下优化整体性能。
     # 只重排 BF16 数据，不升为 FP32；同时避免在此绕开调用方的 allocator 自行分配。
     transposed_logits = alloc_func((token_num, local_vocab_size), dtype=local_logits.dtype, device=local_logits.device)
     # H200 原型对照中，64×64 tile、8 个 warp 的组合在 B=64/256 时表现稳定。

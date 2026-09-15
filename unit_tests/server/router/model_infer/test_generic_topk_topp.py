@@ -4,10 +4,47 @@ import pytest
 import torch
 
 from lightllm.server.router.model_infer.mode_backend import generic_post_process as sampling
-from unit_tests.server.router.model_infer.test_generic_greedy import make_context
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA")
+
+
+def make_context(batch: int, vocab: int, counter_mode: str) -> tuple[SimpleNamespace, list]:
+    ids = torch.tensor([2, 5] * batch, device="cuda", dtype=torch.int64)
+    counts = torch.ones_like(ids, dtype=torch.int32)
+    offsets = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * 2
+    history = torch.zeros((batch, vocab), device="cuda", dtype=torch.int32)
+    history[:, [2, 5]] = 1
+    manager = SimpleNamespace(
+        vocab_size=vocab,
+        penalty_counter_mode=counter_mode,
+        req_to_presence_penalty=torch.zeros(batch, device="cuda"),
+        req_to_frequency_penalty=torch.zeros(batch, device="cuda"),
+        req_to_repetition_penalty=torch.ones(batch, device="cuda"),
+        req_to_exponential_decay_length_penalty=torch.ones(batch, device="cuda"),
+        req_to_out_token_id_counter=history,
+        gen_cpu_out_token_counter_sampling_params=lambda req_objs: (ids, counts, offsets),
+    )
+    reqs = []
+    for i in range(batch):
+        params = SimpleNamespace(
+            temperature=0.7 + i * 0.1,
+            top_k=1,
+            top_p=1.0,
+            min_new_tokens=0,
+            exponential_decay_length_penalty=SimpleNamespace(to_tuple=lambda: (0, 1.0)),
+        )
+        reqs.append(
+            SimpleNamespace(
+                req_idx=i,
+                vocab_size=vocab,
+                generator=None,
+                shm_req=SimpleNamespace(input_len=1),
+                get_cur_total_len=lambda: 3,
+                sampling_param=SimpleNamespace(shm_param=params, invalid_token_ids=[]),
+            )
+        )
+    return manager, reqs
 
 
 def reference_filter(

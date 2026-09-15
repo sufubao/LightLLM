@@ -3,7 +3,6 @@ from typing import List, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
-from lightllm.common.basemodel.triton_kernel.post_process.greedy_sample import greedy_sample
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
@@ -75,9 +74,6 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
             invalid_token_ids=invalid_token_ids,
             cu_invalid_token_num=cu_invalid_token_num,
         )
-
-    if is_all_greedy and logits.dtype == torch.float32:
-        return greedy_sample(logits, b_temperatures)
 
     logits.div_(b_temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)

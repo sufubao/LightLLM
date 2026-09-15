@@ -29,14 +29,19 @@ Vocabulary Parallel Sampling
     request top-k, and top-p processing. The output layer then creates full-vocabulary logits, fills
     non-candidate positions with ``-10000000.0``, and scatters candidate values by global token ID.
     Downstream code continues through the existing full-vocabulary sampling path without a candidate-ID
-    mapping, so existing penalties, masks, and constraints still run. A request top-k of -1 or larger than
-    the gathered candidate count still only covers the candidates. Generated-token logprobs and top-p mass
+    mapping; existing penalties and invalid-token masking still run after candidate reconstruction.
+    A request top-k of -1 or larger than the gathered candidate count still only covers the candidates.
+    Generated-token logprobs and top-p mass
     are relative to the candidate set, so enabling target candidates explicitly opts into approximate sampling.
 
     Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary
     results. Examples include the complete token ranks required by ``--enable_rl`` or a large logit bias that
     would have promoted a non-candidate token into the selected set.
-    Startup and request entry points no longer perform vocabulary sampling compatibility validation.
+    ``--target_vocab_topk_sampling`` cannot be combined with ``--output_constraint_mode outlines/xgrammar``
+    or ``--first_token_constraint_mode``; inference nodes reject these combinations with a startup assertion.
+    Non-candidate scores are ``-10000000.0``, while constraint masks set forbidden-token scores to ``-1000000.0``.
+    If all allowed tokens are pruned, forbidden tokens receive higher scores. Disable target candidate pruning
+    when using these output constraints. This check does not restrict ``--draft_vocab_topk_sampling``.
     Use matching settings on PD master, prefill, and decode services.
 
     Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and

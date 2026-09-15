@@ -27,13 +27,18 @@ APIServer 参数详解
     target 在温度、请求 top-k 和 top-p 处理之前，先从每个 TP 词表分片选取配置数量的候选。
     输出层随后创建完整词表 logits，将非候选位置填为 ``-10000000.0``，并按全局 token ID
     回填候选值。下游继续使用原有完整词表采样路径，无需处理候选 token ID 映射；已有的
-    penalty、mask 和约束逻辑也会照常执行。请求 top-k=-1 或大于 all-gather 后的候选总数时，仍只能覆盖候选集合。
+    penalty 和 invalid-token 屏蔽仍会在候选回填后执行。请求 top-k=-1 或大于 all-gather 后的
+    候选总数时，仍只能覆盖候选集合。
     生成 token 的 logprob 是候选集合上的归一化概率对应的对数，不是完整词表上的 logprob；
     top-p 也不代表完整词表累计概率。启用 target 候选是显式的近似采样。
 
     依赖非候选原始分数的功能无法恢复完整词表的精确结果，例如 ``--enable_rl`` 所需的完整
     token rank，或通过较大 logit bias 将非候选 token 提升到候选范围内的场景。
-    启动和请求入口不再执行词表并行采样专用兼容性校验。
+    ``--target_vocab_topk_sampling`` 不能与 ``--output_constraint_mode outlines/xgrammar``
+    或 ``--first_token_constraint_mode`` 同时启用，推理节点启动时会触发断言。
+    原因是非候选分数为 ``-10000000.0``，约束屏蔽分数为 ``-1000000.0``；
+    若合法 token 全部被裁掉，禁止的 token 反而会得分更高。使用这些输出约束时请关闭 target 候选裁剪。
+    ``--draft_vocab_topk_sampling`` 不受此项检查限制。
     PD 部署应在 master、prefill 和 decode 上使用相同配置。
 
     仅支持使用 Llama 标准 ``token_forward``、``_token_forward`` 和 ``_lm_head_and_gather``

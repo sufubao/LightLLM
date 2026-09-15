@@ -9,6 +9,7 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
 from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor
+from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk
 from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
     pack_vocab_parallel_topk,
     unpack_vocab_parallel_topk,
@@ -137,27 +138,20 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         candidate_count = min(top_k, vocab_size)
         local_vocab_size = local_logits.shape[0]
         assert vocab_size <= torch.iinfo(torch.int32).max, f"vocabulary size {vocab_size} exceeds int32 token ID range"
-        assert local_vocab_size >= candidate_count, (
-            f"local vocabulary size {local_vocab_size} must be at least the candidate count {candidate_count}"
-        )
+        assert (
+            local_vocab_size >= candidate_count
+        ), f"local vocabulary size {local_vocab_size} must be at least the candidate count {candidate_count}"
 
-        if self.tp_world_size_ == 1:
-            values, token_ids = torch.topk(
-                local_logits.permute(1, 0),
-                k=candidate_count,
-                dim=1,
-                sorted=False,
-            )
-            values = values.float()
-            return values, token_ids
-
-        # 先减少每个 rank 的通信宽度；输入保持 [local_vocab, batch] 布局。
-        local_values, local_token_ids = torch.topk(
+        # 在本地词表上筛选候选；大批量 BF16 输入先分块转置，提高词表扫描效率。
+        local_values, local_token_ids = local_vocab_topk(
             local_logits,
-            k=candidate_count,
-            dim=0,
-            sorted=False,
+            top_k=candidate_count,
+            alloc_func=self.alloc_tensor,
         )
+        if self.tp_world_size_ == 1:
+            # 本地筛选已返回 [B, K]；无通信时只需将分数转为输出层要求的 FP32。
+            return local_values.float(), local_token_ids
+
         packed_candidates = self.alloc_tensor(
             (token_num, candidate_count * 2),
             dtype=torch.float32,
@@ -236,9 +230,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if top_k is None:
             return self._lm_head_and_gather(hidden, token_num, layer_weight, infer_state)
 
-        logits, token_ids = self._vocab_parallel_topk(
-            hidden, token_num, layer_weight, infer_state, top_k
-        )
+        logits, token_ids = self._vocab_parallel_topk(hidden, token_num, layer_weight, infer_state, top_k)
         return PostLayerOutput(logits=logits, logits_token_ids=token_ids)
 
     def token_forward(

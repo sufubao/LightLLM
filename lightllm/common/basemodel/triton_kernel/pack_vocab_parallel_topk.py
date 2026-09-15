@@ -1,7 +1,7 @@
 """词表并行 top-k 候选的通信缓冲区打包与解包。
 
-``torch.topk`` 在本地词表分片上返回两个形状为 ``[candidate_count, token_num]``
-的 tensor：候选分数和分片内 token ID。本文件用一个 Triton kernel 将转置、分数转为
+``local_vocab_topk`` 在本地词表分片上返回两个形状为 ``[token_num, candidate_count]``
+的 tensor：候选分数和分片内 token ID。本文件用一个 Triton kernel 将分数转为
 FP32、token ID 加全局偏移以及两个 tensor 的拼接一次完成，生成下面的通信布局：
 
     packed[token] = [value_0, ..., value_k-1, id_bits_0, ..., id_bits_k-1]
@@ -19,9 +19,6 @@ import triton
 import triton.language as tl
 
 
-_BLOCK_SIZE = 256
-
-
 @triton.jit
 def _pack_vocab_parallel_topk_kernel(
     values,
@@ -33,9 +30,9 @@ def _pack_vocab_parallel_topk_kernel(
     token_ids_stride_1,
     packed_stride_0,
     packed_stride_1,
-    candidate_count: tl.constexpr,
     token_num,
     vocab_start,
+    candidate_count: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     # 将二维输出 [token_num, candidate_count] 展平，每个 program 处理连续的一段候选。
@@ -44,9 +41,9 @@ def _pack_vocab_parallel_topk_kernel(
     token_indexes = element_indexes // candidate_count
     candidate_indexes = element_indexes % candidate_count
 
-    # torch.topk 的输出布局为 [candidate_count, token_num]，因此候选维在前。
-    value_offsets = candidate_indexes * values_stride_0 + token_indexes * values_stride_1
-    token_id_offsets = candidate_indexes * token_ids_stride_0 + token_indexes * token_ids_stride_1
+    # 输入为 [token_num, candidate_count]；显式 stride 同时支持连续输出和回退路径的转置视图。
+    value_offsets = token_indexes * values_stride_0 + candidate_indexes * values_stride_1
+    token_id_offsets = token_indexes * token_ids_stride_0 + candidate_indexes * token_ids_stride_1
     packed_value_offsets = token_indexes * packed_stride_0 + candidate_indexes * packed_stride_1
 
     # 分数统一转为 FP32；分片内 token ID 加 vocab_start 后变为全局 token ID。
@@ -74,8 +71,8 @@ def _unpack_vocab_parallel_topk_kernel(
     values_stride_1,
     token_ids_stride_0,
     token_ids_stride_1,
-    candidate_count: tl.constexpr,
     token_num,
+    candidate_count: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -117,7 +114,7 @@ def pack_vocab_parallel_topk(
     """将一个 rank 的本地 top-k 结果打包进单个 FP32 通信 tensor。
 
     参数：
-        values: ``torch.topk`` 返回的候选分数，形状为 ``[candidate_count, token_num]``。
+        values: 本地候选分数，形状为 ``[token_num, candidate_count]``，不要求连续。
         token_ids: 对应的分片内 token ID，形状与 ``values`` 相同，类型为 int64。
         vocab_start: 当前 rank 词表分片在完整词表中的起始位置。
         packed: 调用方分配的输出，形状为 ``[token_num, 2 * candidate_count]``，类型为 FP32。
@@ -129,13 +126,14 @@ def pack_vocab_parallel_topk(
     assert values.is_cuda and token_ids.is_cuda and packed.is_cuda
     assert values.ndim == 2 and values.shape == token_ids.shape
     assert token_ids.dtype == torch.int64 and packed.dtype == torch.float32
-    candidate_count, token_num = values.shape
+    token_num, candidate_count = values.shape
     assert packed.shape == (token_num, candidate_count * 2)
     if packed.numel() == 0:
         return
 
     element_count = token_num * candidate_count
-    grid = (triton.cdiv(element_count, _BLOCK_SIZE),)
+    block_size = 256
+    grid = (triton.cdiv(element_count, block_size),)
     _pack_vocab_parallel_topk_kernel[grid](
         values,
         token_ids,
@@ -143,10 +141,10 @@ def pack_vocab_parallel_topk(
         *values.stride(),
         *token_ids.stride(),
         *packed.stride(),
-        candidate_count=candidate_count,
         token_num=token_num,
         vocab_start=vocab_start,
-        BLOCK_SIZE=_BLOCK_SIZE,
+        candidate_count=candidate_count,
+        BLOCK_SIZE=block_size,
     )
 
 
@@ -182,7 +180,8 @@ def unpack_vocab_parallel_topk(
         return
 
     element_count = token_num * output_width
-    grid = (triton.cdiv(element_count, _BLOCK_SIZE),)
+    block_size = 256
+    grid = (triton.cdiv(element_count, block_size),)
     _unpack_vocab_parallel_topk_kernel[grid](
         packed,
         values,
@@ -190,8 +189,8 @@ def unpack_vocab_parallel_topk(
         *packed.stride(),
         *values.stride(),
         *token_ids.stride(),
-        candidate_count=candidate_count,
         token_num=token_num,
+        candidate_count=candidate_count,
         world_size=world_size,
-        BLOCK_SIZE=_BLOCK_SIZE,
+        BLOCK_SIZE=block_size,
     )

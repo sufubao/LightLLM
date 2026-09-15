@@ -184,6 +184,14 @@ class ModelMtpOutputCollector:
 
 
 @dataclass
+class PostLayerOutput:
+    """输出层 logits，以及可选的候选列到 token ID 的映射。"""
+
+    logits: torch.Tensor
+    logits_token_ids: Optional[torch.Tensor] = None
+
+
+@dataclass
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
@@ -200,10 +208,16 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
+    # 仅在 draft 模型直接返回紧凑候选词表时提供。
+    # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
+    logits_token_ids: Optional[torch.Tensor] = None
+
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
+        if self.logits_token_ids is not None:
+            self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
         self.mtp_collector.to_no_ref_tensor()

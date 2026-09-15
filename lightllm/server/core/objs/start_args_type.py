@@ -103,6 +103,12 @@ class StartArgs:
     disable_chunked_prefill: bool = field(default=False)
     short_prefill_token_threshold: Optional[int] = field(default=None)
     diverse_mode: bool = field(default=False)
+    target_vocab_topk_sampling: Optional[int] = field(
+        default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
+    )
+    draft_vocab_topk_sampling: Optional[int] = field(
+        default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
+    )
     output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)

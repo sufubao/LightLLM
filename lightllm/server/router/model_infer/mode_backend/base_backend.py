@@ -893,10 +893,18 @@ class ModeBackend:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
-        logits = model_output.logits
-        return torch.argmax(logits, dim=-1)
+        token_indices = torch.argmax(model_output.logits, dim=-1)
+        if model_output.logits_token_ids is not None:
+            # 候选排列保证分数相同时优先选择最小的全局 token ID。
+            # gather 将选中的 ID 写入独立张量，避免后续 graph replay 覆盖结果。
+            return model_output.logits_token_ids.gather(1, token_indices.view(-1, 1)).view(-1)
+        return token_indices
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        if model_output.logits_token_ids is not None:
+            # 在候选集合上归一化，得到用于调度的近似置信度。
+            probs = torch.softmax(model_output.logits, dim=-1)
+            return self._gen_argmax_token_ids(model_output), probs.amax(dim=-1)
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)

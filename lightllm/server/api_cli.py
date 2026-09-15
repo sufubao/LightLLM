@@ -378,6 +378,21 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
+    vocab_topk_choices = [2, 8, 16, 32, 64, 128, 256, 512]
+    parser.add_argument(
+        "--target_vocab_topk_sampling",
+        type=int,
+        choices=vocab_topk_choices,
+        default=None,
+        help="Top-k communication width per TP rank for target-model logits; disabled by default.",
+    )
+    parser.add_argument(
+        "--draft_vocab_topk_sampling",
+        type=int,
+        choices=vocab_topk_choices,
+        default=None,
+        help="Top-k candidate count per TP rank for draft-model output; disabled by default.",
+    )
 
     parser.add_argument(
         "--output_constraint_mode",

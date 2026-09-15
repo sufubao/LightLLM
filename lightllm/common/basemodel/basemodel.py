@@ -32,7 +32,7 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
 from lightllm.common.basemodel.hidden_collector import (
     NoopHiddenCollector,
 )
@@ -325,6 +325,7 @@ class TpPartBaseModel:
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
+        infer_state.is_draft_model = self.is_mtp_draft_model
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
@@ -470,12 +471,23 @@ class TpPartBaseModel:
         new_model_input.check_input()
         return new_model_input
 
+    def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo) -> ModelOutput:
+        output = ModelOutput(
+            logits=post_output.logits.contiguous(),
+            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            prompt_logics=infer_state.prompt_logics,
+            logits_token_ids=post_output.logits_token_ids,
+        )
+        return output
+
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
         padded_batch_size = model_output.logits.shape[0]
         if padded_batch_size == origin_batch_size:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -488,6 +500,8 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
@@ -674,14 +688,11 @@ class TpPartBaseModel:
         if infer_state.need_dp_prefill_balance:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
-        predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
+        post_output = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         hidden_collector = infer_state.hidden_collector
         hidden_collector.add_final_hidden(last_input_embs)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-            prompt_logics=infer_state.prompt_logics,
-        )
+        model_output = self._create_model_output(post_output, infer_state)
+        del post_output
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -701,15 +712,13 @@ class TpPartBaseModel:
             hidden_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        predict_logits: torch.Tensor = self.post_infer.token_forward(
+        post_output: PostLayerOutput = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
         hidden_collector.add_final_hidden(last_input_embs)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-        )
+        model_output = self._create_model_output(post_output, infer_state)
+        del post_output
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -953,23 +962,16 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
             last_input_embs1 = infer_state1._all_to_all_unbalance_get(data=last_input_embs1)
 
-        predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
+        post_output, post_output1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
         g_cache_manager.cache_env_out()
 
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-            prompt_logics=infer_state.prompt_logics,
-        )
-        model_output1 = ModelOutput(
-            logits=predict_logits1.contiguous(),
-            mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
-            prompt_logics=infer_state1.prompt_logics,
-        )
+        model_output = self._create_model_output(post_output, infer_state)
+        model_output1 = self._create_model_output(post_output1, infer_state1)
+        del post_output, post_output1
 
         return model_output, model_output1
 
@@ -1003,20 +1005,15 @@ class TpPartBaseModel:
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
 
-        predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
+        post_output, post_output1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-        )
-        model_output1 = ModelOutput(
-            logits=predict_logits1.contiguous(),
-            mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
-        )
+        model_output = self._create_model_output(post_output, infer_state)
+        model_output1 = self._create_model_output(post_output1, infer_state1)
+        del post_output, post_output1
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()

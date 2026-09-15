@@ -36,6 +36,15 @@ def _set_envs_and_config(args: StartArgs):
 def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
+    if args.target_vocab_topk_sampling is not None:
+        # 在加载模型和启动子进程前拒绝该组合，避免候选裁剪使输出约束失效。
+        # 数值冲突与后续兼容方案见 LlamaPostLayerInfer._target_lm_head_and_gather。
+        assert args.output_constraint_mode == "none" and not args.first_token_constraint_mode, (
+            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode outlines/xgrammar "
+            "or --first_token_constraint_mode: candidate pruning can cause forbidden tokens to be selected. "
+            "Disable --target_vocab_topk_sampling when using output constraints."
+        )
+
     if args.mtp_mode is not None:
         assert (
             not args.disable_cudagraph or args.run_mode == "prefill"

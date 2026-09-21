@@ -267,14 +267,20 @@ class TpPartBaseModel:
         return
 
     def _init_decode_batch_layout(self, max_requests: int):
+        # overlap decode 将请求拆成两个 microbatch，单个 CUDA Graph 只需覆盖其中一半。
         if self.args.enable_decode_microbatch_overlap:
             max_requests //= 2
 
         mtp = self.mtp_manager
+        # 固定 verify 的主模型每请求包含多个连续 MTP 行，动态 verify 会压缩为变长行数；
+        # grow step 分别保留这两种图捕获粒度。TP/SP 同时开启时还必须整除 TP，
+        # 因此用最小公倍数作为真实 batch 和 CUDA Graph 档位的统一对齐单位。
         self.decode_batch_alignment = math.lcm(
             mtp.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model),
             self.tp_world_size_ if self.enable_tpsp_mix_mode else 1,
         )
+        # graph 上限按物理 decode 行数计算：主模型 MTP verify 会扩展请求行，
+        # 各类 draft model 则由 MtpManager 给出自身的行数倍率。
         max_rows = max_requests * mtp.get_decode_batch_multiplier(self.is_mtp_draft_model)
         self.graph_max_batch_size = self._align_decode_batch_size(max_rows)
 

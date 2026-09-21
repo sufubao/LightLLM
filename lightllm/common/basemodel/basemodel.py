@@ -94,7 +94,7 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
-        self._init_decode_batch_layout(kvargs.get("graph_max_batch_size", 16))
+        self._init_decode_batch_sizes(kvargs.get("graph_max_batch_size", 16))
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -266,10 +266,10 @@ class TpPartBaseModel:
         self.decode_att_backend1: BaseAttBackend = None
         return
 
-    def _init_decode_batch_layout(self, max_requests: int):
+    def _init_decode_batch_sizes(self, graph_max_requests: int):
         # overlap decode 将请求拆成两个 microbatch，单个 CUDA Graph 只需覆盖其中一半。
         if self.args.enable_decode_microbatch_overlap:
-            max_requests //= 2
+            graph_max_requests //= 2
 
         mtp = self.mtp_manager
         # 固定 verify 的主模型每请求包含多个连续 MTP 行，动态 verify 会压缩为变长行数；
@@ -281,7 +281,7 @@ class TpPartBaseModel:
         )
         # graph 上限按物理 decode 行数计算：主模型 MTP verify 会扩展请求行，
         # 各类 draft model 则由 MtpManager 给出自身的行数倍率。
-        max_rows = max_requests * mtp.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        max_rows = graph_max_requests * mtp.get_decode_batch_multiplier(self.is_mtp_draft_model)
         self.graph_max_batch_size = self._align_decode_batch_size(max_rows)
 
     def _align_decode_batch_size(self, batch_size: int) -> int:

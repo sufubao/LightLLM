@@ -99,7 +99,7 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
     model.tp_world_size_ = tp_size
     model.enable_tpsp_mix_mode = True
     model.is_mtp_draft_model = is_draft
-    model._init_decode_batch_layout(max_requests=7)
+    model._init_decode_batch_sizes(graph_max_requests=7)
 
     width = 1 if dynamic or is_draft else mtp_step + 1
     assert model.decode_batch_alignment % width == 0

@@ -3,6 +3,7 @@ import os
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import gc
 import copy
+import math
 import json
 import torch
 import torch.nn.functional as F
@@ -102,6 +103,14 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
+        # Fixed speculative batches must contain whole verify groups even after TP/SP padding.
+        self.decode_batch_alignment = math.lcm(
+            self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model),
+            self.tp_world_size_ if self.enable_tpsp_mix_mode else 1,
+        )
+        self.graph_max_batch_size = (
+            triton.cdiv(self.graph_max_batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
+        )
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -592,11 +601,9 @@ class TpPartBaseModel:
                 )
 
         origin_batch_size = model_input.batch_size
-        # 空 DP rank 先补出一个 dummy request；TPSP 模式下继续将 batch size
-        # 向上对齐到 TP world size 的整数倍，保证后续切分得到合法 shape。
+        # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
         infer_batch_size = max(1, origin_batch_size)
-        if self.args.enable_tpsp_mix_mode:
-            infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
+        infer_batch_size = triton.cdiv(infer_batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
 
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
@@ -819,7 +826,7 @@ class TpPartBaseModel:
         origin_batch_size1 = model_input1.batch_size
         max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
         infer_batch_size = max(1, origin_batch_size0, origin_batch_size1)
-        infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
+        infer_batch_size = triton.cdiv(infer_batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)

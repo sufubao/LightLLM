@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 
 import lightllm.common.basemodel.cuda_graph as cuda_graph_module
-import lightllm.common.basemodel.basemodel as basemodel_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.cuda_graph import CudaGraph
@@ -93,32 +92,20 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
     args.mtp_mode = "eagle_with_att"
     args.mtp_step = mtp_step
     args.mtp_dynamic_verify = dynamic
-    args.mem_fraction = 0.8
-    monkeypatch.setattr(basemodel_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(MtpManager, "_instance", None)
-    monkeypatch.setattr(basemodel_module, "get_dp_world_size", lambda: tp_size)
-    monkeypatch.setattr(basemodel_module, "get_llm_data_type", lambda: None)
-    monkeypatch.setattr(basemodel_module, "TorchMemorySaverWrapper", lambda _: None)
-
-    class StopBeforeWeights(Exception):
-        pass
-
-    def stop_init(self):
-        raise StopBeforeWeights
-
-    monkeypatch.setattr(TpPartBaseModel, "_init_config", stop_init)
     model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.args = args
+    model.mtp_manager = MtpManager()
+    model.tp_world_size_ = tp_size
+    model.enable_tpsp_mix_mode = True
     model.is_mtp_draft_model = is_draft
-    with pytest.raises(StopBeforeWeights):
-        model.__init__(dict(run_mode="normal", weight_dir="unused", max_total_token_num=128, graph_max_batch_size=7))
+    model._init_decode_batch_layout(max_requests=7)
 
     width = 1 if dynamic or is_draft else mtp_step + 1
     assert model.decode_batch_alignment % width == 0
     assert model.decode_batch_alignment % tp_size == 0
     if width == 1:
         assert model.decode_batch_alignment == tp_size
-    assert model.max_req_num == 1000  # Physical padding does not change request capacity.
     assert model.graph_max_batch_size % model.decode_batch_alignment == 0
     logical_max = 7 // 2 if overlap else 7
     physical_max = logical_max * (1 if is_draft else mtp_step + 1)

@@ -84,16 +84,7 @@ class TpPartBaseModel:
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         self.data_type = get_llm_data_type()
-        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
-        self.graph_max_batch_size = (
-            self.graph_max_batch_size // 2
-            if get_env_start_args().enable_decode_microbatch_overlap
-            else self.graph_max_batch_size
-        )
         self.mtp_manager = MtpManager.get_instance()
-        self.graph_max_batch_size = self.graph_max_batch_size * self.mtp_manager.get_decode_batch_multiplier(
-            self.is_mtp_draft_model
-        )
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -103,14 +94,7 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
-        # Fixed speculative batches must contain whole verify groups even after TP/SP padding.
-        self.decode_batch_alignment = math.lcm(
-            self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model),
-            self.tp_world_size_ if self.enable_tpsp_mix_mode else 1,
-        )
-        self.graph_max_batch_size = (
-            triton.cdiv(self.graph_max_batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
-        )
+        self._init_decode_batch_layout(kvargs.get("graph_max_batch_size", 16))
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -281,6 +265,22 @@ class TpPartBaseModel:
         self.prefill_att_backend1: BaseAttBackend = None
         self.decode_att_backend1: BaseAttBackend = None
         return
+
+    def _init_decode_batch_layout(self, max_requests: int):
+        if self.args.enable_decode_microbatch_overlap:
+            max_requests //= 2
+
+        mtp = self.mtp_manager
+        self.decode_batch_alignment = math.lcm(
+            mtp.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model),
+            self.tp_world_size_ if self.enable_tpsp_mix_mode else 1,
+        )
+        max_rows = max_requests * mtp.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        self.graph_max_batch_size = self._align_decode_batch_size(max_rows)
+
+    def _align_decode_batch_size(self, batch_size: int) -> int:
+        # Preserve complete MTP verify groups and TP/SP shards, including dummy rows.
+        return triton.cdiv(batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
 
     def _init_cudagraph(self):
         # When graph covers the configured request length, it must also cover MTP's internal token margin.
@@ -602,8 +602,7 @@ class TpPartBaseModel:
 
         origin_batch_size = model_input.batch_size
         # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
-        infer_batch_size = max(1, origin_batch_size)
-        infer_batch_size = triton.cdiv(infer_batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
+        infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size))
 
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
@@ -825,8 +824,7 @@ class TpPartBaseModel:
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
         max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
-        infer_batch_size = max(1, origin_batch_size0, origin_batch_size1)
-        infer_batch_size = triton.cdiv(infer_batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
+        infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size0, origin_batch_size1))
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)

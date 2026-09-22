@@ -94,7 +94,11 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
-        self._init_decode_batch_sizes(kvargs.get("graph_max_batch_size", 16))
+        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
+        if self.args.enable_decode_microbatch_overlap:
+            self.graph_max_batch_size //= 2
+        self.graph_max_batch_size *= self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        self.graph_max_batch_size = self._align_decode_batch_size(self.graph_max_batch_size)
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -266,27 +270,11 @@ class TpPartBaseModel:
         self.decode_att_backend1: BaseAttBackend = None
         return
 
-    def _init_decode_batch_sizes(self, graph_max_requests: int):
-        # overlap decode 将请求拆成两个 microbatch，单个 CUDA Graph 只需覆盖其中一半。
-        if self.args.enable_decode_microbatch_overlap:
-            graph_max_requests //= 2
-
-        mtp = self.mtp_manager
-        # 固定 verify 的主模型每请求包含多个连续 MTP 行，动态 verify 会压缩为变长行数；
-        # grow step 分别保留这两种图捕获粒度。TP/SP 同时开启时还必须整除 TP，
-        # 因此用最小公倍数作为真实 batch 和 CUDA Graph 档位的统一对齐单位。
-        self.decode_batch_alignment = math.lcm(
-            mtp.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model),
-            self.tp_world_size_ if self.enable_tpsp_mix_mode else 1,
-        )
-        # graph 上限按物理 decode 行数计算：主模型 MTP verify 会扩展请求行，
-        # 各类 draft model 则由 MtpManager 给出自身的行数倍率。
-        max_rows = graph_max_requests * mtp.get_decode_batch_multiplier(self.is_mtp_draft_model)
-        self.graph_max_batch_size = self._align_decode_batch_size(max_rows)
-
     def _align_decode_batch_size(self, batch_size: int) -> int:
-        # Preserve complete MTP verify groups and TP/SP shards, including dummy rows.
-        return triton.cdiv(batch_size, self.decode_batch_alignment) * self.decode_batch_alignment
+        alignment = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
+        if self.args.enable_tpsp_mix_mode:
+            alignment = math.lcm(alignment, self.tp_world_size_)
+        return triton.cdiv(batch_size, alignment) * alignment
 
     def _init_cudagraph(self):
         # When graph covers the configured request length, it must also cover MTP's internal token margin.

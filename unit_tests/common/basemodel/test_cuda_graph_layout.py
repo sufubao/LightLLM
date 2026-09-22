@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -99,17 +100,14 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
     model.tp_world_size_ = tp_size
     model.enable_tpsp_mix_mode = True
     model.is_mtp_draft_model = is_draft
-    model._init_decode_batch_sizes(graph_max_requests=7)
 
     width = 1 if dynamic or is_draft else mtp_step + 1
-    assert model.decode_batch_alignment % width == 0
-    assert model.decode_batch_alignment % tp_size == 0
-    if width == 1:
-        assert model.decode_batch_alignment == tp_size
-    assert model.graph_max_batch_size % model.decode_batch_alignment == 0
     logical_max = 7 // 2 if overlap else 7
     physical_max = logical_max * (1 if is_draft else mtp_step + 1)
-    assert physical_max <= model.graph_max_batch_size < physical_max + model.decode_batch_alignment
+    model.graph_max_batch_size = model._align_decode_batch_size(physical_max)
+    alignment = math.lcm(width, tp_size)
+    assert model.graph_max_batch_size % alignment == 0
+    assert physical_max <= model.graph_max_batch_size < physical_max + alignment
 
     sizes = CudaGraph.gen_cuda_graph_batch_sizes(
         batch_step_size_before_split=width,

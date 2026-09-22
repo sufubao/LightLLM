@@ -116,7 +116,8 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         model = TpPartBaseModel.__new__(TpPartBaseModel)
         model.args = SimpleNamespace(enable_tpsp_mix_mode=enable_tpsp_mix_mode, page_size=1)
         model.tp_world_size_ = tp_world_size
-        model.decode_batch_alignment = tp_world_size if enable_tpsp_mix_mode else 1
+        model.is_mtp_draft_model = False
+        model.mtp_manager = SimpleNamespace(get_decode_cuda_graph_grow_step_size=lambda _: 1)
         model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1)
         model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
 
@@ -170,7 +171,8 @@ def test_fixed_mtp_decode_preserves_groups_and_real_rows(overlap, graph_mode, ro
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = SimpleNamespace(enable_tpsp_mix_mode=True)
     model.tp_world_size_ = 8
-    model.decode_batch_alignment = 24  # TP=8, mtp_step=2.
+    model.is_mtp_draft_model = False
+    model.mtp_manager = SimpleNamespace(get_decode_cuda_graph_grow_step_size=lambda _: 3)
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88)
     seen_sizes = []
 

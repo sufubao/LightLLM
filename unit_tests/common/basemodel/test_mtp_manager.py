@@ -20,14 +20,14 @@ def _reset_mtp_manager():
     MtpManager._instance = None
 
 
-def _decode_batch_multiplier(monkeypatch, spec_mode, *, is_draft_model, mtp_step=7):
+def _decode_tokens_per_request(monkeypatch, spec_mode, *, is_draft_model, mtp_step=7):
     args = SimpleNamespace(
         mtp_mode=spec_mode,
         mtp_step=mtp_step,
         mtp_dynamic_verify=False,
     )
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
-    return MtpManager.get_instance().get_decode_batch_multiplier(is_draft_model)
+    return MtpManager.get_instance().get_decode_tokens_per_request(is_draft_model)
 
 
 @pytest.mark.parametrize(
@@ -44,8 +44,8 @@ def _decode_batch_multiplier(monkeypatch, spec_mode, *, is_draft_model, mtp_step
         ("dflash", True, 7),
     ],
 )
-def test_decode_batch_multiplier(monkeypatch, spec_mode, is_draft_model, expected):
-    assert _decode_batch_multiplier(monkeypatch, spec_mode, is_draft_model=is_draft_model) == expected
+def test_decode_tokens_per_request(monkeypatch, spec_mode, is_draft_model, expected):
+    assert _decode_tokens_per_request(monkeypatch, spec_mode, is_draft_model=is_draft_model) == expected
 
 
 @pytest.mark.parametrize(

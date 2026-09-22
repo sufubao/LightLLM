@@ -97,7 +97,7 @@ class TpPartBaseModel:
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         if self.args.enable_decode_microbatch_overlap:
             self.graph_max_batch_size //= 2
-        self.graph_max_batch_size *= self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        self.graph_max_batch_size *= self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
         self.graph_max_batch_size = self._align_decode_batch_size(self.graph_max_batch_size)
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
@@ -281,14 +281,14 @@ class TpPartBaseModel:
         if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
             self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
 
-        decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        decode_tokens_per_request = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
             None
             if self.disable_cudagraph
             else CudaGraph(
                 batch_step_size_before_split=cuda_graph_grow_step_size,
-                split_batch_size=self.args.graph_split_batch_size * decode_batch_multiplier,
+                split_batch_size=self.args.graph_split_batch_size * decode_tokens_per_request,
                 batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,

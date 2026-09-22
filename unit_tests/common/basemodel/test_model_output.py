@@ -165,20 +165,22 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
 
 @pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("graph_mode", ["eager", "capture", "replay"])
 @pytest.mark.parametrize("rows", [0, 3, 9, 24, 27])
-def test_fixed_mtp_decode_preserves_groups_and_real_rows(overlap, graph_mode, rows):
+def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode, rows):
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = SimpleNamespace(enable_tpsp_mix_mode=True)
     model.tp_world_size_ = 8
     model.is_mtp_draft_model = False
-    model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 3)
+    model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1 if dynamic else 3)
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88)
     seen_sizes = []
 
     def create_state(model_input, microbatch_index=0):
         def check_layout():
-            assert model_input.batch_size % 3 == 0
+            if not dynamic:
+                assert model_input.batch_size % 3 == 0
             assert model_input.batch_size % 8 == 0
             seen_sizes.append(model_input.batch_size)
 
@@ -199,7 +201,7 @@ def test_fixed_mtp_decode_preserves_groups_and_real_rows(overlap, graph_mode, ro
     if graph_mode != "eager":
         model.graph = SimpleNamespace(
             can_run=lambda batch_size, max_len_in_batch: batch_size <= 24,
-            find_closest_graph_batch_size=lambda batch_size: 24,
+            find_closest_graph_batch_size=lambda batch_size: ((batch_size + 7) // 8 * 8 if dynamic else 24),
             need_capture=lambda batch_size: graph_mode == "capture",
             capture_decode=lambda func, state, **kwargs: func(state, **kwargs),
             replay=lambda state, infer_state1=None: (
@@ -210,6 +212,12 @@ def test_fixed_mtp_decode_preserves_groups_and_real_rows(overlap, graph_mode, ro
     model_input = model._create_padded_decode_model_input(_create_empty_decode_input(), rows)
     model_input.b_req_idx = torch.arange(rows, dtype=torch.int32) // 3
     model_input.b_seq_len = 10 + torch.arange(rows, dtype=torch.int32) % 3
+    if dynamic:
+        # 压缩后每请求分别保留 1、2、3 个 token，保持各请求内部的 token 顺序。
+        request_rows = [(req, step) for req in range(rows) for step in range(req % 3 + 1)][:rows]
+        model_input.b_req_idx = torch.tensor([req for req, _ in request_rows], dtype=torch.int32)
+        model_input.b_mtp_index = torch.tensor([step for _, step in request_rows], dtype=torch.int32)
+        model_input.b_seq_len = 10 + model_input.b_mtp_index
     expected = torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1)
     if overlap:
         output, empty_output = model._microbatch_overlap_decode_cuda(model_input, _create_empty_decode_input())
@@ -217,6 +225,7 @@ def test_fixed_mtp_decode_preserves_groups_and_real_rows(overlap, graph_mode, ro
     else:
         output = model._decode(model_input)
 
-    assert seen_sizes == ([48 if rows > 24 else 24] * (2 if overlap else 1))
+    expected_size = (max(1, rows) + 7) // 8 * 8 if dynamic else (48 if rows > 24 else 24)
+    assert seen_sizes == [expected_size] * (2 if overlap else 1)
     torch.testing.assert_close(output.logits, expected)
     torch.testing.assert_close(torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1), expected)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import lightllm.common.basemodel.basemodel as basemodel_module
 import lightllm.common.basemodel.cuda_graph as cuda_graph_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -95,16 +96,26 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
     args.mtp_dynamic_verify = dynamic
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = args
-    model.mtp_manager = MtpManager()
-    model.tp_world_size_ = tp_size
-    model.enable_tpsp_mix_mode = True
     model.is_mtp_draft_model = is_draft
+    monkeypatch.setattr(basemodel_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(basemodel_module, "get_llm_data_type", lambda: None)
+    monkeypatch.setattr(basemodel_module, "get_dp_world_size", lambda: tp_size)
+    monkeypatch.setattr(MtpManager, "_instance", MtpManager())
+
+    class StopBeforeWeights(Exception):
+        pass
+
+    def stop_before_weights():
+        raise StopBeforeWeights
+
+    # 执行真实构造函数的容量计算，在读取模型配置、分配 GPU 权重前停止。
+    monkeypatch.setattr(model, "_init_config", stop_before_weights)
+    with pytest.raises(StopBeforeWeights):
+        model.__init__(dict(run_mode="normal", weight_dir="", max_total_token_num=1024, graph_max_batch_size=7))
 
     width = 1 if dynamic or is_draft else mtp_step + 1
     logical_max = 7 // 2 if overlap else 7
     physical_max = logical_max * (1 if is_draft else mtp_step + 1)
-    model.graph_max_batch_size = model._align_decode_batch_size(physical_max)
     alignment = math.lcm(width, tp_size)
     assert model.graph_max_batch_size % alignment == 0
     assert physical_max <= model.graph_max_batch_size < physical_max + alignment

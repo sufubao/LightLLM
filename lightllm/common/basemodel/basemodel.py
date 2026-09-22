@@ -84,7 +84,11 @@ class TpPartBaseModel:
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         self.data_type = get_llm_data_type()
+        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
+        if self.args.enable_decode_microbatch_overlap:
+            self.graph_max_batch_size //= 2
         self.mtp_manager = MtpManager.get_instance()
+        self.graph_max_batch_size *= self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -94,10 +98,6 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
-        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
-        if self.args.enable_decode_microbatch_overlap:
-            self.graph_max_batch_size //= 2
-        self.graph_max_batch_size *= self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
         self.graph_max_batch_size = self._align_decode_batch_size(self.graph_max_batch_size)
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)

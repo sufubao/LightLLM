@@ -41,7 +41,7 @@ class MtpManager:
 
         return 1
 
-    def get_decode_cuda_graph_grow_step_size(self, is_draft_model: bool) -> int:
+    def get_decode_batch_alignment(self, is_draft_model: bool) -> int:
         """返回 decode/graph 的基础对齐粒度；动态主模型压缩后允许任意行数。"""
         if not is_draft_model and self.args.mtp_dynamic_verify:
             return 1

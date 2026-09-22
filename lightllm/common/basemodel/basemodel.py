@@ -271,7 +271,7 @@ class TpPartBaseModel:
         return
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
-        alignment = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
+        alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         if self.args.enable_tpsp_mix_mode:
             alignment = math.lcm(alignment, self.tp_world_size_)
         return triton.cdiv(batch_size, alignment) * alignment
@@ -282,7 +282,7 @@ class TpPartBaseModel:
             self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
 
         decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
-        cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
+        cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
             None
             if self.disable_cudagraph

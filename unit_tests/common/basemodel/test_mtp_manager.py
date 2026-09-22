@@ -59,7 +59,7 @@ def test_decode_batch_multiplier(monkeypatch, spec_mode, is_draft_model, expecte
         ("dflash", True, True, 7),
     ],
 )
-def test_decode_cuda_graph_grow_step_size(monkeypatch, spec_mode, dynamic_verify, is_draft_model, expected):
+def test_decode_batch_alignment(monkeypatch, spec_mode, dynamic_verify, is_draft_model, expected):
     args = SimpleNamespace(
         mtp_mode=spec_mode,
         mtp_step=7,
@@ -67,7 +67,7 @@ def test_decode_cuda_graph_grow_step_size(monkeypatch, spec_mode, dynamic_verify
     )
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
 
-    assert MtpManager.get_instance().get_decode_cuda_graph_grow_step_size(is_draft_model) == expected
+    assert MtpManager.get_instance().get_decode_batch_alignment(is_draft_model) == expected
 
 
 @pytest.mark.parametrize(

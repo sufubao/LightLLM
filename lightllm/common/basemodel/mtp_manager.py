@@ -14,8 +14,6 @@ class MtpManager:
     """Manage MTP layout policy and model-local helper construction."""
 
     _instance: ClassVar[Optional["MtpManager"]] = None
-    _CHAINED_DRAFT_MODES = ("vanilla_with_att", "vanilla_no_att")
-    _RECURRENT_DRAFT_MODES = ("eagle_with_att", "eagle_no_att", "eagle3")
     _BLOCK_DRAFT_MODES = ("dspark", "dflash")
 
     @classmethod
@@ -28,26 +26,14 @@ class MtpManager:
         self.args = get_env_start_args()
 
     def get_decode_batch_multiplier(self, is_draft_model: bool) -> int:
-        """Return the physical decode rows used by one logical request."""
+        """返回每请求的 decode 容量倍率；动态 verify 按未压缩的最大行数预留。"""
 
         spec_mode = self.args.mtp_mode
         if spec_mode is None:
             return 1
 
-        verify_width = self.args.mtp_step + 1
-
-        # The main model verifies one target token plus mtp_step draft tokens
-        # for every logical request, regardless of how the draft is produced.
         if not is_draft_model:
-            return verify_width
-
-        # Chained MTP runs every draft module over the expanded verify layout.
-        if spec_mode in self._CHAINED_DRAFT_MODES:
-            return 1
-
-        # Recurrent EAGLE draft models decode one row per logical request.
-        if spec_mode in self._RECURRENT_DRAFT_MODES:
-            return 1
+            return self.args.mtp_step + 1
 
         # Block draft models decode mtp_step rows per logical request.
         if spec_mode in self._BLOCK_DRAFT_MODES:
@@ -56,16 +42,10 @@ class MtpManager:
         return 1
 
     def get_decode_cuda_graph_grow_step_size(self, is_draft_model: bool) -> int:
-        """Return the batch-size stride used to capture decode CUDA Graphs."""
-
-        # Draft model CUDA Graphs follow the drafter's physical decode layout.
-        if is_draft_model:
-            return self.get_decode_batch_multiplier(is_draft_model=True)
-        # Main model CUDA Graphs use unit growth for dynamically compacted verify rows.
-        else:
-            if self.args.mtp_dynamic_verify:
-                return 1
-            return self.get_decode_batch_multiplier(is_draft_model=False)
+        """返回 decode/graph 的基础对齐粒度；动态主模型压缩后允许任意行数。"""
+        if not is_draft_model and self.args.mtp_dynamic_verify:
+            return 1
+        return self.get_decode_batch_multiplier(is_draft_model)
 
     def get_decode_draft_step(self, is_draft_model: bool) -> int:
         """Return the number of extra decode rows processed per request."""

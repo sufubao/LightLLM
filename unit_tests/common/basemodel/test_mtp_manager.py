@@ -49,17 +49,19 @@ def test_decode_batch_multiplier(monkeypatch, spec_mode, is_draft_model, expecte
 
 
 @pytest.mark.parametrize(
-    "dynamic_verify,is_draft_model,expected",
+    "spec_mode,dynamic_verify,is_draft_model,expected",
     [
-        (False, False, 8),
-        (True, False, 1),
-        (False, True, 1),
-        (True, True, 1),
+        ("vanilla_with_att", False, False, 8),
+        ("vanilla_with_att", True, False, 1),
+        ("vanilla_with_att", False, True, 1),
+        ("vanilla_with_att", True, True, 1),
+        ("dspark", True, True, 7),
+        ("dflash", True, True, 7),
     ],
 )
-def test_decode_cuda_graph_grow_step_size(monkeypatch, dynamic_verify, is_draft_model, expected):
+def test_decode_cuda_graph_grow_step_size(monkeypatch, spec_mode, dynamic_verify, is_draft_model, expected):
     args = SimpleNamespace(
-        mtp_mode="vanilla_with_att",
+        mtp_mode=spec_mode,
         mtp_step=7,
         mtp_dynamic_verify=dynamic_verify,
     )

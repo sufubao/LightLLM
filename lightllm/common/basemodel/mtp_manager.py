@@ -14,6 +14,8 @@ class MtpManager:
     """Manage MTP layout policy and model-local helper construction."""
 
     _instance: ClassVar[Optional["MtpManager"]] = None
+    _CHAINED_DRAFT_MODES = ("vanilla_with_att", "vanilla_no_att")
+    _RECURRENT_DRAFT_MODES = ("eagle_with_att", "eagle_no_att", "eagle3")
     _BLOCK_DRAFT_MODES = ("dspark", "dflash")
 
     @classmethod
@@ -32,8 +34,20 @@ class MtpManager:
         if spec_mode is None:
             return 1
 
+        verify_width = self.args.mtp_step + 1
+
+        # The main model verifies one target token plus mtp_step draft tokens
+        # for every logical request, regardless of how the draft is produced.
         if not is_draft_model:
-            return self.args.mtp_step + 1
+            return verify_width
+
+        # Chained MTP runs every draft module over the expanded verify layout.
+        if spec_mode in self._CHAINED_DRAFT_MODES:
+            return 1
+
+        # Recurrent EAGLE draft models decode one row per logical request.
+        if spec_mode in self._RECURRENT_DRAFT_MODES:
+            return 1
 
         # Block draft models decode mtp_step rows per logical request.
         if spec_mode in self._BLOCK_DRAFT_MODES:

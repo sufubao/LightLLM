@@ -71,7 +71,7 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def write_to_shm(self, req_manager):
-        self.replay_cache = req_manager.replay_cache
+        self.ssm_update_cache = req_manager.ssm_update_cache
         self.ssm_slots_per_req = req_manager.ssm_slots_per_req
         self.req_to_mtp_state_index = req_manager.req_to_mtp_state_index
         self.req_to_conv_state = req_manager.req_to_conv_state
@@ -90,8 +90,12 @@ class Qwen3NextMemManager(MemoryManager):
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
-        Qwen3NextLinearAttPageHelper(self).assert_page_size()
+        self.att_state_page_helper = self._create_att_state_page_helper()
+        self.att_state_page_helper.assert_page_size()
         return kv_move_buffer
+
+    def _create_att_state_page_helper(self):
+        return Qwen3NextLinearAttPageHelper(self)
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -115,7 +119,7 @@ class Qwen3NextMemManager(MemoryManager):
             )
         assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
-        helper = Qwen3NextLinearAttPageHelper(self)
+        helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.write_req_to_page(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         return
@@ -142,7 +146,7 @@ class Qwen3NextMemManager(MemoryManager):
             )
         assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
-        helper = Qwen3NextLinearAttPageHelper(self)
+        helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.read_page_to_req(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         return
@@ -275,15 +279,17 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        replay = getattr(mem, "replay_cache", None)
-        if replay is not None:
-            replay.materialize(torch.tensor([req_idx], dtype=torch.int32, device=mem.req_to_ssm_state.buffer.device))
+        ssm_updates = getattr(mem, "ssm_update_cache", None)
         conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
-        if replay is not None and mem.req_to_mtp_state_index is not None:
+        if ssm_updates is not None and mem.req_to_mtp_state_index is not None:
             offsets = torch.arange(self.conv_shape[-1], device=conv_state.device) + mem.req_to_mtp_state_index[req_idx]
             conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx].index_select(-1, offsets)
-        ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
+        ssm_state = (
+            ssm_updates.snapshot_accepted_state(req_idx)
+            if ssm_updates is not None
+            else mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
+        )
         self._copy_conv_state_to_page(conv_state, conv_page, mem, tp_index)
         self._copy_ssm_state_to_page(ssm_state, ssm_page, mem, tp_index)
         return
@@ -461,11 +467,11 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        replay = getattr(mem, "replay_cache", None)
-        if replay is not None:
-            replay.reset(req_idx)
+        ssm_updates = getattr(mem, "ssm_update_cache", None)
+        if ssm_updates is not None:
+            ssm_updates.clear_history(req_idx)
             if mem.req_to_mtp_state_index is not None:
-                mem.req_to_mtp_state_index[req_idx] = 0
+                mem.req_to_mtp_state_index[req_idx].zero_()
         conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
         ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]

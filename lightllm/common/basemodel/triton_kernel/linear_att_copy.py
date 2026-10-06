@@ -57,7 +57,10 @@ def _copy_linear_att_state_to_kv_buffer(
 
     gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + cur_req_idx * gpu_conv_stride_s
     if HAS_CONV_OFFSETS:
-        gpu_conv_base += tl.load(conv_offsets + cur_req_idx) * conv_element_bytes
+        accepted_offset = tl.load(conv_offsets + cur_req_idx)
+        gpu_conv_base += accepted_offset * conv_element_bytes
+        if mtp_step > 0:
+            cur_state_req_idx += accepted_offset
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
     conv_tail_dim = gpu_conv_dim * gpu_conv_tail_dim_bytes
     for i in range(tl.cdiv(conv_tail_dim, BLOCK)):

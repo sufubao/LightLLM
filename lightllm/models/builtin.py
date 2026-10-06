@@ -21,6 +21,8 @@ ModelRegistry.register("gemma3", "lightllm.models.gemma3.model:Gemma3TpPartModel
 ModelRegistry.register("gemma4", "lightllm.models.gemma4.model:Gemma4TpPartModel", is_multimodal=True)
 ModelRegistry.register("gemma", "lightllm.models.gemma_2b.model:Gemma_2bTpPartModel")
 ModelRegistry.register("glm4_moe_lite", "lightllm.models.glm4_moe_lite.model:Glm4MoeLiteTpPartModel")
+ModelRegistry.register("glm5_next", "lightllm.models.glm5_next.model:Glm5NextTpPartModel", is_multimodal=True)
+ModelRegistry.register("glm5_next_text", "lightllm.models.glm5_next.model:Glm5NextTpPartModel")
 ModelRegistry.register("gpt_oss", "lightllm.models.gpt_oss.model:GptOssTpPartModel")
 ModelRegistry.register("internlm", "lightllm.models.internlm.model:InternlmTpPartModel")
 ModelRegistry.register("internlm2", "lightllm.models.internlm2.model:Internlm2TpPartModel")
@@ -82,6 +84,18 @@ ModelRegistry.register(
 ModelRegistry.register("minicpm", "lightllm.models.minicpm.model:MiniCPMTpPartModel")
 ModelRegistry.register("mistral", "lightllm.models.mistral.model:MistralTpPartModel")
 ModelRegistry.register("mixtral", "lightllm.models.mixtral.model:MixtralTpPartModel")
+ModelRegistry.register(
+    "neo_chat",
+    "lightllm.models.neo_chat.model:NeoTpPartModel",
+    is_multimodal=True,
+    condition=llm_model_type_is("qwen3"),
+)
+ModelRegistry.register(
+    "neo_chat",
+    "lightllm.models.neo_chat_moe.model:NeoTpMOEPartModel",
+    is_multimodal=True,
+    condition=llm_model_type_is("qwen3_moe"),
+)
 ModelRegistry.register("phi3", "lightllm.models.phi3.model:Phi3TpPartModel")
 ModelRegistry.register("qwen", "lightllm.models.qwen.model:QWenTpPartModel")
 ModelRegistry.register("qwen2", "lightllm.models.qwen2.model:Qwen2TpPartModel")
@@ -142,6 +156,11 @@ DraftModelRegistry.register(
     "glm4_moe_lite",
     ("vanilla_with_att", "eagle_with_att"),
     "lightllm.models.glm4_moe_lite_mtp.model:Glm4MoeLiteMTPModel",
+)
+DraftModelRegistry.register(
+    ("glm5_next", "glm5_next_text"),
+    ("vanilla_with_att", "eagle_with_att"),
+    "lightllm.models.glm5_next_mtp.model:Glm5NextMTPModel",
 )
 DraftModelRegistry.register(
     "mistral", ("vanilla_no_att", "eagle_no_att"), "lightllm.models.mistral_mtp.model:MistralMTPModel"

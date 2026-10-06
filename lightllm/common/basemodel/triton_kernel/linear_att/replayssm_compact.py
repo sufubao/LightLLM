@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .ssm_autotune import configure_cache
+
 
 @triton.jit
 def _compact(
@@ -37,6 +39,7 @@ def _compact(
     SLOTS: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
+    KH: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     WIDTH: tl.constexpr,
@@ -63,12 +66,14 @@ def _compact(
                 tl.store(Out + (t * HV + hv) * V + vv, 0, vv < V)
         return
     slot = (layer * SLOTS + req) * HV + hv
+    key_slot = (layer * SLOTS + req) * KH + hv // (HV // KH)
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
     for t in range(start, end):
         record = slot * WIDTH + t - start
+        key_record = key_slot * WIDTH + t - start
         if COMMIT:
-            k = tl.load(Keys + record * K + kk, kk < K, 0).to(tl.float32)
+            k = tl.load(Keys + key_record * K + kk, kk < K, 0).to(tl.float32)
             v = tl.load(Values + record * V + vv, vv < V, 0).to(tl.float32)
             decay = tl.load(Decays + record * K + kk, kk < K, 0) if KDA else tl.load(Decays + record)
             beta = tl.load(Betas + record)
@@ -88,7 +93,8 @@ def _compact(
             beta = tl.sigmoid(tl.load(B + t * SB + hv).to(tl.float32))
             tl.store(Values + record * V + vv, v, vv < V)
             if iv == 0:
-                tl.store(Keys + record * K + kk, k, kk < K)
+                if hv % (HV // KH) == 0:
+                    tl.store(Keys + key_record * K + kk, k, kk < K)
                 tl.store(Betas + record, beta)
                 if KDA:
                     tl.store(Decays + record * K + kk, decay, kk < K)
@@ -115,37 +121,63 @@ def _compact(
 
 
 class CompactSSMCache:
-    def __init__(self, state, verify_width, activation_dtype, kind="gdn", lower_bound=-5.0):
+    def __init__(
+        self,
+        state,
+        verify_width,
+        activation_dtype,
+        kind="gdn",
+        lower_bound=-5.0,
+        *,
+        num_key_heads=None,
+        run_config=None
+    ):
         assert kind in ("gdn", "kda")
         self.state = state
         self.verify_width = verify_width
         self.kind = kind
         self.lower_bound = lower_bound
+        # Verify and accepted-state reconstruction must share the same layout.
+        self._config_is_fixed = run_config is not None
+        self.run_config = dict(run_config or {"BV": 32 if kind == "kda" else 8, "num_warps": 4 if kind == "kda" else 1})
+        assert self.run_config["BV"] in (8, 16, 32, 64, 128)
+        assert self.run_config["num_warps"] in (1, 2, 4, 8)
         layers, slots, hv, k, v = state.shape
+        self.num_key_heads = hv if num_key_heads is None else num_key_heads
+        assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
         self.hold = slots - 1
         shape = (layers, slots, hv, verify_width)
-        self.keys = torch.empty((*shape, k), device=state.device, dtype=activation_dtype)
+        self.keys = torch.empty(
+            (layers, slots, self.num_key_heads, verify_width, k), device=state.device, dtype=activation_dtype
+        )
         self.values = torch.empty((*shape, v), device=state.device, dtype=activation_dtype)
         self.decays = torch.empty((*shape, k) if kind == "kda" else shape, device=state.device, dtype=torch.float32)
         self.betas = torch.empty(shape, device=state.device, dtype=torch.float32)
 
-    def reset(self, req):
-        # Scratch is overwritten by verify before commit; it has no accepted history.
+    def clear_history(self, req):
+        # Verify overwrites scratch before accepting updates; no history spans rounds.
         pass
 
-    def positions(self, reqs):
+    def prepare_decode(self, reqs, cu_seqlens=None):
+        # Compact mode has no history spanning rounds.
         return None
 
-    def materialize(self, reqs):
-        # Commit always leaves a canonical checkpoint.
+    def merge_accepted_updates(self, reqs):
+        # accept_updates already merged the accepted prefix into SSM state.
         pass
+
+    def snapshot_accepted_state(self, req_idx):
+        return self.state[:, req_idx]
 
     def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, positions, cu_seqlens=None):
         assert cu_seqlens is not None, "compact replay is only used for speculative verify"
+        if layer == 0:
+            configure_cache(self, self.kind, q, k, v, a, b, a_log, bias, cu_seqlens)
         _, slots, hv, kd, vd = self.state.shape
+        assert self.num_key_heads in (q.shape[-2], hv)
         out = torch.empty_like(v)
         # Match native reduction layouts: changing BV can alter BF16 rounding.
-        bv = 32 if self.kind == "kda" else 8
+        bv = self.run_config["BV"]
         _compact[(triton.cdiv(vd, bv), reqs.numel(), hv)](
             q,
             k,
@@ -171,6 +203,7 @@ class CompactSSMCache:
             slots,
             q.shape[-2],
             hv,
+            self.num_key_heads,
             kd,
             vd,
             self.verify_width,
@@ -180,13 +213,15 @@ class CompactSSMCache:
             False,
             self.kind == "kda",
             self.lower_bound,
-            num_warps=4 if self.kind == "kda" else 1,
+            num_warps=self.run_config["num_warps"],
+            num_stages=self.run_config.get("num_stages", 3),
         )
         return out
 
-    def commit(self, reqs, accepted):
+    def accept_updates(self, reqs, accepted):
+        """Merge this round's prefix; accepted contains per-request last accepted indexes."""
         layers, slots, hv, kd, vd = self.state.shape
-        bv = 32 if self.kind == "kda" else 8
+        bv = self.run_config["BV"]
         _compact[(triton.cdiv(vd, bv), reqs.numel(), layers * hv)](
             None,
             None,
@@ -212,6 +247,7 @@ class CompactSSMCache:
             slots,
             hv,
             hv,
+            self.num_key_heads,
             kd,
             vd,
             self.verify_width,
@@ -221,5 +257,6 @@ class CompactSSMCache:
             True,
             self.kind == "kda",
             self.lower_bound,
-            num_warps=4 if self.kind == "kda" else 1,
+            num_warps=self.run_config["num_warps"],
+            num_stages=self.run_config.get("num_stages", 3),
         )

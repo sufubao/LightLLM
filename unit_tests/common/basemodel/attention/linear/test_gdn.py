@@ -10,6 +10,7 @@ import lightllm.common.basemodel.attention.create_linear_utils as linear_create_
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
+from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
@@ -65,18 +66,21 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
     )
+    # Only CPU metadata is needed for these layout tests.
+    req_manager = object.__new__(ReqManagerForMamba)
+    req_manager.HOLD_REQUEST_ID = req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1
+    req_manager.req_to_mtp_state_index = req_to_mtp_state_index
+    req_manager.ssm_update_cache = None
     infer_state = SimpleNamespace(
         batch_size=b_req_idx.shape[0],
         b_req_idx=b_req_idx,
         b_mtp_index=torch.zeros_like(b_req_idx),
-        req_manager=SimpleNamespace(
-            HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-        ),
+        req_manager=req_manager,
     )
     return gdn.LinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,
+            req_manager=req_manager,
             uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
         ),
         infer_state=infer_state,
@@ -155,10 +159,54 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
     assert build_calls[0]["hold_req_id"] == 5
 
 
+def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
+    state = _create_decode_state(
+        draft_step=3,
+        dynamic_layout=True,
+        b_req_idx=torch.tensor([0, 0, 1, 1, 1]),
+        req_to_mtp_state_index=torch.zeros(3, dtype=torch.int32),
+    )
+    cu = torch.tensor([0, 2, 5], dtype=torch.int32)
+    reqs = torch.tensor([0, 1], dtype=torch.int32)
+    positions = torch.tensor([5, 6], dtype=torch.int32)
+    monkeypatch.setattr(
+        gdn, "build_dynamic_mtp_linear_att_state_params", lambda **kwargs: (cu, reqs, torch.ones(2, dtype=torch.int32))
+    )
+
+    def prepare_decode(actual_reqs, actual_cu):
+        assert actual_reqs is reqs and actual_cu is cu
+        return positions
+
+    state.backend.req_manager.ssm_update_cache = SimpleNamespace(
+        prepare_decode=prepare_decode,
+        accept_updates=lambda *args: pytest.fail("speculative updates must wait for acceptance"),
+    )
+    state.init_state()
+    assert state.b_ssm_history_positions is positions
+    assert state.b_ssm_buffer_idx is reqs
+
+
 def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
     assert inspect.isabstract(gdn.LinearAttBackend)
     backend = object.__new__(TritonLinearAttBackend)
     assert backend.get_prefill_kernel() is fla_ops.chunk_gated_delta_rule
+
+
+@pytest.mark.parametrize("manager_class", [ReqManager, ReqManagerForMamba])
+def test_linear_backend_checks_req_manager_at_construction(monkeypatch, manager_class):
+    manager = object.__new__(manager_class)
+    model = SimpleNamespace(req_manager=manager, config={}, tp_world_size_=1)
+    backend = object.__new__(TritonLinearAttBackend)
+    monkeypatch.setattr(backend, "_init_linear_layer_metadata", lambda **kwargs: None)
+
+    if manager_class is ReqManager:
+        with pytest.raises(TypeError, match="LinearAttBackend requires ReqManagerForMamba, got ReqManager$"):
+            backend.__init__(model)
+    else:
+        backend.__init__(model)
+        assert backend.req_manager is manager
+        assert backend.create_att_prefill_state(None).backend.req_manager is manager
+        assert backend.create_att_decode_state(None).backend.req_manager is manager
 
 
 @pytest.fixture

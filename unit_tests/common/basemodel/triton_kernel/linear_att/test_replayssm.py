@@ -394,7 +394,7 @@ def test_compact_preserves_accepted_prefix(dtype, kind, run_config=None):
                         out, cur = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur)
                     else:
                         qq, kk = q[0, t].float(), k[0, t].float()
-                        qq *= torch.rsqrt(qq.square().sum(-1, keepdim=True) + 1e-6) * kd**-0.5
+                        qq *= torch.rsqrt(qq.square().sum(-1, keepdim=True) + 1e-6) * kd ** -0.5
                         kk *= torch.rsqrt(kk.square().sum(-1, keepdim=True) + 1e-6)
                         gate = -5 * torch.sigmoid(alog.exp()[:, None] * (a[t].float().view(hv, kd) + bias.view(hv, kd)))
                         cur *= gate.exp()[..., None]

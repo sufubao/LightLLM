@@ -209,12 +209,12 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
 
 
 def test_cross_layer_fold_with_state_offset_above_int32():
-    if torch.cuda.mem_get_info()[0] < 6 * 1024**3:
+    if torch.cuda.mem_get_info()[0] < 6 * 1024 ** 3:
         pytest.skip("large-stride regression requires 6 GiB of free device memory")
     torch.manual_seed(791)
     shape = (48, 3, 12, 128, 128)
     strides = (50_528_256, 196608, 16384, 128, 1)
-    assert strides[0] < 2**31 < 47 * strides[0]
+    assert strides[0] < 2 ** 31 < 47 * strides[0]
     dense = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.01
     sparse = torch.empty_strided(shape, strides, device="cuda", dtype=dense.dtype)
     sparse.copy_(dense)

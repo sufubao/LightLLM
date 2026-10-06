@@ -240,7 +240,7 @@ def _replay(
         ).to(tl.float32)
         qk = q_rows + k_rows
         qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
-        qk *= tl.where(tt < BW, K**-0.5, 1.0)[:, None]
+        qk *= tl.where(tt < BW, K ** -0.5, 1.0)[:, None]
         projections = tl.dot(qk.to(projection_dtype), state.to(projection_dtype), input_precision=projection_precision)
 
         # Project the whole verify window against both accepted and new keys.
@@ -350,7 +350,7 @@ def _replay(
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
             raw_k = tl.load(Kp + t * SK + h * K + kk, kk < K, 0).to(tl.float32)
             v = tl.load(Vp + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
-            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K**-0.5)
+            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
             k = raw_k / tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
             x = tl.load(A + t * SA + hv).to(tl.float32) + bias
             g = -tl.exp(log_a) * tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)

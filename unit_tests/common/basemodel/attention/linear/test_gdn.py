@@ -11,6 +11,7 @@ import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
+from lightllm.server.router.model_infer.infer_batch import InferenceContext
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
@@ -408,3 +409,25 @@ def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_
 
     assert backend_class is flashqla3_backend
     assert validate_calls == ["flashqla2", "flashqla3"]
+
+
+@pytest.mark.parametrize("input_len", [4096, 8192])
+def test_hybrid_checkpoint_is_noop_when_prompt_cache_disabled(input_len):
+    context = InferenceContext()
+    context.is_hybrid_att_model = True
+    context.radix_cache = None
+    context.args = SimpleNamespace(
+        linear_att_hash_page_size=1024, linear_att_page_block_num=8, disable_chunked_prefill=False
+    )
+    req = SimpleNamespace(
+        req_idx=0,
+        get_chuncked_input_token_len=lambda: input_len,
+        hybrid_cache_len=input_len,
+        hybrid_len_to_big_page_id={},
+        tail_small_page_buffer_id=None,
+    )
+
+    context.save_hybrid_state_to_cache(torch.tensor([0]), [req])
+
+    assert req.hybrid_len_to_big_page_id == {}
+    assert req.tail_small_page_buffer_id is None

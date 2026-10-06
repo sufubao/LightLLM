@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 
 class ReqManagerForMamba(HybridAttentionReqManager):
+    kda = False
+
     def __init__(
         self,
         max_request_num,
@@ -64,6 +66,7 @@ class ReqManagerForMamba(HybridAttentionReqManager):
                 self.mtp_step + 1,
                 linear_config.conv_state_dtype,
                 num_key_heads=linear_config.num_linear_k_heads,
+                kda=self.kda,
                 projection_mode=args.replayssm_projection_mode,
             )
         elif args.ssm_state_mode == "compact":
@@ -74,6 +77,7 @@ class ReqManagerForMamba(HybridAttentionReqManager):
                 self.mtp_step + 1,
                 linear_config.conv_state_dtype,
                 num_key_heads=linear_config.num_linear_k_heads,
+                kda=self.kda,
             )
         return
 

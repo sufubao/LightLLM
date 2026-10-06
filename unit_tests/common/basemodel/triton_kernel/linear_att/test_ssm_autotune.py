@@ -13,20 +13,20 @@ from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
 
-def make_inputs(mode, dtype=torch.bfloat16, device="cpu", width=4, projection_mode="inline"):
+def make_inputs(mode, dtype=torch.bfloat16, device="cpu", width=4, projection_mode="inline", kda=False):
     layers, slots, batch, h, hv, kd, vd = 2, 9, 3, 2, 4, 32, 64
     state = torch.randn(layers, slots, hv, kd, vd, dtype=dtype, device=device) * 0.01
     if mode == "replay":
-        cache = ReplaySSMCache(state, 8, width, num_key_heads=h, projection_mode=projection_mode)
+        cache = ReplaySSMCache(state, 8, width, num_key_heads=h, projection_mode=projection_mode, kda=kda)
     else:
-        cache = CompactSSMCache(state, width, torch.bfloat16, num_key_heads=h)
+        cache = CompactSSMCache(state, width, torch.bfloat16, num_key_heads=h, kda=kda)
     tokens = batch * width
     packed = torch.randn(1, tokens, 2 * h * kd + hv * vd, dtype=torch.bfloat16, device=device)
     q, k, v = [
         x.view(1, tokens, heads, dim)
         for x, heads, dim in zip(packed.split([h * kd, h * kd, hv * vd], -1), [h, h, hv], [kd, kd, vd])
     ]
-    gates = torch.randn(tokens, hv * 2, device=device, dtype=q.dtype)
+    gates = torch.randn(tokens, hv * (kd + 1) if kda else hv * 2, device=device, dtype=q.dtype)
     a, b = gates[:, :-hv], gates[:, -hv:]
     return dict(
         cache=cache,
@@ -77,8 +77,9 @@ def isolate_tuner(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("mode", ["gdn", "replay"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_rebuild_has_real_requests_and_independent_packed_inputs(mode, dtype):
-    inputs = make_inputs(mode, dtype)
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_rebuild_has_real_requests_and_independent_packed_inputs(mode, dtype, kda):
+    inputs = make_inputs(mode, dtype, kda=kda)
     cache = inputs["cache"]
     for x in tensors(cache).values():
         x.fill_(1)
@@ -101,9 +102,9 @@ def test_rebuild_has_real_requests_and_independent_packed_inputs(mode, dtype):
         assert torch.all(x == 1)
     key = tuning.select_config._static_key(**inputs)
     assert len(KernelConfigs.get_config_file_name(key).encode()) <= 255
-    other = make_inputs(mode, torch.float32 if dtype == torch.bfloat16 else torch.bfloat16)
+    other = make_inputs(mode, torch.float32 if dtype == torch.bfloat16 else torch.bfloat16, kda=kda)
     assert tuning.select_config._static_key(**other) != key
-    other = make_inputs(mode, dtype, width=3)
+    other = make_inputs(mode, dtype, width=3, kda=kda)
     assert tuning.select_config._static_key(**other) != key
     inputs["q"] = inputs["q"].contiguous()
     assert tuning.select_config._static_key(**inputs) != key
@@ -145,8 +146,9 @@ def test_layout_is_fixed_before_graph_capture_and_cached_configs_do_not_execute(
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_joint_tuning_isolated_state_and_graph_replay(monkeypatch, mode, dtype, width, projection_mode):
-    inputs = make_inputs(mode, dtype, "cuda", width=width, projection_mode=projection_mode)
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_joint_tuning_isolated_state_and_graph_replay(monkeypatch, mode, dtype, width, projection_mode, kda):
+    inputs = make_inputs(mode, dtype, "cuda", width=width, projection_mode=projection_mode, kda=kda)
     if width == 1:
         for name in ("q", "k", "v"):
             inputs[name] = inputs[name].transpose(0, 1)
@@ -182,7 +184,7 @@ def test_joint_tuning_isolated_state_and_graph_replay(monkeypatch, mode, dtype, 
     assert cache.run_config in configs
     # An explicit identical layout supplies a reference for capture/replay and
     # alternating real/HOLD rows. It must never trigger its own tuning.
-    expected = make_inputs(mode, dtype, "cuda", width=width, projection_mode=projection_mode)["cache"]
+    expected = make_inputs(mode, dtype, "cuda", width=width, projection_mode=projection_mode, kda=kda)["cache"]
     expected.run_config = cache.run_config.copy()
     expected._config_is_fixed = True
     expected.state.copy_(before["state"])
@@ -219,3 +221,16 @@ def test_joint_tuning_isolated_state_and_graph_replay(monkeypatch, mode, dtype, 
     torch.testing.assert_close(cache.state, expected.state, atol=0, rtol=0)
     torch.testing.assert_close(cache.state[:, cache.hold], before["state"][:, cache.hold], atol=0, rtol=0)
     assert len(timings) == len(configs)
+
+
+@pytest.mark.parametrize("mode", ["gdn", "replay"])
+def test_kda_rule_and_gate_bound_separate_tuning_cache(mode):
+    inputs = make_inputs(mode, kda=True)
+    key = tuning.select_config._static_key(**inputs)
+    assert key != tuning.select_config._static_key(**make_inputs(mode))
+    _, rebuilt = tuning.rebuild_inputs(**inputs)
+    assert rebuilt["cache"].kda
+    assert rebuilt["cache"].lower_bound == inputs["cache"].lower_bound
+    assert key == tuning.select_config._static_key(**rebuilt)
+    inputs["cache"].lower_bound = -2.5
+    assert key != tuning.select_config._static_key(**inputs)

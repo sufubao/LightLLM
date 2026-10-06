@@ -28,9 +28,11 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
         "dtype": str((q.dtype, cache.state.dtype)),
         "strides": str((q.stride(axis), k.stride(axis), v.stride(axis), a.stride(0), b.stride(0))),
         "history": cache.capacity if mode == "replay" else 0,
-        "gate": 0,
+        "gate": int(cache.kda),
         "varlen": cu_seqlens is not None,
     }
+    if cache.kda:
+        key["lower"] = cache.lower_bound
     if mode == "replay":
         key["history_dtype"] = str(cache.keys.dtype)
         key["v"] = 4  # Small batches omit the forward fold already handled by prepare.
@@ -58,10 +60,19 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
             cache.verify_width,
             q.dtype,
             num_key_heads=cache.num_key_heads,
+            kda=cache.kda,
+            lower_bound=cache.lower_bound,
             projection_mode=cache.projection_mode,
         )
     else:
-        scratch = type(cache)(state, cache.verify_width, q.dtype, num_key_heads=cache.num_key_heads)
+        scratch = type(cache)(
+            state,
+            cache.verify_width,
+            q.dtype,
+            num_key_heads=cache.num_key_heads,
+            kda=cache.kda,
+            lower_bound=cache.lower_bound,
+        )
     # Benchmark callbacks must not recursively select a configuration.
     scratch._config_is_fixed = True
     inputs = [

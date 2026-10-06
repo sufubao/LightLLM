@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GDN ReplaySSM in LightLLM's [K, V] state layout.
+"""GDN/KDA ReplaySSM in LightLLM's [K, V] state layout.
 
 The checkpoint contains only folded tokens. Derived records reconstruct verify
 outputs, while raw inputs replay the accepted suffix into the checkpoint. Verify
@@ -101,6 +101,8 @@ def _fold_history(
     RS: tl.constexpr,
     VS: tl.constexpr,
     GS: tl.constexpr,
+    BS: tl.constexpr,
+    KDA: tl.constexpr,
 ):
     count = tl.load(Active + N)
     work = tl.program_id(0)
@@ -125,13 +127,21 @@ def _fold_history(
         for j in range(n):
             raw_k = tl.load(RawKeys + layer * RS + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
             raw_v = tl.load(RawValues + layer * VS + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
-            g = tl.load(Gates + layer * GS + slot * (2 * L) + base + j).to(tl.float32)
-            beta = tl.load(Betas + layer * GS + slot * (2 * L) + base + j).to(tl.float32)
+            if KDA:
+                g = tl.load(Gates + layer * GS + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
+            else:
+                g = tl.load(Gates + layer * GS + slot * (2 * L) + base + j).to(tl.float32)
+            beta = tl.load(Betas + layer * BS + slot * (2 * L) + base + j).to(tl.float32)
             raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
             decay = tl.exp(g)
-            sk = tl.sum(state * raw_k[:, None], 0)
-            d = beta * (raw_v - decay * sk)
-            state = state * decay + raw_k[:, None] * d[None, :]
+            if KDA:
+                state *= decay[:, None]
+                d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
+                state += raw_k[:, None] * d[None, :]
+            else:
+                sk = tl.sum(state * raw_k[:, None], 0)
+                d = beta * (raw_v - decay * sk)
+                state = state * decay + raw_k[:, None] * d[None, :]
         # Start the new history from the same rounded checkpoint future calls load.
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
@@ -177,6 +187,8 @@ def _replay(
     PRECOMPUTE_STATE: tl.constexpr,
     BW: tl.constexpr,
     FUSED_FOLD: tl.constexpr,
+    KDA: tl.constexpr,
+    LOWER: tl.constexpr,
 ):
     """Output reconstruction with an exact raw-input recurrence at checkpoint folds."""
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -207,13 +219,21 @@ def _replay(
         for j in range(n):
             raw_k = tl.load(RawKeys + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
             raw_v = tl.load(RawValues + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
-            g = tl.load(Gates + slot * (2 * L) + base + j).to(tl.float32)
+            if KDA:
+                g = tl.load(Gates + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
+            else:
+                g = tl.load(Gates + slot * (2 * L) + base + j).to(tl.float32)
             beta = tl.load(Betas + slot * (2 * L) + base + j).to(tl.float32)
             raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
             decay = tl.exp(g)
-            sk = tl.sum(state * raw_k[:, None], 0)
-            d = beta * (raw_v - decay * sk)
-            state = state * decay + raw_k[:, None] * d[None, :]
+            if KDA:
+                state *= decay[:, None]
+                d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
+                state += raw_k[:, None] * d[None, :]
+            else:
+                sk = tl.sum(state * raw_k[:, None], 0)
+                d = beta * (raw_v - decay * sk)
+                state = state * decay + raw_k[:, None] * d[None, :]
         # Start the new history from the same rounded checkpoint future calls load.
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
@@ -241,8 +261,41 @@ def _replay(
         qk = q_rows + k_rows
         qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
         qk *= tl.where(tt < BW, K ** -0.5, 1.0)[:, None]
-        projections = tl.dot(qk.to(projection_dtype), state.to(projection_dtype), input_precision=projection_precision)
+        if KDA:
+            history = ll < n
+            gates = tl.load(
+                Gates + (slot * (2 * L) + base + ll[:, None]) * K + kk[None, :],
+                history[:, None] & (kk[None, :] < K),
+                0,
+            ).to(tl.float32)
+            total_g = tl.sum(gates, axis=0)
+            wi = tl.arange(0, BW)
+            gate_inputs = tl.load(
+                A + (start + wi[:, None]) * SA + hv * K + kk[None, :],
+                (start + wi[:, None] < end) & (kk[None, :] < K),
+                0,
+            ).to(tl.float32)
+            gate_inputs += tl.load(Bias + hv * K + kk, kk < K, 0).to(tl.float32)[None, :]
+            fresh_gates = LOWER * tl.sigmoid(tl.exp(tl.load(Alog + hv)) * gate_inputs)
+            fresh_gates = tl.where((start + wi < end)[:, None], fresh_gates, 0)
+            query_gates = total_g[None, :] + tl.gather(
+                tl.cumsum(fresh_gates, axis=0),
+                tl.broadcast_to((tt % BW)[:, None], qk.shape),
+                0,
+            )
+            # All exponents are forward decay. No inverse prefix scaling can
+            # overflow when a long history contains strongly negative gates.
+            projections = tl.dot(
+                (qk * tl.exp(query_gates)).to(projection_dtype),
+                state.to(projection_dtype),
+                input_precision=projection_precision,
+            )
+        else:
+            projections = tl.dot(
+                qk.to(projection_dtype), state.to(projection_dtype), input_precision=projection_precision
+            )
 
+    if PRECOMPUTE_STATE and not KDA:
         # Project the whole verify window against both accepted and new keys.
         # Only the small corrected-value solve below depends on token order.
         jj = tl.arange(0, triton.next_power_of_2(max(16, L + BW)))
@@ -328,7 +381,7 @@ def _replay(
             tl.store(Betas + slot * (2 * L) + records, betas, fresh)
         return
 
-    else:
+    if not PRECOMPUTE_STATE or KDA:
         history = ll < n
         keys = tl.load(
             Keys + (key_slot * (2 * L) + base) * K + ll[:, None] * K + kk[None, :],
@@ -340,11 +393,21 @@ def _replay(
             history[:, None] & (vv[None, :] < V),
             0,
         ).to(tl.float32)
-        gates = tl.load(Gates + slot * (2 * L) + base + ll, history, 0).to(tl.float32)
+        if KDA:
+            gates = tl.load(
+                Gates + (slot * (2 * L) + base + ll[:, None]) * K + kk[None, :],
+                history[:, None] & (kk[None, :] < K),
+                0,
+            ).to(tl.float32)
+        else:
+            gates = tl.load(Gates + slot * (2 * L) + base + ll, history, 0).to(tl.float32)
         gate_prefix = tl.cumsum(gates, axis=0)
         total_g = tl.sum(gates, axis=0)
+        if KDA:
+            keys *= tl.where(history[:, None], tl.exp(total_g[None, :] - gate_prefix), 0.0)
         h = hv // (HV // H)
-        log_a, bias = tl.load(Alog + hv).to(tl.float32), tl.load(Bias + hv).to(tl.float32)
+        log_a = tl.load(Alog + hv).to(tl.float32)
+        bias = tl.load(Bias + hv * K + kk, kk < K, 0).to(tl.float32) if KDA else tl.load(Bias + hv).to(tl.float32)
 
         for t in range(start, end):
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
@@ -352,17 +415,36 @@ def _replay(
             v = tl.load(Vp + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
             q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
             k = raw_k / tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
-            x = tl.load(A + t * SA + hv).to(tl.float32) + bias
-            g = -tl.exp(log_a) * tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)
+            if KDA:
+                x = tl.load(A + t * SA + hv * K + kk, kk < K, 0).to(tl.float32) + bias
+                g = LOWER * tl.sigmoid(tl.exp(log_a) * x)
+            else:
+                x = tl.load(A + t * SA + hv).to(tl.float32) + bias
+                g = -tl.exp(log_a) * tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)
             beta = tl.sigmoid(tl.load(B + t * SB + hv).to(tl.float32))
             total_g += g
-            weights = tl.where(history, tl.exp(total_g - gate_prefix), 0.0)
-            hk = tl.sum(keys * k[None, :], axis=1) * weights
-            hq = tl.sum(keys * q[None, :], axis=1) * weights
-            checkpoint_sk = tl.sum(state * k[:, None], axis=0)
-            checkpoint_sq = tl.sum(state * q[:, None], axis=0)
-            sk = checkpoint_sk * tl.exp(total_g) + tl.sum(deltas * hk[:, None], axis=0)
-            sq = checkpoint_sq * tl.exp(total_g) + tl.sum(deltas * hq[:, None], axis=0)
+            if KDA:
+                # Advance the decayed keys once per token, rather than
+                # evaluating L independent vector exponentials each time.
+                keys *= tl.exp(g)[None, :]
+                hk = tl.sum(keys * k[None, :], axis=1)
+                hq = tl.sum(keys * q[None, :], axis=1)
+                if PRECOMPUTE_STATE:
+                    checkpoint_sk = tl.sum(tl.where((tt == BW + t - start)[:, None], projections, 0), 0)
+                    checkpoint_sq = tl.sum(tl.where((tt == t - start)[:, None], projections, 0), 0)
+                else:
+                    checkpoint_sk = tl.sum(state * (k * tl.exp(total_g))[:, None], axis=0)
+                    checkpoint_sq = tl.sum(state * (q * tl.exp(total_g))[:, None], axis=0)
+                sk = checkpoint_sk + tl.sum(deltas * hk[:, None], axis=0)
+                sq = checkpoint_sq + tl.sum(deltas * hq[:, None], axis=0)
+            else:
+                weights = tl.where(history, tl.exp(total_g - gate_prefix), 0.0)
+                hk = tl.sum(keys * k[None, :], axis=1) * weights
+                hq = tl.sum(keys * q[None, :], axis=1) * weights
+                checkpoint_sk = tl.sum(state * k[:, None], axis=0)
+                checkpoint_sq = tl.sum(state * q[:, None], axis=0)
+                sk = checkpoint_sk * tl.exp(total_g) + tl.sum(deltas * hk[:, None], axis=0)
+                sq = checkpoint_sq * tl.exp(total_g) + tl.sum(deltas * hq[:, None], axis=0)
             d = beta * (v - sk)
             tl.store(Out + (t * HV + hv) * V + vv, sq + d * tl.sum(k * q), vv < V)
             record = base + n
@@ -374,11 +456,15 @@ def _replay(
                 if hv % (HV // KH) == 0:
                     tl.store(Keys + (key_slot * (2 * L) + record) * K + kk, k, kk < K)
                     tl.store(RawKeys + (key_slot * (2 * L) + record) * K + kk, raw_k, kk < K)
-                tl.store(Gates + slot * (2 * L) + record, g)
+                if KDA:
+                    tl.store(Gates + (slot * (2 * L) + record) * K + kk, g, kk < K)
+                else:
+                    tl.store(Gates + slot * (2 * L) + record, g)
                 tl.store(Betas + slot * (2 * L) + record, beta)
             keys = tl.where((ll == n)[:, None], k[None, :], keys)
             deltas = tl.where((ll == n)[:, None], d[None, :], deltas)
-            gate_prefix = tl.where(ll >= n, total_g, gate_prefix)
+            if not KDA:
+                gate_prefix = tl.where(ll >= n, total_g, gate_prefix)
             history |= ll == n
             n += 1
 
@@ -403,6 +489,7 @@ def _materialize(
     BK: tl.constexpr,
     BV: tl.constexpr,
     SNAPSHOT: tl.constexpr,
+    KDA: tl.constexpr,
 ):
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + row).to(tl.int64)
@@ -423,10 +510,13 @@ def _materialize(
     for j in range(n):
         raw_k = tl.load(RawKeys + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
         raw_v = tl.load(RawValues + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
-        g = tl.load(Gates + slot * (2 * L) + base + j).to(tl.float32)
+        if KDA:
+            g = tl.load(Gates + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
+        else:
+            g = tl.load(Gates + slot * (2 * L) + base + j).to(tl.float32)
         beta = tl.load(Betas + slot * (2 * L) + base + j).to(tl.float32)
         raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
-        state *= tl.exp(g)
+        state *= tl.exp(g)[:, None] if KDA else tl.exp(g)
         d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
         state += raw_k[:, None] * d[None, :]
     out_slot = layer * HV + head if SNAPSHOT else slot
@@ -445,6 +535,8 @@ class ReplaySSMCache:
         activation_dtype=torch.bfloat16,
         *,
         num_key_heads=None,
+        kda=False,
+        lower_bound=-5.0,
         projection_mode="inline",
         run_config=None,
     ):
@@ -452,6 +544,8 @@ class ReplaySSMCache:
         assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
         assert projection_mode in ("inline", "precompute")
         self.state = state
+        self.kda = kda
+        self.lower_bound = lower_bound
         self.fold_programs = (
             8 * torch.cuda.get_device_properties(state.device).multi_processor_count if state.is_cuda else 0
         )
@@ -477,7 +571,11 @@ class ReplaySSMCache:
         key_shape = (layers, slots, self.num_key_heads, 2 * capacity, k)
         self.keys = torch.empty(key_shape, dtype=history_dtype, device=state.device)
         self.deltas = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=history_dtype, device=state.device)
-        self.gates = torch.empty((layers, slots, hv, 2 * capacity), dtype=torch.float32, device=state.device)
+        self.gates = torch.empty(
+            (layers, slots, hv, 2 * capacity, k) if kda else (layers, slots, hv, 2 * capacity),
+            dtype=torch.float32,
+            device=state.device,
+        )
         self.raw_keys = torch.empty(key_shape, dtype=activation_dtype, device=state.device)
         self.raw_values = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=activation_dtype, device=state.device)
         self.betas = torch.empty((layers, slots, hv, 2 * capacity), dtype=torch.float32, device=state.device)
@@ -536,6 +634,8 @@ class ReplaySSMCache:
             self.raw_keys.stride(0),
             self.raw_values.stride(0),
             self.gates.stride(0),
+            self.betas.stride(0),
+            self.kda,
             num_warps=2,
             num_stages=1,
         )
@@ -583,6 +683,7 @@ class ReplaySSMCache:
             triton.next_power_of_2(k),
             bv,
             snapshot,
+            self.kda,
             num_warps=config["num_warps"],
             num_stages=config.get("num_stages", 3),
         )
@@ -645,6 +746,8 @@ class ReplaySSMCache:
             precompute_state,
             triton.next_power_of_2(self.verify_width),
             reqs.numel() > 12,
+            self.kda,
+            self.lower_bound,
             num_warps=config["num_warps"],
             num_stages=config.get("num_stages", 3),
         )

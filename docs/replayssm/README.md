@@ -1,4 +1,4 @@
-# ReplaySSM for GDN
+# ReplaySSM for GDN and KDA
 
 ReplaySSM reduces speculative SSM storage by keeping one checkpoint per request
 and replaying accepted updates. It is opt-in; `--ssm_state_mode native` remains
@@ -25,10 +25,11 @@ capacities are 4, 8, 16, 32 and 64.
 | `compact` | One state plus this round's raw inputs; merge the accepted prefix every round. Requires MTP. |
 | `replay` | One state plus bounded accepted history; fold before the next verify window would overflow. Supports ordinary decode and MTP. |
 
-Non-native modes currently support Qwen3-Next and Qwen3.5 GDN with FP32 or BF16
+Non-native modes support Qwen3-Next/Qwen3.5 GDN and GLM-5.3-FLASH KDA with FP32 or BF16
 state. Other models retain their native path. `--replayssm_projection_mode`
 selects `inline` (default) or `precompute`; the latter is only valid with replay.
 Choose the projection mode and capacity using the target workload.
+Without MTP, replay adds history storage to the single native checkpoint.
 
 ## State lifecycle and precision
 
@@ -53,7 +54,15 @@ The SSM autotuner measures prepare, forward, acceptance and fold on disposable
 state. Its selected layout is fixed before CUDA Graph capture and reused for
 verification and checkpoint reconstruction; serving state is never a tuning
 input. Cached configurations distinguish precision, stride, heads, verify width,
-history capacity and projection mode.
+history capacity, projection mode and recurrent rule.
+
+KDA uses a per-key-dimension log decay, while GDN uses one scalar per value
+head. KDA history stores the full gate vector; checkpoint projection applies
+the cumulative vector decay to Q/K before projecting. The low-rank correction
+uses forward decay between accepted tokens, without inverse exponential
+scaling. The model's `gate_lower_bound` also separates autotune configurations.
+Accepted-state exports retain GLM's indexer tail for PD; CPU prefix restore
+clears the tail at aligned pool boundaries.
 
 ## Memory and performance
 
@@ -63,6 +72,11 @@ request. Replay L8/precompute uses about 24.07 MiB including history and cursors
 Conv state, full-attention KV, request tables and sampling buffers are additional
 allocations.
 
+For GLM-5.3-FLASH TP8 (34 KDA layers, 8 local heads), one FP32 checkpoint
+is 17 MiB per GPU. Native MTP2 uses 51 MiB per request; replay L8/inline
+uses about 25.52 MiB including history. With BF16 state the corresponding
+figures are 25.5 and 17.02 MiB.
+
 More KV space improves throughput only when the workload and request capacity
 can use it. Increasing request capacity can also increase per-token latency.
 Keep algorithm comparisons at equal capacity separate from capacity comparisons.
@@ -70,14 +84,15 @@ Keep algorithm comparisons at equal capacity separate from capacity comparisons.
 ## Tests
 
 ```bash
-PYTHONPATH=. python -m pytest -q \
+exp -m "ReplaySSM GDN/KDA lifecycle regression" /usr/bin/env PYTHONPATH=. python -m pytest -q \
     unit_tests/server/test_ssm_state_mode.py \
     unit_tests/common/basemodel/attention/linear/test_gdn.py \
     unit_tests/common/basemodel/triton_kernel/linear_att/test_replayssm*.py \
     unit_tests/common/basemodel/triton_kernel/linear_att/test_ssm_autotune.py \
     unit_tests/common/basemodel/triton_kernel/linear_att/test_mtp_state_params.py \
     unit_tests/common/basemodel/triton_kernel/linear_att/test_acceptance_fusion.py \
-    unit_tests/common/test_paged_kv_transfer.py
+    unit_tests/common/test_paged_kv_transfer.py \
+    unit_tests/models/glm5_next/test_{mtp,cache,pd_cache}.py
 ```
 
 CUDA tests cover partial acceptance, history folds, BF16 rounding, grouped keys,

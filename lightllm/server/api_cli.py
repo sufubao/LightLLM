@@ -944,7 +944,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--ssm_state_mode",
         choices=["native", "compact", "replay"],
         default="native",
-        help="SSM state storage: native snapshots, compact MTP records, or deferred GDN replay (FP32/BF16).",
+        help="SSM state storage: native snapshots, compact MTP records, or deferred GDN/KDA replay (FP32/BF16).",
     )
     parser.add_argument(
         "--replayssm_cache_len",

@@ -13,12 +13,22 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("capture_metadata", [False, True])
 @pytest.mark.parametrize("varlen", [False, True])
-def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varlen):
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varlen, kda):
     torch.manual_seed(827)
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
     initial = torch.randn(3, 5, 4, 128, 128, device="cuda", dtype=dtype) * 0.01
     caches = [
-        cls(initial.clone(), 8, 4, torch.bfloat16, num_key_heads=2, projection_mode="precompute", run_config=config)
+        cls(
+            initial.clone(),
+            8,
+            4,
+            torch.bfloat16,
+            num_key_heads=2,
+            kda=kda,
+            projection_mode="precompute",
+            run_config=config,
+        )
         for cls in [ReplaySSMCache, ReplaySSMCache]
     ]
     manager = object.__new__(ReqManagerForMamba)
@@ -32,10 +42,10 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
     q = torch.randn(1, 12, 2, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
     v = torch.randn(1, 12, 4, 128, device="cuda", dtype=torch.bfloat16)
-    a = torch.full((12, 4), -3.0, device="cuda", dtype=torch.bfloat16)
-    beta = torch.randn_like(a)
+    a = torch.full((12, 4 * 128 if kda else 4), -3.0, device="cuda", dtype=torch.bfloat16)
+    beta = torch.randn(a.shape[0], 4, device="cuda", dtype=a.dtype)
     alog = torch.zeros(4, device="cuda")
-    bias = torch.zeros_like(alog)
+    bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
 
     def inputs(iteration):
         ids = [0, 1, 3] if iteration % 2 == 0 else [3, 0, 1]
@@ -127,12 +137,19 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("capture_metadata", [False, True])
 @pytest.mark.parametrize("stagger", [False, True])
-def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata, stagger):
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata, stagger, kda):
     torch.manual_seed(731)
     initial = torch.randn(3, 3, 4, 128, 128, device="cuda", dtype=dtype) * 0.01
     caches = [
         ReplaySSMCache(
-            initial.clone(), 8, 1, dtype, num_key_heads=2, run_config={"BV": 32, "num_warps": 1, "num_stages": 1}
+            initial.clone(),
+            8,
+            1,
+            dtype,
+            num_key_heads=2,
+            kda=kda,
+            run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
         )
         for _ in range(2)
     ]
@@ -142,10 +159,10 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
     q = torch.randn(3, 2, 128, device="cuda", dtype=dtype)
     k = torch.randn_like(q)
     v = torch.randn(3, 4, 128, device="cuda", dtype=dtype)
-    a = torch.full((3, 4), -3.0, device="cuda", dtype=dtype)
-    beta = torch.randn_like(a)
+    a = torch.full((3, 4 * 128 if kda else 4), -3.0, device="cuda", dtype=dtype)
+    beta = torch.randn(a.shape[0], 4, device="cuda", dtype=a.dtype)
     alog = torch.zeros(4, device="cuda")
-    bias = torch.zeros_like(alog)
+    bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
 
     def forward(cache):
         return [cache.forward(layer, q, k, v, a, beta, alog, bias, reqs) for layer in range(3)]
@@ -257,12 +274,13 @@ def test_cross_layer_fold_with_state_offset_above_int32():
 
 @pytest.mark.parametrize("batch", [1, 8, 12])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_small_batch_matches_larger_graph_padding(batch, dtype):
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
     torch.manual_seed(1087 + batch)
     initial = torch.randn(2, 14, 4, 128, 128, device="cuda", dtype=dtype) * 0.01
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
     caches = [
-        ReplaySSMCache(initial.clone(), 8, 4, num_key_heads=2, projection_mode="precompute", run_config=config)
+        ReplaySSMCache(initial.clone(), 8, 4, num_key_heads=2, kda=kda, projection_mode="precompute", run_config=config)
         for _ in range(2)
     ]
     reqs = torch.arange(batch, device="cuda", dtype=torch.int32)
@@ -272,10 +290,10 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype):
     q = torch.randn(1, batch * 4, 2, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
     v = torch.randn(1, batch * 4, 4, 128, device="cuda", dtype=torch.bfloat16)
-    a = torch.full((batch * 4, 4), -3.0, device="cuda", dtype=torch.bfloat16)
-    beta = torch.randn_like(a)
+    a = torch.full((batch * 4, 4 * 128 if kda else 4), -3.0, device="cuda", dtype=torch.bfloat16)
+    beta = torch.randn(a.shape[0], 4, device="cuda", dtype=a.dtype)
     alog = torch.zeros(4, device="cuda")
-    bias = torch.zeros_like(alog)
+    bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
     accepted = torch.zeros(14, device="cuda", dtype=torch.int32)
     graphs, outputs = [], []
     for cache, ids, offsets in zip(caches, [reqs, padded], [cu, padded_cu]):

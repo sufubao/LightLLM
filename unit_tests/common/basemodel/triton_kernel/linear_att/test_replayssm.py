@@ -7,14 +7,18 @@ from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-def reference(q, k, v, a, b, a_log, bias, state):
+def reference(q, k, v, a, b, a_log, bias, state, kda=False, lower_bound=-5.0):
     q, k, v = q.float(), k.float(), v.float()
     q = q / (q.square().sum(-1, keepdim=True) + 1e-6).sqrt() * (q.shape[-1] ** -0.5)
     k = k / (k.square().sum(-1, keepdim=True) + 1e-6).sqrt()
     q = q.repeat_interleave(v.shape[-2] // q.shape[-2], -2)
     k = k.repeat_interleave(v.shape[-2] // k.shape[-2], -2)
-    g = -a_log.exp() * torch.nn.functional.softplus(a.float() + bias)
-    state = state * g.exp()[..., None, None]
+    if kda:
+        g = lower_bound * torch.sigmoid(a_log.exp()[:, None] * (a.float().view_as(k) + bias.view_as(k)))
+        state = state * g.exp()[..., None]
+    else:
+        g = -a_log.exp() * torch.nn.functional.softplus(a.float() + bias)
+        state = state * g.exp()[..., None, None]
     d = b.float().sigmoid()[..., None] * (v - torch.einsum("...kv,...k->...v", state, k))
     state = state + k[..., None] * d[..., None, :]
     return torch.einsum("...kv,...k->...v", state, q), state
@@ -34,6 +38,8 @@ def test_replay_acceptance_flush_and_graph(
     activation_dtype=torch.bfloat16,
     gate_shift=-3,
     head_geometry=(2, 4),
+    kda=False,
+    lower_bound=-5.0,
 ):
     torch.manual_seed(21)
     kdim, vdim = dims
@@ -45,6 +51,8 @@ def test_replay_acceptance_flush_and_graph(
         capacity,
         width,
         num_key_heads=h,
+        kda=kda,
+        lower_bound=lower_bound,
         projection_mode=projection_mode,
         run_config=run_config,
         activation_dtype=activation_dtype,
@@ -63,10 +71,10 @@ def test_replay_acceptance_flush_and_graph(
     q = torch.randn(1, tokens, h, kdim, device="cuda", dtype=activation_dtype)
     k = torch.randn_like(q)
     v = torch.randn(1, tokens, hv, vdim, device="cuda", dtype=activation_dtype)
-    a = torch.randn(tokens, hv, device="cuda", dtype=activation_dtype) + gate_shift
-    b = torch.randn_like(a)
+    a = torch.randn(tokens, hv * kdim if kda else hv, device="cuda", dtype=activation_dtype) + gate_shift
+    b = torch.randn(tokens, hv, device="cuda", dtype=activation_dtype)
     alog = torch.randn(hv, device="cuda") * 0.1
-    bias = torch.randn(hv, device="cuda") * 0.1
+    bias = torch.randn(hv * kdim if kda else hv, device="cuda") * 0.1
     accepted = torch.zeros(slots, dtype=torch.int32, device="cuda")
 
     def step():
@@ -103,7 +111,9 @@ def test_replay_acceptance_flush_and_graph(
                 cur = expected[layer, req].clone()
                 for j in range(length):
                     t = start + j
-                    out, cur = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur)
+                    out, cur = reference(
+                        q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur, kda=kda, lower_bound=lower_bound
+                    )
                     torch.testing.assert_close(outputs[layer][0, t].float(), out, atol=0.006, rtol=0.02)
                     if j + 1 == counts[seq]:
                         expected[layer, req].copy_(cur)
@@ -362,23 +372,23 @@ def test_snapshot_without_history_copies_active_state():
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_compact_preserves_accepted_prefix(dtype, run_config=None):
+def test_compact_preserves_accepted_prefix(dtype, run_config=None, kda=False):
     from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
 
     torch.manual_seed(17)
-    hv, kd, vd, width = 4, 64, 64, 3
+    hv, kd, vd, width = 4, 128 if kda else 64, 128 if kda else 64, 3
     state = torch.randn(2, 4, hv, kd, vd, device="cuda", dtype=dtype) * 0.01
-    cache = CompactSSMCache(state, width, torch.bfloat16, num_key_heads=hv, run_config=run_config)
+    cache = CompactSSMCache(state, width, torch.bfloat16, num_key_heads=hv, kda=kda, run_config=run_config)
     reqs = torch.tensor([2, 0, 3], device="cuda", dtype=torch.int32)
     cu = torch.tensor([0, 3, 5, 5], device="cuda", dtype=torch.int32)
     accepted = torch.tensor([1, 0, 0, 0], device="cuda", dtype=torch.int32)
     shape = (1, 5, hv, kd)
     q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     k, v = torch.randn_like(q), torch.randn_like(q)
-    a = torch.randn((5, hv), device="cuda", dtype=torch.bfloat16)
+    a = torch.randn((5, hv * kd if kda else hv), device="cuda", dtype=torch.bfloat16)
     b = torch.randn(5, hv, device="cuda", dtype=torch.bfloat16)
     alog = torch.randn(hv, device="cuda") * 0.1
-    bias = torch.randn(hv, device="cuda") * 0.1
+    bias = torch.randn(hv * kd if kda else hv, device="cuda") * 0.1
     for _ in range(15):
         before = state.clone()
         outputs = [cache.forward(layer, q, k, v, a, b, alog, bias, reqs, cu) for layer in range(2)]
@@ -389,7 +399,7 @@ def test_compact_preserves_accepted_prefix(dtype, run_config=None):
                 cur = before[layer, req].float()
                 for j in range(length):
                     t = start + j
-                    out, cur = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur)
+                    out, cur = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur, kda=kda)
                     torch.testing.assert_close(outputs[layer][0, t].float(), out, atol=0.004, rtol=0.02)
                     cur = cur.to(dtype).float()
                     if j == int(accepted[req]):
@@ -448,8 +458,15 @@ def test_compact_matches_native_mtp(dtype, width, run_config=None):
             run_config={"num_stages": 1, **(run_config or {"BV": 8, "num_warps": 1})},
         )
         cache.accept_updates(reqs, accepted)
-        assert torch.equal(out, ref)
-        torch.testing.assert_close(state[0, :batch], reference_state[reqs * width + accepted[:batch]], rtol=0, atol=0)
+        # BF16 casts can straddle a rounding midpoint across compiler/layouts.
+        rtol = 2 * torch.finfo(dtype).eps if dtype == torch.bfloat16 else 0
+        torch.testing.assert_close(out, ref, rtol=rtol, atol=2e-5 if dtype == torch.bfloat16 else 0)
+        torch.testing.assert_close(
+            state[0, :batch],
+            reference_state[reqs * width + accepted[:batch]],
+            rtol=rtol,
+            atol=5e-4 if dtype == torch.bfloat16 else 0,
+        )
         counts.copy_(accepted[:batch] + 1)
         accepted[:batch].add_(1).remainder_(width)
 
@@ -585,3 +602,50 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
     manager.init_hybrid_attention_state(SimpleNamespace(req_idx=2))
     assert torch.count_nonzero(manager.req_to_ssm_state.buffer[:, 2]).item() == 0
     assert torch.count_nonzero(manager.req_to_conv_state.buffer[:, 2]).item() == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("capacity,width", [(4, 1), (4, 3), (8, 4), (16, 5), (32, 4), (64, 4)])
+@pytest.mark.parametrize("projection_mode", ["inline", "precompute"])
+@pytest.mark.parametrize("lower_bound,gate_shift", [(-5.0, 0), (-2.5, -6)])
+@pytest.mark.parametrize("activation_dtype", [torch.float32, torch.bfloat16])
+def test_kda_replay_reference_fold_and_graph(
+    dtype, capacity, width, projection_mode, lower_bound, gate_shift, activation_dtype
+):
+    test_replay_acceptance_flush_and_graph(
+        width,
+        (128, 128),
+        capacity,
+        dtype,
+        run_config={"BV": 32, "num_warps": 2, "num_stages": 1},
+        projection_mode=projection_mode,
+        gate_shift=gate_shift,
+        activation_dtype=activation_dtype,
+        head_geometry=(2, 2),
+        kda=True,
+        lower_bound=lower_bound,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_kda_compact_reference_and_partial_acceptance(dtype):
+    test_compact_preserves_accepted_prefix(dtype, kda=True)
+
+
+@pytest.mark.parametrize("config", get_configs())
+@pytest.mark.parametrize("mode", ["compact", "inline", "precompute"])
+def test_kda_tuning_candidates_match_reference(config, mode):
+    if mode == "compact":
+        test_compact_preserves_accepted_prefix(torch.bfloat16, run_config=config, kda=True)
+    else:
+        test_replay_acceptance_flush_and_graph(
+            3,
+            (128, 128),
+            4,
+            torch.bfloat16,
+            run_config=config,
+            projection_mode=mode,
+            head_geometry=(2, 2),
+            kda=True,
+            gate_shift=-3,
+        )

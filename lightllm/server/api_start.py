@@ -49,12 +49,14 @@ def _validate_ssm_state_mode(args: StartArgs):
     from lightllm.utils.config_utils import get_model_type
 
     assert get_model_type(args.model_dir) in (
+        "glm5_next",
+        "glm5_next_text",
         "qwen3_next",
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_text",
         "qwen3_5_moe_text",
-    ), "Non-native SSM state modes currently require a GDN model"
+    ), "Non-native SSM state modes currently require a GDN or KDA model"
     if args.ssm_state_mode == "compact":
         assert args.mtp_step > 0, "ssm_state_mode=compact requires MTP (mtp_step > 0)"
     else:

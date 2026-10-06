@@ -19,14 +19,14 @@ def make_inputs(mode, dtype=torch.bfloat16, device="cpu", width=4, projection_mo
     if mode == "replay":
         cache = ReplaySSMCache(state, 8, width, num_key_heads=h, projection_mode=projection_mode)
     else:
-        cache = CompactSSMCache(state, width, torch.bfloat16, mode, num_key_heads=h)
+        cache = CompactSSMCache(state, width, torch.bfloat16, num_key_heads=h)
     tokens = batch * width
     packed = torch.randn(1, tokens, 2 * h * kd + hv * vd, dtype=torch.bfloat16, device=device)
     q, k, v = [
         x.view(1, tokens, heads, dim)
         for x, heads, dim in zip(packed.split([h * kd, h * kd, hv * vd], -1), [h, h, hv], [kd, kd, vd])
     ]
-    gates = torch.randn(tokens, hv * (kd + 1 if mode == "kda" else 2), device=device, dtype=q.dtype)
+    gates = torch.randn(tokens, hv * 2, device=device, dtype=q.dtype)
     a, b = gates[:, :-hv], gates[:, -hv:]
     return dict(
         cache=cache,
@@ -75,7 +75,7 @@ def isolate_tuner(monkeypatch, tmp_path):
     monkeypatch.setattr(tuner, "warmuped_configs_set", set())
 
 
-@pytest.mark.parametrize("mode", ["gdn", "kda", "replay"])
+@pytest.mark.parametrize("mode", ["gdn", "replay"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_rebuild_has_real_requests_and_independent_packed_inputs(mode, dtype):
     inputs = make_inputs(mode, dtype)
@@ -139,7 +139,6 @@ def test_layout_is_fixed_before_graph_capture_and_cached_configs_do_not_execute(
     "mode,width,projection_mode",
     [
         ("gdn", 4, "inline"),
-        ("kda", 4, "inline"),
         ("replay", 4, "inline"),
         ("replay", 1, "inline"),
         ("replay", 4, "precompute"),
@@ -175,10 +174,10 @@ def test_joint_tuning_isolated_state_and_graph_replay(monkeypatch, mode, dtype, 
     monkeypatch.setattr(tuner, "_bench", checked_bench)
     args = [inputs[name] for name in ("q", "k", "v", "a", "b", "a_log", "bias")]
     reqs = torch.full((3,), cache.hold, device="cuda", dtype=torch.int32)
-    positions = cache.prepare_decode(reqs, inputs["cu_seqlens"])
+    cache.prepare_decode(reqs, inputs["cu_seqlens"])
     with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         # Exercise the real forward hook with the HOLD-only graph warmup input.
-        cache.forward(0, *args, reqs, positions, inputs["cu_seqlens"])
+        cache.forward(0, *args, reqs, inputs["cu_seqlens"])
     assert len(timings) == len(configs)
     assert cache.run_config in configs
     # An explicit identical layout supplies a reference for capture/replay and
@@ -190,11 +189,8 @@ def test_joint_tuning_isolated_state_and_graph_replay(monkeypatch, mode, dtype, 
     accepted = torch.zeros(cache.state.shape[1], device="cuda", dtype=torch.int32)
 
     def step(target):
-        positions = target.prepare_decode(reqs, inputs["cu_seqlens"])
-        out = [
-            target.forward(layer, *args, reqs, positions, inputs["cu_seqlens"])
-            for layer in range(target.state.shape[0])
-        ]
+        target.prepare_decode(reqs, inputs["cu_seqlens"])
+        out = [target.forward(layer, *args, reqs, inputs["cu_seqlens"]) for layer in range(target.state.shape[0])]
         target.accept_updates(reqs, accepted)
         return out
 

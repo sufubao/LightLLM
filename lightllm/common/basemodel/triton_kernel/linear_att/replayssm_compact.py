@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compact speculative state for GDN/BF16 and KDA.
+"""Compact speculative state for GDN.
 
 Verify retains raw inputs rather than full SSM snapshots. Commit re-executes the
 accepted prefix with the same per-token rounding as the recurrent baseline.
-KDA follows GLM-5.3-Flash's bounded per-key gate and rsqrt normalization.
 """
 
 import torch
@@ -47,8 +46,6 @@ def _compact(
     BK: tl.constexpr,
     BV: tl.constexpr,
     COMMIT: tl.constexpr,
-    KDA: tl.constexpr,
-    LOWER: tl.constexpr,
 ):
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + row).to(tl.int64)
@@ -75,45 +72,30 @@ def _compact(
         if COMMIT:
             k = tl.load(Keys + key_record * K + kk, kk < K, 0).to(tl.float32)
             v = tl.load(Values + record * V + vv, vv < V, 0).to(tl.float32)
-            decay = tl.load(Decays + record * K + kk, kk < K, 0) if KDA else tl.load(Decays + record)
+            decay = tl.load(Decays + record)
             beta = tl.load(Betas + record)
         else:
             h = hv // (HV // H)
             k = tl.load(Kp + t * SK + h * K + kk, kk < K, 0).to(tl.float32)
             v = tl.load(Vp + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
             log_a = tl.load(Alog + hv).to(tl.float32)
-            if KDA:
-                bias = tl.load(Bias + hv * K + kk, kk < K, 0).to(tl.float32)
-                gate = tl.load(A + t * SA + hv * K + kk, kk < K, 0).to(tl.float32)
-                decay = tl.exp(LOWER * tl.sigmoid(tl.exp(log_a) * (gate + bias)))
-            else:
-                x = tl.load(A + t * SA + hv).to(tl.float32) + tl.load(Bias + hv).to(tl.float32)
-                g = -tl.exp(log_a) * tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)
-                decay = tl.exp(g)
+            x = tl.load(A + t * SA + hv).to(tl.float32) + tl.load(Bias + hv).to(tl.float32)
+            g = -tl.exp(log_a) * tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)
+            decay = tl.exp(g)
             beta = tl.sigmoid(tl.load(B + t * SB + hv).to(tl.float32))
             tl.store(Values + record * V + vv, v, vv < V)
             if iv == 0:
                 if hv % (HV // KH) == 0:
                     tl.store(Keys + key_record * K + kk, k, kk < K)
                 tl.store(Betas + record, beta)
-                if KDA:
-                    tl.store(Decays + record * K + kk, decay, kk < K)
-                else:
-                    tl.store(Decays + record, decay)
-        if KDA:
-            k = k * tl.rsqrt(tl.sum(k * k) + 1.0e-6)
-            state *= decay[:, None]
-        else:
-            k = k / tl.sqrt(tl.sum(k * k) + 1.0e-6)
-            state *= decay
+                tl.store(Decays + record, decay)
+        k = k / tl.sqrt(tl.sum(k * k) + 1.0e-6)
+        state *= decay
         d = (v - tl.sum(state * k[:, None], 0)) * beta
         state += k[:, None] * d[None, :]
         if not COMMIT:
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
-            if KDA:
-                q = q * (tl.rsqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5))
-            else:
-                q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
+            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
             tl.store(Out + (t * HV + hv) * V + vv, tl.sum(state * q[:, None], 0), vv < V)
         state = state.to(State.dtype.element_ty).to(tl.float32)
     if COMMIT:
@@ -121,25 +103,12 @@ def _compact(
 
 
 class CompactSSMCache:
-    def __init__(
-        self,
-        state,
-        verify_width,
-        activation_dtype,
-        kind="gdn",
-        lower_bound=-5.0,
-        *,
-        num_key_heads=None,
-        run_config=None
-    ):
-        assert kind in ("gdn", "kda")
+    def __init__(self, state, verify_width, activation_dtype, *, num_key_heads=None, run_config=None):
         self.state = state
         self.verify_width = verify_width
-        self.kind = kind
-        self.lower_bound = lower_bound
         # Verify and accepted-state reconstruction must share the same layout.
         self._config_is_fixed = run_config is not None
-        self.run_config = dict(run_config or {"BV": 32 if kind == "kda" else 8, "num_warps": 4 if kind == "kda" else 1})
+        self.run_config = dict(run_config or {"BV": 8, "num_warps": 1})
         assert self.run_config["BV"] in (8, 16, 32, 64, 128)
         assert self.run_config["num_warps"] in (1, 2, 4, 8)
         layers, slots, hv, k, v = state.shape
@@ -151,7 +120,7 @@ class CompactSSMCache:
             (layers, slots, self.num_key_heads, verify_width, k), device=state.device, dtype=activation_dtype
         )
         self.values = torch.empty((*shape, v), device=state.device, dtype=activation_dtype)
-        self.decays = torch.empty((*shape, k) if kind == "kda" else shape, device=state.device, dtype=torch.float32)
+        self.decays = torch.empty(shape, device=state.device, dtype=torch.float32)
         self.betas = torch.empty(shape, device=state.device, dtype=torch.float32)
 
     def clear_history(self, req):
@@ -169,10 +138,10 @@ class CompactSSMCache:
     def snapshot_accepted_state(self, req_idx):
         return self.state[:, req_idx]
 
-    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, positions, cu_seqlens=None):
+    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None):
         assert cu_seqlens is not None, "compact replay is only used for speculative verify"
         if layer == 0:
-            configure_cache(self, self.kind, q, k, v, a, b, a_log, bias, cu_seqlens)
+            configure_cache(self, "gdn", q, k, v, a, b, a_log, bias, cu_seqlens)
         _, slots, hv, kd, vd = self.state.shape
         assert self.num_key_heads in (q.shape[-2], hv)
         out = torch.empty_like(v)
@@ -211,8 +180,6 @@ class CompactSSMCache:
             triton.next_power_of_2(kd),
             bv,
             False,
-            self.kind == "kda",
-            self.lower_bound,
             num_warps=self.run_config["num_warps"],
             num_stages=self.run_config.get("num_stages", 3),
         )
@@ -255,8 +222,6 @@ class CompactSSMCache:
             triton.next_power_of_2(kd),
             bv,
             True,
-            self.kind == "kda",
-            self.lower_bound,
             num_warps=self.run_config["num_warps"],
             num_stages=self.run_config.get("num_stages", 3),
         )

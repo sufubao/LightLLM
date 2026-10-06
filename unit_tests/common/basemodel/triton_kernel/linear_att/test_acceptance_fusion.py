@@ -136,8 +136,8 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, projec
 
     def cycle(i):
         cache = caches[i]
-        positions = cache.prepare_decode(reqs, cu)
-        outputs = [cache.forward(layer, q, k, v, a, b, alog, alog, reqs, positions, cu) for layer in range(2)]
+        cache.prepare_decode(reqs, cu)
+        outputs = [cache.forward(layer, q, k, v, a, b, alog, alog, reqs, cu) for layer in range(2)]
         (old if i == 0 else new)(managers[i], args)
         return outputs
 

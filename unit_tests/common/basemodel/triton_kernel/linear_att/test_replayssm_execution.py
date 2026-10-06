@@ -64,9 +64,9 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         cu, reqs, _ = build_dynamic_mtp_linear_att_state_params(rows, mtp, manager.req_to_mtp_state_index, 4)
         return cu, reqs, cache.prepare_decode(reqs, cu)
 
-    def forward_accept(index, cu, reqs, pos):
+    def forward_accept(index, cu, reqs):
         cache = caches[index]
-        out = [cache.forward(layer, q, k, v, a, beta, alog, bias, reqs, pos, cu) for layer in range(3)]
+        out = [cache.forward(layer, q, k, v, a, beta, alog, bias, reqs, cu) for layer in range(3)]
         if index == 0:
             cache.accept_updates(reqs, accepted)
         else:
@@ -77,7 +77,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
     graphs, captured, outputs = [], [], []
     for index, cache in enumerate(caches):
         cu, reqs, pos = metadata(cache)
-        forward_accept(index, cu, reqs, pos)
+        forward_accept(index, cu, reqs)
         cache.state.copy_(initial)
         cache.cursors.zero_()
         manager.req_to_mtp_state_index.zero_()
@@ -85,7 +85,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         with torch.cuda.graph(g):
             if capture_metadata:
                 cu, reqs, pos = metadata(cache)
-            out = forward_accept(index, cu, reqs, pos)
+            out = forward_accept(index, cu, reqs)
         graphs.append(g)
         captured.append((cu, reqs, pos))
         outputs.append(out)
@@ -147,12 +147,12 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
     alog = torch.zeros(4, device="cuda")
     bias = torch.zeros_like(alog)
 
-    def forward(cache, pos):
-        return [cache.forward(layer, q, k, v, a, beta, alog, bias, reqs, pos) for layer in range(3)]
+    def forward(cache):
+        return [cache.forward(layer, q, k, v, a, beta, alog, bias, reqs) for layer in range(3)]
 
     def warm(cache):
-        pos = cache.prepare_decode(reqs)
-        out = forward(cache, pos)
+        cache.prepare_decode(reqs)
+        out = forward(cache)
         cache.accept_updates(reqs)
         return out
 
@@ -173,7 +173,7 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
                 pos = cache.prepare_decode(reqs)
                 if early:
                     cache.accept_updates(reqs)
-            out = forward(cache, pos)
+            out = forward(cache)
             if capture_metadata and not early:
                 cache.accept_updates(reqs)
         graphs.append(graph)
@@ -234,7 +234,7 @@ def test_cross_layer_fold_with_state_offset_above_int32():
 
     def step(cache, accepted):
         pos = cache.prepare_decode(reqs, cu)
-        out = [cache.forward(layer, q, k, v, a, beta, alog, bias, reqs, pos, cu) for layer in range(48)]
+        out = [cache.forward(layer, q, k, v, a, beta, alog, bias, reqs, cu) for layer in range(48)]
         cache.accept_updates(reqs, accepted)
         return pos, out
 
@@ -281,8 +281,8 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype):
     for cache, ids, offsets in zip(caches, [reqs, padded], [cu, padded_cu]):
 
         def step():
-            pos = cache.prepare_decode(ids, offsets)
-            out = [cache.forward(layer, q, k, v, a, beta, alog, bias, ids, pos, offsets) for layer in range(2)]
+            cache.prepare_decode(ids, offsets)
+            out = [cache.forward(layer, q, k, v, a, beta, alog, bias, ids, offsets) for layer in range(2)]
             cache.accept_updates(ids, accepted)
             return out
 

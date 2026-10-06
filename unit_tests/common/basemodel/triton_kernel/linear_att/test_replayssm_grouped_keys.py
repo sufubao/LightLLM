@@ -9,7 +9,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-@pytest.mark.parametrize("mode", ["replay", "compact", "kda"])
+@pytest.mark.parametrize("mode", ["replay", "compact"])
 @pytest.mark.parametrize("group", [1, 2, 3])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_grouped_keys_graph_fold_partial_accept(mode, group, dtype):
@@ -21,16 +21,14 @@ def test_grouped_keys_graph_fold_partial_accept(mode, group, dtype):
     def make_cache(key_heads):
         if mode == "replay":
             return ReplaySSMCache(state.clone(), 16, width, num_key_heads=key_heads)
-        return CompactSSMCache(
-            state.clone(), width, torch.bfloat16, kind="kda" if mode == "kda" else "gdn", num_key_heads=key_heads
-        )
+        return CompactSSMCache(state.clone(), width, torch.bfloat16, num_key_heads=key_heads)
 
     caches = [make_cache(hv), make_cache(h)]
     assert caches[0].keys.numel() == caches[1].keys.numel() * group
     # Packed strides, out-of-order requests, an empty real request, nonempty HOLD.
     packed = torch.randn(1, 8, (2 * h + hv) * kd, device="cuda", dtype=torch.bfloat16)
     q, k, v = [x.view(1, 8, heads, kd) for x, heads in zip(packed.split([h * kd, h * kd, hv * kd], -1), [h, h, hv])]
-    a = torch.randn(8, hv * kd if mode == "kda" else hv, device="cuda", dtype=torch.bfloat16)
+    a = torch.randn(8, hv, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(8, hv, device="cuda", dtype=torch.bfloat16)
     alog = torch.randn(hv, device="cuda") * 0.1
     bias = torch.randn(a.shape[-1], device="cuda") * 0.1
@@ -39,8 +37,8 @@ def test_grouped_keys_graph_fold_partial_accept(mode, group, dtype):
     accepted = torch.tensor([0, -1, 0, -1, -1], device="cuda", dtype=torch.int32)
 
     def step(cache):
-        pos = cache.prepare_decode(reqs, cu)
-        out = [cache.forward(layer, q, k, v, a, b, alog, bias, reqs, pos, cu) for layer in range(layers)]
+        cache.prepare_decode(reqs, cu)
+        out = [cache.forward(layer, q, k, v, a, b, alog, bias, reqs, cu) for layer in range(layers)]
         cache.accept_updates(reqs, accepted)
         return out
 

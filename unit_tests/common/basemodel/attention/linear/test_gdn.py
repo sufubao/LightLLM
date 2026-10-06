@@ -183,7 +183,7 @@ def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
         accept_updates=lambda *args: pytest.fail("speculative updates must wait for acceptance"),
     )
     state.init_state()
-    assert state.b_ssm_history_positions is positions
+    assert not hasattr(state, "b_ssm_history_positions")
     assert state.b_ssm_buffer_idx is reqs
 
 

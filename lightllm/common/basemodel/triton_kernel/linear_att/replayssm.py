@@ -595,7 +595,7 @@ class ReplaySSMCache:
         self._materialize_accepted_state(reqs, output, snapshot=True)
         return output
 
-    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, positions, cu_seqlens=None, run_config=None):
+    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
         if layer == 0 and run_config is None:
             configure_cache(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
         hv, kd, vd = self.state.shape[-3:]

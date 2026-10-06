@@ -28,7 +28,7 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
         "dtype": str((q.dtype, cache.state.dtype)),
         "strides": str((q.stride(axis), k.stride(axis), v.stride(axis), a.stride(0), b.stride(0))),
         "history": cache.capacity if mode == "replay" else 0,
-        "gate": cache.lower_bound if mode == "kda" else 0,
+        "gate": 0,
         "varlen": cu_seqlens is not None,
     }
     if mode == "replay":
@@ -61,9 +61,7 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
             projection_mode=cache.projection_mode,
         )
     else:
-        scratch = type(cache)(
-            state, cache.verify_width, q.dtype, mode, cache.lower_bound, num_key_heads=cache.num_key_heads
-        )
+        scratch = type(cache)(state, cache.verify_width, q.dtype, num_key_heads=cache.num_key_heads)
     # Benchmark callbacks must not recursively select a configuration.
     scratch._config_is_fixed = True
     inputs = [
@@ -117,9 +115,9 @@ def select_config(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, work
     else:
         rounds = 2  # Partial acceptance and full acceptance, both across all layers.
     for step in range(rounds):
-        positions = cache.prepare_decode(reqs, cu_seqlens)
+        cache.prepare_decode(reqs, cu_seqlens)
         for layer in range(cache.state.shape[0]):
-            cache.forward(layer, q, k, v, a, b, a_log, bias, reqs, positions, cu_seqlens)
+            cache.forward(layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
         cache.accept_updates(reqs, partial if mode != "replay" and step == 0 else accepted)
         if mode == "replay" and step == rounds - 2:
             cache._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)

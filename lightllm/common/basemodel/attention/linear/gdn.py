@@ -209,8 +209,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
 
-    b_ssm_history_positions: torch.Tensor = None
-
     def init_state(self):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step == 0:
@@ -221,7 +219,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             self._init_fixed_mtp_decode_state(draft_step)
         ssm_updates = self.backend.req_manager.ssm_update_cache
         if ssm_updates is not None:
-            self.b_ssm_history_positions = ssm_updates.prepare_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+            ssm_updates.prepare_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
             if draft_step == 0:
                 ssm_updates.accept_updates(self.b_conv_buffer_idx)
 
@@ -370,7 +368,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                     layer_weight.linear_A_log.weight,
                     layer_weight.linear_dt_bias.weight,
                     self.b_conv_buffer_idx,
-                    self.b_ssm_history_positions,
                 ),
                 z,
             )
@@ -435,7 +432,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 layer_weight.linear_A_log.weight,
                 layer_weight.linear_dt_bias.weight,
                 self.b_conv_buffer_idx,
-                self.b_ssm_history_positions,
                 cu_seqlens_q,
             )
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"

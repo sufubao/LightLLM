@@ -19,7 +19,6 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         max_sequence_length,
         mem_manager,
         linear_config: LinearAttCacheConfig,
-        recurrent_kind="gdn",
     ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         args = get_env_start_args()
@@ -59,7 +58,6 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         if args.ssm_state_mode == "replay":
             from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
 
-            assert recurrent_kind == "gdn", "ssm_state_mode=replay requires GDN"
             self.ssm_update_cache = ReplaySSMCache(
                 self.req_to_ssm_state.buffer,
                 args.replayssm_cache_len,
@@ -75,7 +73,6 @@ class ReqManagerForMamba(HybridAttentionReqManager):
                 self.req_to_ssm_state.buffer,
                 self.mtp_step + 1,
                 linear_config.conv_state_dtype,
-                kind=recurrent_kind,
                 num_key_heads=linear_config.num_linear_k_heads,
             )
         return
@@ -100,10 +97,7 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
         if self.ssm_update_cache is not None:
-            for req_idx, buffer_idx in zip(req_indexes, buffer_indexes):
-                if buffer_idx != -1:
-                    self.save_state(req_idx, buffer_idx, self.big_page_buffers)
-            return
+            return super().save_big_page_states(b_req_idx, req_indexes, buffer_indexes)
         buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
         state_cache_manager = self.big_page_buffers
         copy_linear_att_state_to_kv_buffer(

@@ -70,8 +70,8 @@ def test_replay_acceptance_flush_and_graph(
     accepted = torch.zeros(slots, dtype=torch.int32, device="cuda")
 
     def step():
-        pos = cache.prepare_decode(reqs, cu)
-        out = [cache.forward(layer, q, k, v, a, b, alog, bias, reqs, pos, cu) for layer in range(2)]
+        cache.prepare_decode(reqs, cu)
+        out = [cache.forward(layer, q, k, v, a, b, alog, bias, reqs, cu) for layer in range(2)]
         cache.accept_updates(reqs, accepted)
         return out
 
@@ -217,8 +217,8 @@ def test_precomputed_state_preserves_projection_precision(warps, decay, state_dt
         accepted[1] = step % width
         outputs = []
         for cache in caches:
-            positions = cache.prepare_decode(reqs, cu)
-            outputs.append(cache.forward(0, q, k, v, a, b, alog, alog, reqs, positions, cu))
+            cache.prepare_decode(reqs, cu)
+            outputs.append(cache.forward(0, q, k, v, a, b, alog, alog, reqs, cu))
             cache.accept_updates(reqs, accepted)
         if dtype == torch.float32:
             torch.testing.assert_close(outputs[0], outputs[1], atol=2e-6, rtol=2e-5)
@@ -254,9 +254,9 @@ def test_bf16_decode_fold_uses_rounded_checkpoint():
     bias = torch.zeros_like(alog)
     outputs = []
     for cache in caches:
-        positions = cache.prepare_decode(reqs)
+        cache.prepare_decode(reqs)
         cache.accept_updates(reqs)
-        outputs.append(cache.forward(0, q, k, v, a, b, alog, bias, reqs, positions))
+        outputs.append(cache.forward(0, q, k, v, a, b, alog, bias, reqs))
     torch.testing.assert_close(outputs[0], outputs[1], atol=1e-7, rtol=1e-6)
     torch.testing.assert_close(caches[0].state, caches[1].state, atol=0, rtol=0)
 
@@ -282,12 +282,12 @@ def test_dynamic_verify_lengths_fill_history_before_folding(dtype, projection_mo
     b = torch.randn_like(a)
     alog = torch.zeros(4, device="cuda")
 
-    def forward(positions):
-        return [cache.forward(layer, q, k, v, a, b, alog, alog, reqs, positions, cu) for layer in range(2)]
+    def forward():
+        return [cache.forward(layer, q, k, v, a, b, alog, alog, reqs, cu) for layer in range(2)]
 
     def step():
         positions = cache.prepare_decode(reqs, cu)
-        out = forward(positions)
+        out = forward()
         cache.accept_updates(reqs, accepted)
         return positions, out
 
@@ -299,7 +299,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(dtype, projection_mo
         if capture_metadata:
             positions, outputs = step()
         else:
-            outputs = forward(positions)
+            outputs = forward()
     lengths = [(3, 4), (2, 1), (3, 2), (1, 4), (4, 3), (0, 2), (2, 0), (4, 4)]
     for iteration in range(24):
         ids = [0, 1] if iteration < 3 or iteration % 2 == 0 else [1, 0]
@@ -362,27 +362,26 @@ def test_snapshot_without_history_copies_active_state():
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("kind", ["gdn", "kda"])
-def test_compact_preserves_accepted_prefix(dtype, kind, run_config=None):
+def test_compact_preserves_accepted_prefix(dtype, run_config=None):
     from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
 
     torch.manual_seed(17)
     hv, kd, vd, width = 4, 64, 64, 3
     state = torch.randn(2, 4, hv, kd, vd, device="cuda", dtype=dtype) * 0.01
-    cache = CompactSSMCache(state, width, torch.bfloat16, kind, num_key_heads=hv, run_config=run_config)
+    cache = CompactSSMCache(state, width, torch.bfloat16, num_key_heads=hv, run_config=run_config)
     reqs = torch.tensor([2, 0, 3], device="cuda", dtype=torch.int32)
     cu = torch.tensor([0, 3, 5, 5], device="cuda", dtype=torch.int32)
     accepted = torch.tensor([1, 0, 0, 0], device="cuda", dtype=torch.int32)
     shape = (1, 5, hv, kd)
     q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     k, v = torch.randn_like(q), torch.randn_like(q)
-    a = torch.randn((5, hv * kd if kind == "kda" else hv), device="cuda", dtype=torch.bfloat16)
+    a = torch.randn((5, hv), device="cuda", dtype=torch.bfloat16)
     b = torch.randn(5, hv, device="cuda", dtype=torch.bfloat16)
     alog = torch.randn(hv, device="cuda") * 0.1
-    bias = torch.randn(hv * kd if kind == "kda" else hv, device="cuda") * 0.1
+    bias = torch.randn(hv, device="cuda") * 0.1
     for _ in range(15):
         before = state.clone()
-        outputs = [cache.forward(layer, q, k, v, a, b, alog, bias, reqs, None, cu) for layer in range(2)]
+        outputs = [cache.forward(layer, q, k, v, a, b, alog, bias, reqs, cu) for layer in range(2)]
         assert torch.equal(state, before), "verify must not mutate the checkpoint"
         cache.accept_updates(reqs, accepted)
         for layer in range(2):
@@ -390,17 +389,7 @@ def test_compact_preserves_accepted_prefix(dtype, kind, run_config=None):
                 cur = before[layer, req].float()
                 for j in range(length):
                     t = start + j
-                    if kind == "gdn":
-                        out, cur = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur)
-                    else:
-                        qq, kk = q[0, t].float(), k[0, t].float()
-                        qq *= torch.rsqrt(qq.square().sum(-1, keepdim=True) + 1e-6) * kd ** -0.5
-                        kk *= torch.rsqrt(kk.square().sum(-1, keepdim=True) + 1e-6)
-                        gate = -5 * torch.sigmoid(alog.exp()[:, None] * (a[t].float().view(hv, kd) + bias.view(hv, kd)))
-                        cur *= gate.exp()[..., None]
-                        d = (v[0, t].float() - torch.einsum("hkv,hk->hv", cur, kk)) * b[t].float().sigmoid()[:, None]
-                        cur += kk[..., None] * d[:, None, :]
-                        out = torch.einsum("hkv,hk->hv", cur, qq)
+                    out, cur = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur)
                     torch.testing.assert_close(outputs[layer][0, t].float(), out, atol=0.004, rtol=0.02)
                     cur = cur.to(dtype).float()
                     if j == int(accepted[req]):
@@ -412,23 +401,22 @@ def test_compact_preserves_accepted_prefix(dtype, kind, run_config=None):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("kind", ["gdn", "kda"])
 @pytest.mark.parametrize("width", [3, 4])
-def test_compact_matches_native_mtp(dtype, kind, width, run_config=None):
+def test_compact_matches_native_mtp(dtype, width, run_config=None):
     from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
     from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
         mtp_fused_recurrent_gated_delta_rule,
     )
 
     torch.manual_seed(77)
-    batch, h, hv, kd, vd = 3, (4 if kind == "kda" else 2), 4, 128, 128
+    batch, h, hv, kd, vd = 3, 2, 4, 128, 128
     q = torch.randn(1, batch * width, h, kd, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
     v = torch.randn(1, batch * width, hv, vd, device="cuda", dtype=torch.bfloat16)
-    a = torch.randn(batch * width, hv * kd if kind == "kda" else hv, device="cuda", dtype=torch.bfloat16)
+    a = torch.randn(batch * width, hv, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(batch * width, hv, device="cuda", dtype=torch.bfloat16)
     alog = torch.randn(hv, device="cuda") * 0.1
-    bias = torch.randn(hv * kd if kind == "kda" else hv, device="cuda") * 0.1
+    bias = torch.randn(hv, device="cuda") * 0.1
     state = torch.randn(1, batch + 1, hv, kd, vd, device="cuda", dtype=dtype) * 0.01
     reference_state = state[0].repeat_interleave(width, 0)
     reqs = torch.arange(batch, device="cuda", dtype=torch.int32)
@@ -436,69 +424,42 @@ def test_compact_matches_native_mtp(dtype, kind, width, run_config=None):
     idx = torch.arange(batch * width, device="cuda", dtype=torch.int32).view(batch, width)
     counts = torch.ones(batch, device="cuda", dtype=torch.int32)
     accepted = torch.tensor([0, width // 2, width - 1, 0], device="cuda", dtype=torch.int32)
-    cache = CompactSSMCache(state, width, torch.bfloat16, kind, num_key_heads=h, run_config=run_config)
+    cache = CompactSSMCache(state, width, torch.bfloat16, num_key_heads=h, run_config=run_config)
     for _ in range(32):
         q.normal_()
         k.normal_()
         v.normal_()
         a.normal_().sub_(3)
         b.normal_()
-        out = cache.forward(0, q, k, v, a, b, alog, bias, reqs, None, cu)
-        if kind == "kda":
-            native = pytest.importorskip("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode")
-            ref, _ = native.fused_recurrent_kda(
-                q,
-                k,
-                v,
-                a.unsqueeze(0),
-                b.unsqueeze(0),
-                alog,
-                bias,
-                reference_state,
-                idx,
-                cu_seqlens=cu,
-                num_accepted_tokens=counts,
-            )
-        else:
-            ref, _ = mtp_fused_recurrent_gated_delta_rule(
-                q,
-                k,
-                v,
-                reference_state,
-                cu,
-                idx,
-                idx,
-                counts,
-                alog,
-                bias,
-                a,
-                b,
-                run_config={"num_stages": 1, **(run_config or {"BV": 8, "num_warps": 1})},
-            )
-        cache.accept_updates(reqs, accepted)
-        if kind == "gdn":
-            assert torch.equal(out, ref)
-            atol, rtol = 0, 0
-        else:
-            # KDA's separate gate storage changes compiler contraction. Across
-            # repeated commits this can cross a BF16 rounding boundary.
-            torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-2)
-            atol, rtol = (1e-7, 2e-5) if dtype == torch.float32 else (1e-5, 1e-2)
-        torch.testing.assert_close(
-            state[0, :batch], reference_state[reqs * width + accepted[:batch]], rtol=rtol, atol=atol
+        out = cache.forward(0, q, k, v, a, b, alog, bias, reqs, cu)
+        ref, _ = mtp_fused_recurrent_gated_delta_rule(
+            q,
+            k,
+            v,
+            reference_state,
+            cu,
+            idx,
+            idx,
+            counts,
+            alog,
+            bias,
+            a,
+            b,
+            run_config={"num_stages": 1, **(run_config or {"BV": 8, "num_warps": 1})},
         )
+        cache.accept_updates(reqs, accepted)
+        assert torch.equal(out, ref)
+        torch.testing.assert_close(state[0, :batch], reference_state[reqs * width + accepted[:batch]], rtol=0, atol=0)
         counts.copy_(accepted[:batch] + 1)
         accepted[:batch].add_(1).remainder_(width)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("run_config", get_configs(), ids=lambda c: f"bv{c['BV']}-w{c['num_warps']}-s{c['num_stages']}")
-@pytest.mark.parametrize("mode", ["gdn", "kda", "replay"])
+@pytest.mark.parametrize("mode", ["gdn", "replay"])
 def test_autotune_candidates_match_recurrence(dtype, run_config, mode):
     if mode == "gdn":
-        test_compact_matches_native_mtp(dtype, "gdn", 4, run_config)
-    elif mode == "kda":
-        test_compact_preserves_accepted_prefix(dtype, "kda", run_config)
+        test_compact_matches_native_mtp(dtype, 4, run_config)
     else:
         test_replay_acceptance_flush_and_graph(3, (32, 64), 8, dtype, run_config)
 

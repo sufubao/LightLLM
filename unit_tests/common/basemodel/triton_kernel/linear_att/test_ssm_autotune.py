@@ -234,3 +234,30 @@ def test_kda_rule_and_gate_bound_separate_tuning_cache(mode):
     assert key == tuning.select_config._static_key(**rebuilt)
     inputs["cache"].lower_bound = -2.5
     assert key != tuning.select_config._static_key(**inputs)
+
+
+@pytest.mark.parametrize("tp", [1, 2, 4, 8])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_kda_production_tuning_cache_can_be_written(monkeypatch, tmp_path, tp, dtype):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(kernel_config_module, "get_current_device_name", lambda: "NVIDIA H100 80GB HBM3")
+    heads = 64 // tp
+    cache = SimpleNamespace(
+        state=SimpleNamespace(shape=(34, 1, heads, 128, 128), dtype=dtype),
+        keys=SimpleNamespace(dtype=torch.bfloat16),
+        verify_width=3,
+        num_key_heads=heads,
+        capacity=8,
+        kda=True,
+        lower_bound=-5.0,
+        projection_mode="precompute",
+    )
+    packed = torch.empty(1, 3, heads * 128 * 3, dtype=torch.bfloat16)
+    q, k, v = [x.view(1, 3, heads, 128) for x in packed.chunk(3, -1)]
+    a = torch.empty(3, heads * 128, dtype=q.dtype)
+    b = torch.empty(3, heads, dtype=q.dtype)
+    key = tuning.static_key(cache, "replay", q, k, v, a, b, torch.tensor([0, 3]))
+    path = tmp_path / KernelConfigs.get_config_file_name(key)
+    path.write_text("{}")
+    assert path.is_file()

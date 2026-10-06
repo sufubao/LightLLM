@@ -37,7 +37,7 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
         key["history_dtype"] = str(cache.keys.dtype)
         key["v"] = 4  # Small batches omit the forward fold already handled by prepare.
         key["projection"] = (
-            "block_mma_activation_precision"
+            ("kda_mma" if cache.kda else "block_mma_activation_precision")
             if cache.projection_mode == "precompute" and cache.verify_width > 1
             else "inline"
         )

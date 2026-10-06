@@ -7,7 +7,7 @@ the default.
 ## Configuration
 
 ```bash
-python -m lightllm.server.api_server \
+LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 python -m lightllm.server.api_server \
     --model_dir /path/to/qwen3.5 \
     --ssm_state_mode replay \
     --linear_att_ssm_data_type bfloat16 \

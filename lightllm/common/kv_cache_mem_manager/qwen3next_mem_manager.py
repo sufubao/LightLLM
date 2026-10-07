@@ -267,9 +267,7 @@ class Qwen3NextLinearAttPageHelper:
         return
 
     def _get_req_state_indexes(self, req_idx: int):
-        mtp_size = getattr(self.mem_manager, "ssm_slots_per_req", get_env_start_args().mtp_step + 1)
-        # Conv is one widened slot per request; SSM keeps the historical S+1 block layout.
-        return req_idx, req_idx * mtp_size
+        return req_idx, req_idx * self.mem_manager.ssm_slots_per_req
 
     def _write_one_rank(
         self,
@@ -279,7 +277,7 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        ssm_updates = getattr(mem, "ssm_update_cache", None)
+        ssm_updates = mem.ssm_update_cache
         conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
         if ssm_updates is not None and mem.req_to_mtp_state_index is not None:
@@ -467,7 +465,7 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        ssm_updates = getattr(mem, "ssm_update_cache", None)
+        ssm_updates = mem.ssm_update_cache
         if ssm_updates is not None:
             ssm_updates.clear_history(req_idx)
             if mem.req_to_mtp_state_index is not None:

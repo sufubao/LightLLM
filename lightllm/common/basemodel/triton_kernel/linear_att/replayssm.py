@@ -76,6 +76,21 @@ def _prepare_fold(
 
 
 @triton.jit
+def _replay_update(state, raw_k, raw_v, g, beta, KDA: tl.constexpr):
+    raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
+    decay = tl.exp(g)
+    if KDA:
+        state *= decay[:, None]
+        d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
+        state += raw_k[:, None] * d[None, :]
+    else:
+        sk = tl.sum(state * raw_k[:, None], 0)
+        d = beta * (raw_v - decay * sk)
+        state = state * decay + raw_k[:, None] * d[None, :]
+    return state
+
+
+@triton.jit
 def _fold_history(
     State,
     RawKeys,
@@ -84,7 +99,6 @@ def _fold_history(
     Betas,
     Reqs,
     Cursors,
-    Cu,
     Active,
     N: tl.constexpr,
     LAYERS: tl.constexpr,
@@ -93,10 +107,8 @@ def _fold_history(
     K: tl.constexpr,
     V: tl.constexpr,
     L: tl.constexpr,
-    HOLD: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    VARLEN: tl.constexpr,
     SS: tl.constexpr,
     RS: tl.constexpr,
     VS: tl.constexpr,
@@ -132,16 +144,7 @@ def _fold_history(
             else:
                 g = tl.load(Gates + layer * GS + slot * (2 * L) + base + j).to(tl.float32)
             beta = tl.load(Betas + layer * BS + slot * (2 * L) + base + j).to(tl.float32)
-            raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
-            decay = tl.exp(g)
-            if KDA:
-                state *= decay[:, None]
-                d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
-                state += raw_k[:, None] * d[None, :]
-            else:
-                sk = tl.sum(state * raw_k[:, None], 0)
-                d = beta * (raw_v - decay * sk)
-                state = state * decay + raw_k[:, None] * d[None, :]
+            state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
         # Start the new history from the same rounded checkpoint future calls load.
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
@@ -179,7 +182,6 @@ def _replay(
     K: tl.constexpr,
     V: tl.constexpr,
     L: tl.constexpr,
-    WIDTH: tl.constexpr,
     HOLD: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -224,16 +226,7 @@ def _replay(
             else:
                 g = tl.load(Gates + slot * (2 * L) + base + j).to(tl.float32)
             beta = tl.load(Betas + slot * (2 * L) + base + j).to(tl.float32)
-            raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
-            decay = tl.exp(g)
-            if KDA:
-                state *= decay[:, None]
-                d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
-                state += raw_k[:, None] * d[None, :]
-            else:
-                sk = tl.sum(state * raw_k[:, None], 0)
-                d = beta * (raw_v - decay * sk)
-                state = state * decay + raw_k[:, None] * d[None, :]
+            state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
         # Start the new history from the same rounded checkpoint future calls load.
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
@@ -617,7 +610,6 @@ class ReplaySSMCache:
             self.betas,
             reqs,
             positions,
-            cu_seqlens,
             active,
             reqs.numel(),
             layers,
@@ -626,10 +618,8 @@ class ReplaySSMCache:
             kd,
             vd,
             self.capacity,
-            self.hold,
             triton.next_power_of_2(kd),
             32,
-            cu_seqlens is not None,
             self.state.stride(0),
             self.raw_keys.stride(0),
             self.raw_values.stride(0),
@@ -696,18 +686,16 @@ class ReplaySSMCache:
         self._materialize_accepted_state(reqs, output, snapshot=True)
         return output
 
-    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
-        if layer == 0 and run_config is None:
+    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None):
+        if layer == 0:
             configure_cache(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
         hv, kd, vd = self.state.shape[-3:]
         assert self.num_key_heads in (q.shape[-2], hv)
         axis = 1 if cu_seqlens is not None else 0
         out = torch.empty_like(v)
-        config = run_config or self.run_config or {"BV": 32, "num_warps": 1}
+        config = self.run_config or {"BV": 32, "num_warps": 1}
         bv = config["BV"]
-        precompute_state = (
-            self.verify_width > 1 and bv >= 16 and config.get("precompute_state", self.projection_mode == "precompute")
-        )
+        precompute_state = self.verify_width > 1 and bv >= 16 and self.projection_mode == "precompute"
         _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
             q,
             k,
@@ -738,7 +726,6 @@ class ReplaySSMCache:
             kd,
             vd,
             self.capacity,
-            self.verify_width,
             self.hold,
             triton.next_power_of_2(kd),
             bv,

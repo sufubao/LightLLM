@@ -1,5 +1,6 @@
 """Tune a complete SSM update cycle without touching the serving state pool."""
 
+import ast
 import torch
 import triton
 
@@ -24,6 +25,7 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
     # state precision, recurrent rule and history capacity.
     key = {
         "mode": mode,
+        "v": 5,
         "shape": str((layers, q.shape[-2], hv, cache.num_key_heads, kd, vd, cache.verify_width)),
         "dtype": str((q.dtype, cache.state.dtype)),
         "strides": str((q.stride(axis), k.stride(axis), v.stride(axis), a.stride(0), b.stride(0))),
@@ -35,7 +37,6 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
         key["lower"] = cache.lower_bound
     if mode == "replay":
         key["history_dtype"] = str(cache.keys.dtype)
-        key["v"] = 4  # Small batches omit the forward fold already handled by prepare.
         key["projection"] = (
             ("kda_mma" if cache.kda else "block_mma_activation_precision")
             if cache.projection_mode == "precompute" and cache.verify_width > 1
@@ -46,11 +47,12 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
 
 def run_key(cache, q, cu_seqlens):
     tokens = q.shape[1 if cu_seqlens is not None else 0]
-    return triton.cdiv(tokens, cache.verify_width)
+    return tokens, cu_seqlens.numel() - 1 if cu_seqlens is not None else tokens
 
 
 def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
-    batch = run_key(cache, q, cu_seqlens)
+    tokens, sequences = run_key(cache, q, cu_seqlens)
+    batch = min(sequences, triton.cdiv(tokens, cache.verify_width)) if cu_seqlens is not None else tokens
     layers, _, hv, kd, vd = cache.state.shape
     state = torch.empty((layers, batch + 1, hv, kd, vd), device=q.device, dtype=cache.state.dtype).normal_(0, 0.02)
     if mode == "replay":
@@ -79,13 +81,17 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
         torch.empty_strided(x.shape, x.stride(), device=x.device, dtype=x.dtype).normal_(0, 0.2)
         for x in (q, k, v, a, b, a_log, bias)
     ]
-    reqs = torch.arange(batch, dtype=torch.int32, device=q.device)
-    tokens = q.shape[1 if cu_seqlens is not None else 0]
-    cu = (torch.arange(batch + 1, dtype=torch.int32, device=q.device) * cache.verify_width).clamp_max(tokens)
-    lengths = cu[1:] - cu[:-1]
+    reqs = torch.cat(
+        (
+            torch.arange(batch, dtype=torch.int32, device=q.device),
+            torch.full((sequences - batch,), batch, dtype=torch.int32, device=q.device),
+        )
+    )
+    cu = (torch.arange(sequences + 1, dtype=torch.int32, device=q.device) * cache.verify_width).clamp_max(tokens)
+    lengths = cu[1 : batch + 1] - cu[:batch]
     accepted = torch.cat((lengths - 1, lengths.new_zeros(1)))
     partial = accepted.clone()
-    partial[:-1] = torch.minimum(reqs % cache.verify_width, lengths - 1)
+    partial[:-1] = torch.minimum(reqs[:batch] % cache.verify_width, lengths - 1)
     snapshot = torch.empty((layers, hv, kd, vd), device=q.device, dtype=state.dtype)
     return (), dict(
         cache=scratch,
@@ -107,6 +113,7 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
     configs_gen_func=get_configs,
     static_key_func=static_key,
     run_key_func=run_key,
+    run_key_distance_func=lambda a, b: sum(abs(x - y) for x, y in zip(ast.literal_eval(a), ast.literal_eval(b))),
     kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     rebuild_input_func=rebuild_inputs,
     warmup_all_exist_config=False,
@@ -138,13 +145,17 @@ def select_config(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, work
 
 
 def configure_cache(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens):
-    if cache._config_is_fixed or not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
-        return
+    default = cache.run_config or {"BV": 32, "num_warps": 1}
+    if cache._config_is_fixed:
+        return default
+    key = (tuple(static_key(cache, mode, q, k, v, a, b, cu_seqlens).items()), run_key(cache, q, cu_seqlens))
+    if key in cache.batch_configs:
+        return cache.batch_configs[key]
+    if not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+        return default
     config = select_config(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens)
-    if config is not None:
-        cache.run_config = config
-        logger.info(f"SSM {mode} update-cycle config: {config}, warmup requests: {run_key(cache, q, cu_seqlens)}")
-    # One layout per cache, selected at the largest graph warmup.
-    # Per-batch tuning needs explicit layout propagation through verify/accept,
-    # including graph padding and overlapping microbatches; never use "last config".
-    cache._config_is_fixed = True
+    config = dict(config or default)
+    # Each captured graph keeps its own layout, even after other buckets warm up.
+    cache.batch_configs[key] = config
+    logger.info(f"SSM {mode} update-cycle config: {config}, warmup batch: {key[1]}")
+    return config

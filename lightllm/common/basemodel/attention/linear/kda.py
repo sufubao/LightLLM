@@ -237,8 +237,7 @@ class KDADecodeAttState(BaseDecodeAttState):
         updates = self.infer_state.req_manager.ssm_update_cache
         if updates is not None:
             layer = layer_num - layer_num // self.infer_state.req_manager.linear_config.full_attention_interval
-            return updates.forward(
-                layer,
+            args = (
                 q,
                 k,
                 v,
@@ -246,8 +245,15 @@ class KDADecodeAttState(BaseDecodeAttState):
                 raw_beta.view(-1, backend.tp_num_heads),
                 layer_weight.linear_A_log.weight,
                 layer_weight.linear_dt_bias.weight,
+            )
+            if layer == 0:
+                self.infer_state.ssm_run_config = updates.get_run_config(*args, self.b1_mtp_cu_q_seq_len)
+            return updates.forward(
+                layer,
+                *args,
                 self.b_conv_buffer_idx,
                 self.b1_mtp_cu_q_seq_len,
+                run_config=self.infer_state.ssm_run_config,
             )
         output, _ = fused_recurrent_kda(
             q=q,

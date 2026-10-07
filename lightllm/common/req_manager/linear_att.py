@@ -143,7 +143,9 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
 
-    def update_mtp_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
+    def update_mtp_state(
+        self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width, ssm_accept_batches=None
+    ):
         from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
 
         replay_cursors = None
@@ -165,7 +167,17 @@ class ReqManagerForMamba(HybridAttentionReqManager):
 
         if self.ssm_update_cache is not None and replay_cursors is None:
             reqs = b_req_idx[b_req_mtp_start_loc.long()]
-            self.ssm_update_cache.accept_updates(reqs, self.req_to_mtp_state_index)
+            if ssm_accept_batches is None or isinstance(self.ssm_update_cache, ReplaySSMCache):
+                self.ssm_update_cache.accept_updates(reqs, self.req_to_mtp_state_index)
+            else:
+                assert sum(size for size, _ in ssm_accept_batches) == reqs.numel()
+                start = 0
+                for size, config in ssm_accept_batches:
+                    if size:
+                        self.ssm_update_cache.accept_updates(
+                            reqs[start : start + size], self.req_to_mtp_state_index, run_config=config
+                        )
+                    start += size
 
     def restore_state(self, req: "InferReq", state_cache_manager: LinearAttCacheManager, buffer_idx: int):
         if self.ssm_update_cache is not None:

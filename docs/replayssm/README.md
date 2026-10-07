@@ -51,10 +51,12 @@ promise bitwise equivalence or identical generated text to native BF16. The
 use an independent recurrence with each mode's rounding boundary.
 
 The SSM autotuner measures prepare, forward, acceptance and fold on disposable
-state. Its selected layout is fixed before CUDA Graph capture and reused for
-verification and checkpoint reconstruction; serving state is never a tuning
-input. Cached configurations distinguish precision, stride, heads, verify width,
-history capacity, projection mode and recurrent rule.
+state; serving state is never a tuning input. Each batch bucket selects its own
+layout before CUDA Graph capture. Model outputs carry that layout through
+unpadding, and compact acceptance uses the corresponding verify layout for each
+microbatch. Replay checkpoint reconstruction keeps a batch-independent layout.
+Cached configurations distinguish token count, sequence capacity, precision,
+stride, heads, verify width, history capacity, projection mode and recurrent rule.
 
 KDA uses a per-key-dimension log decay, while GDN uses one scalar per value
 head. KDA history stores the full gate vector; checkpoint projection applies

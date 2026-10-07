@@ -125,10 +125,10 @@ def test_layout_is_fixed_before_graph_capture_and_cached_configs_do_not_execute(
         tuning.configure_cache(**inputs)
     assert cache.run_config == default and not cache._config_is_fixed
     with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
-        tuning.configure_cache(**inputs)
-    assert cache.run_config == (default if level == 3 else config)
-    assert cache._config_is_fixed
-    # Later/smaller graphs, captures, eager calls and acceptance share this layout.
+        selected = tuning.configure_cache(**inputs)
+    assert selected == (default if level == 3 else config)
+    assert cache.run_config == default and not cache._config_is_fixed
+    # Reusing the same bucket must not tune again.
     monkeypatch.setattr(tuning, "select_config", lambda *args, **kwargs: pytest.fail("layout changed after capture"))
     with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         tuning.configure_cache(**inputs)
@@ -181,19 +181,26 @@ def test_joint_tuning_isolated_state_and_graph_replay(monkeypatch, mode, dtype, 
         # Exercise the real forward hook with the HOLD-only graph warmup input.
         cache.forward(0, *args, reqs, inputs["cu_seqlens"])
     assert len(timings) == len(configs)
-    assert cache.run_config in configs
+    selected = cache.get_run_config(*args, inputs["cu_seqlens"])
+    assert selected in configs
     # An explicit identical layout supplies a reference for capture/replay and
     # alternating real/HOLD rows. It must never trigger its own tuning.
     expected = make_inputs(mode, dtype, "cuda", width=width, projection_mode=projection_mode, kda=kda)["cache"]
-    expected.run_config = cache.run_config.copy()
+    expected.run_config = cache.run_config
     expected._config_is_fixed = True
     expected.state.copy_(before["state"])
     accepted = torch.zeros(cache.state.shape[1], device="cuda", dtype=torch.int32)
 
     def step(target):
         target.prepare_decode(reqs, inputs["cu_seqlens"])
-        out = [target.forward(layer, *args, reqs, inputs["cu_seqlens"]) for layer in range(target.state.shape[0])]
-        target.accept_updates(reqs, accepted)
+        out = [
+            target.forward(layer, *args, reqs, inputs["cu_seqlens"], run_config=selected)
+            for layer in range(target.state.shape[0])
+        ]
+        if mode == "gdn":
+            target.accept_updates(reqs, accepted, run_config=selected)
+        else:
+            target.accept_updates(reqs, accepted)
         return out
 
     reqs.fill_(cache.hold)
@@ -261,3 +268,124 @@ def test_kda_production_tuning_cache_can_be_written(monkeypatch, tmp_path, tp, d
     path = tmp_path / KernelConfigs.get_config_file_name(key)
     path.write_text("{}")
     assert path.is_file()
+
+
+def test_batch_configs_survive_other_warmups_and_preserve_padding(monkeypatch):
+    inputs = make_inputs("gdn")
+    cache = inputs["cache"]
+    small = dict(inputs, **{name: inputs[name][:, :4] for name in ("q", "k", "v")})
+    small["a"], small["b"] = inputs["a"][:4], inputs["b"][:4]
+    small["cu_seqlens"] = torch.tensor([0, 4, 4], dtype=torch.int32)
+    selected = []
+
+    def choose(cache, mode, q, *args):
+        config = {"BV": 16 if q.shape[1] == 4 else 32, "num_warps": 2}
+        selected.append(config)
+        return config
+
+    monkeypatch.setattr(tuning, "select_config", choose)
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+        large_config = tuning.configure_cache(**inputs)
+        small_config = tuning.configure_cache(**small)
+        assert tuning.configure_cache(**inputs) is large_config
+    assert len(selected) == 2 and large_config != small_config
+    assert tuning.configure_cache(**small) is small_config
+    assert cache.run_config == {"BV": 8, "num_warps": 1}
+    _, rebuilt = tuning.rebuild_inputs(**small)
+    assert rebuilt["workload"][0].tolist() == [0, rebuilt["cache"].hold]
+    assert rebuilt["cu_seqlens"].tolist() == [0, 4, 4]
+    assert tuning.run_key(**{k: rebuilt[k] for k in ("cache", "q", "cu_seqlens")}) == (4, 2)
+    # A graph token bucket can also exceed the request-pool capacity.
+    _, limited = tuning.rebuild_inputs(**dict(inputs, cu_seqlens=torch.tensor([0, 4, 8], dtype=torch.int32)))
+    assert limited["workload"][0].tolist() == [0, 1]
+    assert limited["cu_seqlens"].tolist() == [0, 4, 8]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("mode,projection", [("gdn", "inline"), ("replay", "inline"), ("replay", "precompute")])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("kda", [False, True])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, projection, dtype, kda, dynamic):
+    from types import SimpleNamespace
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from lightllm.common.basemodel.batch_objs import PostLayerOutput, ModelMtpOutputCollector
+    from lightllm.common.req_manager.linear_att import ReqManagerForMamba
+
+    inputs = make_inputs(mode, dtype, "cuda", projection_mode=projection, kda=kda)
+    cache = inputs["cache"]
+    initial = cache.state.clone()
+    configs = [{"BV": 8, "num_warps": 1, "num_stages": 1}, {"BV": 32, "num_warps": 2, "num_stages": 1}]
+    monkeypatch.setattr(tuning, "select_config", lambda *args: configs[args[2].shape[1] > 8])
+    manager = object.__new__(ReqManagerForMamba)
+    manager.ssm_update_cache = cache
+    manager.req_to_mtp_state_index = torch.zeros(9, dtype=torch.int32, device="cuda")
+    buckets = []
+    for index, ids in enumerate(([0], [1, 3])):
+        # The physical verify buckets include HOLD, but acceptance is unpadded.
+        count = len(ids) + 1
+        args = [inputs[name] for name in ("q", "k", "v", "a", "b", "a_log", "bias")]
+        args[:3] = [x[:, : count * 4].contiguous() for x in args[:3]]
+        args[3:5] = [x[: count * 4].contiguous() for x in args[3:5]]
+        capacity = min(count * 4, cache.hold) if dynamic else count
+        reqs = torch.tensor(ids + [cache.hold] * (capacity - len(ids)), dtype=torch.int32, device="cuda")
+        cu = (torch.arange(capacity + 1, dtype=torch.int32, device="cuda") * 4).clamp_max(count * 4)
+        with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+            config = cache.get_run_config(*args, cu)
+        assert config == configs[index]
+        ref = make_inputs(mode, dtype, "cuda", projection_mode=projection, kda=kda)["cache"]
+        ref.state.copy_(initial)
+        ref.run_config = config
+        ref._config_is_fixed = True
+
+        def forward(target):
+            target.prepare_decode(reqs, cu)
+            return [target.forward(layer, *args, reqs, cu, run_config=config) for layer in range(2)]
+
+        forward(cache)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            outputs = forward(cache)
+        state = SimpleNamespace(
+            hidden_collector=SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector()),
+            prompt_logics=None,
+            ssm_run_config=config,
+        )
+        output = TpPartBaseModel._create_model_output(
+            None, PostLayerOutput(logits=outputs[0].view(count * 4, -1)), state
+        )
+        output = TpPartBaseModel._create_unpad_decode_model_output(None, output, len(ids) * 4)
+        assert output.ssm_run_config is config
+        buckets.append((graph, outputs, output, ref, args, reqs, cu, ids))
+    cache.state.copy_(initial)
+    if mode == "replay":
+        cache.cursors.zero_()
+    req_order = [0, 1, 3]
+    rows = torch.tensor([r for r in req_order for _ in range(4)], dtype=torch.int32, device="cuda")
+    mtp = torch.arange(4, dtype=torch.int32, device="cuda").repeat(3)
+    starts = torch.arange(3, dtype=torch.int32, device="cuda") * 4
+    for iteration in range(24):
+        # Alternate replay order; neither Graph replay executes Python config selection.
+        for bucket_index in [0, 1] if iteration % 2 else [1, 0]:
+            graph, outputs, output, ref, args, reqs, cu, ids = buckets[bucket_index]
+            graph.replay()
+            ref.prepare_decode(reqs, cu)
+            for layer in range(2):
+                expected = ref.forward(layer, *args, reqs, cu)
+                torch.testing.assert_close(outputs[layer], expected, atol=0, rtol=0)
+        counts = [1 + (iteration + i) % 4 for i in range(3)]
+        flags = torch.tensor([int(j < n) for n in counts for j in range(4)], dtype=torch.int32, device="cuda")
+        manager.update_mtp_state(
+            starts,
+            rows,
+            mtp,
+            flags,
+            4,
+            ssm_accept_batches=tuple((len(b[-1]), b[2].ssm_run_config) for b in buckets),
+        )
+        for _, _, _, ref, _, reqs, _, ids in buckets:
+            ref.accept_updates(reqs[:-1], manager.req_to_mtp_state_index)
+            torch.testing.assert_close(cache.state[:, ids], ref.state[:, ids], atol=0, rtol=0)
+            if mode == "replay":
+                assert torch.equal(cache.cursors[ids], ref.cursors[ids])
+    assert len(cache.batch_configs) == 2

@@ -547,6 +547,7 @@ class ReplaySSMCache:
         self.projection_mode = projection_mode
         self.run_config = run_config
         self._config_is_fixed = run_config is not None
+        self.batch_configs = {}
         layers, slots, hv, k, v = state.shape
         # Omission preserves the redundant layout for existing callers and A/B.
         self.num_key_heads = hv if num_key_heads is None else num_key_heads
@@ -686,14 +687,15 @@ class ReplaySSMCache:
         self._materialize_accepted_state(reqs, output, snapshot=True)
         return output
 
-    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None):
-        if layer == 0:
-            configure_cache(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
+    def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None):
+        return configure_cache(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
+
+    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
+        config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
         hv, kd, vd = self.state.shape[-3:]
         assert self.num_key_heads in (q.shape[-2], hv)
         axis = 1 if cu_seqlens is not None else 0
         out = torch.empty_like(v)
-        config = self.run_config or {"BV": 32, "num_warps": 1}
         bv = config["BV"]
         precompute_state = self.verify_width > 1 and bv >= 16 and self.projection_mode == "precompute"
         _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](

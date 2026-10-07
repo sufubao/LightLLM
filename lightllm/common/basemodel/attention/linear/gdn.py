@@ -357,18 +357,11 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 layer_weight.layer_num_
                 - layer_weight.layer_num_ // backend.req_manager.linear_config.full_attention_interval
             )
+            args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
+            if layer == 0:
+                self.infer_state.ssm_run_config = ssm_updates.get_run_config(*args)
             return (
-                ssm_updates.forward(
-                    layer,
-                    query,
-                    key,
-                    value,
-                    a,
-                    b,
-                    layer_weight.linear_A_log.weight,
-                    layer_weight.linear_dt_bias.weight,
-                    self.b_conv_buffer_idx,
-                ),
+                ssm_updates.forward(layer, *args, self.b_conv_buffer_idx, run_config=self.infer_state.ssm_run_config),
                 z,
             )
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
@@ -422,17 +415,15 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 layer_weight.layer_num_
                 - layer_weight.layer_num_ // backend.req_manager.linear_config.full_attention_interval
             )
+            args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
+            if layer == 0:
+                self.infer_state.ssm_run_config = ssm_updates.get_run_config(*args, cu_seqlens_q)
             return ssm_updates.forward(
                 layer,
-                query,
-                key,
-                value,
-                a,
-                b,
-                layer_weight.linear_A_log.weight,
-                layer_weight.linear_dt_bias.weight,
+                *args,
                 self.b_conv_buffer_idx,
                 cu_seqlens_q,
+                run_config=self.infer_state.ssm_run_config,
             )
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,

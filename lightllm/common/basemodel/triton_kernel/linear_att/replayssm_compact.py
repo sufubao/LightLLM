@@ -125,6 +125,7 @@ class CompactSSMCache:
         self.verify_width = verify_width
         # Verify and accepted-state reconstruction must share the same layout.
         self._config_is_fixed = run_config is not None
+        self.batch_configs = {}
         self.run_config = dict(run_config or {"BV": 8, "num_warps": 1})
         assert self.run_config["BV"] in (8, 16, 32, 64, 128)
         assert self.run_config["num_warps"] in (1, 2, 4, 8)
@@ -155,15 +156,17 @@ class CompactSSMCache:
     def snapshot_accepted_state(self, req_idx):
         return self.state[:, req_idx]
 
-    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None):
+    def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None):
+        return configure_cache(self, "gdn", q, k, v, a, b, a_log, bias, cu_seqlens)
+
+    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
         assert cu_seqlens is not None, "compact replay is only used for speculative verify"
-        if layer == 0:
-            configure_cache(self, "gdn", q, k, v, a, b, a_log, bias, cu_seqlens)
+        config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
         _, slots, hv, kd, vd = self.state.shape
         assert self.num_key_heads in (q.shape[-2], hv)
         out = torch.empty_like(v)
         # Match native reduction layouts: changing BV can alter BF16 rounding.
-        bv = self.run_config["BV"]
+        bv = config["BV"]
         _compact[(triton.cdiv(vd, bv), reqs.numel(), hv)](
             q,
             k,
@@ -199,15 +202,17 @@ class CompactSSMCache:
             False,
             self.kda,
             self.lower_bound,
-            num_warps=self.run_config["num_warps"],
-            num_stages=self.run_config.get("num_stages", 3),
+            num_warps=config["num_warps"],
+            num_stages=config.get("num_stages", 3),
         )
         return out
 
-    def accept_updates(self, reqs, accepted):
+    def accept_updates(self, reqs, accepted, run_config=None):
         """Merge this round's prefix; accepted contains per-request last accepted indexes."""
+        assert run_config is not None or not self.batch_configs, "compact acceptance requires the verify configuration"
         layers, slots, hv, kd, vd = self.state.shape
-        bv = self.run_config["BV"]
+        config = run_config or self.run_config
+        bv = config["BV"]
         _compact[(triton.cdiv(vd, bv), reqs.numel(), layers * hv)](
             None,
             None,
@@ -243,6 +248,6 @@ class CompactSSMCache:
             True,
             self.kda,
             self.lower_bound,
-            num_warps=self.run_config["num_warps"],
-            num_stages=self.run_config.get("num_stages", 3),
+            num_warps=config["num_warps"],
+            num_stages=config.get("num_stages", 3),
         )

@@ -1,3 +1,4 @@
+import copy
 import torch
 import triton
 from lightllm.utils.log_utils import init_logger
@@ -37,6 +38,58 @@ class Qwen3NextMemManager(MemoryManager):
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
+
+    def create_draft_cache_view(self, num_kv_heads: int, head_dim: int):
+        """Share target cache slots with a different, equally wide draft KV layout."""
+        target_heads = self.linear_config.full_att_all_num_kv_heads
+        tp_size = self.linear_config.tp_world_size
+        for heads in (target_heads, num_kv_heads):
+            if heads <= 0 or not (heads % tp_size == 0 or tp_size % heads == 0):
+                raise ValueError(f"KV heads {heads} cannot be sharded or replicated across TP={tp_size}")
+        if head_dim <= 0 or num_kv_heads * head_dim != target_heads * self.head_dim:
+            raise ValueError(
+                "Parallel block draft and target must have equal global KV widths, "
+                f"got draft=({num_kv_heads}, {head_dim}), target=({target_heads}, {self.head_dim})"
+            )
+        draft_heads = max(num_kv_heads // tp_size, 1)
+        if draft_heads * head_dim != self.head_num * self.head_dim:
+            raise ValueError(
+                f"Parallel block draft and target have different per-rank KV widths at TP={tp_size}: "
+                f"draft={draft_heads * head_dim}, target={self.head_num * self.head_dim}. "
+                "Their KV head replication differs; use a TP size that divides both KV head counts."
+            )
+        if (draft_heads, head_dim) == (self.head_num, self.head_dim):
+            return self
+
+        # The target retains ownership of allocation, CPU cache and PD transport.
+        # Equal global/local widths preserve their K/V and rank boundaries.
+        draft = copy.copy(self)
+        draft.head_num = draft_heads
+        draft.head_dim = head_dim
+        draft.kv_buffer = self.kv_buffer.view(*self.kv_buffer.shape[:2], 2 * draft_heads, head_dim)
+        draft.operator = copy.copy(self.operator)
+        draft.operator.mem_manager = draft
+
+        if isinstance(self, FP8StaticPerHeadQuantMemManager):
+            # Calibration rows use target-shaped groups, including the draft
+            # rows. Splitting a group inherits its scale; merging uses the
+            # largest calibrated range. Never mix K and V scale groups.
+            draft.scales = self._regroup_scales(self.scales, draft_heads, kv=True)
+            draft.q_scales = self._regroup_scales(self.q_scales, draft_heads, kv=False)
+        return draft
+
+    def _regroup_scales(self, scales: torch.Tensor, draft_heads: int, kv: bool):
+        groups = 2 if kv else 1
+        if scales.shape != (self.layer_num, groups * self.head_num):
+            raise ValueError(f"Invalid FP8 calibration scale shape {tuple(scales.shape)}")
+        scales = scales.view(self.layer_num, groups, self.head_num)
+        if draft_heads % self.head_num == 0:
+            scales = scales.repeat_interleave(draft_heads // self.head_num, dim=-1)
+        elif self.head_num % draft_heads == 0:
+            scales = scales.view(self.layer_num, groups, draft_heads, self.head_num // draft_heads).amax(dim=-1)
+        else:
+            raise ValueError("Draft FP8 heads must split or merge complete calibration groups")
+        return scales.reshape(self.layer_num, groups * draft_heads).contiguous()
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)

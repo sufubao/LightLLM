@@ -39,8 +39,8 @@ class Qwen3NextMemManager(MemoryManager):
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
 
-    def create_draft_cache_view(self, num_kv_heads: int, head_dim: int):
-        """Share target cache slots with a different, equally wide draft KV layout."""
+    def get_draft_mem_manager(self, num_kv_heads: int, head_dim: int):
+        """Return a draft memory manager sharing the target's KV storage."""
         head_num = self._validate_draft_kv_layout(num_kv_heads, head_dim)
         if (head_num, head_dim) == (self.head_num, self.head_dim):
             return self
@@ -199,8 +199,8 @@ class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
 class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerHeadQuantMemManager):
     operator_class = _FP8StaticPerHeadQuantLinearAttMemOperator
 
-    def create_draft_cache_view(self, num_kv_heads: int, head_dim: int):
-        draft = super().create_draft_cache_view(num_kv_heads, head_dim)
+    def get_draft_mem_manager(self, num_kv_heads: int, head_dim: int):
+        draft = super().get_draft_mem_manager(num_kv_heads, head_dim)
         if draft is not self:
             draft.scales = self._regroup_scales(self.scales, draft.head_num, groups=2)
             draft.q_scales = self._regroup_scales(self.q_scales, draft.head_num, groups=1)

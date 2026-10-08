@@ -54,7 +54,7 @@ def make_manager(tp_size=1, dtype=torch.bfloat16, heads=4, head_dim=256, quant=F
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.uint8])
 def test_view_shares_slots_but_preserves_target_layout(tp_size, dtype):
     target = make_manager(tp_size, dtype, quant=dtype == torch.uint8)
-    draft = target.get_draft_mem_manager(8, 128)
+    draft = target.get_kv_layout_view(8, 128)
     assert draft is not target
     assert draft.allocator is target.allocator
     assert draft.HOLD_TOKEN_MEMINDEXES is target.HOLD_TOKEN_MEMINDEXES
@@ -78,7 +78,20 @@ def test_view_shares_slots_but_preserves_target_layout(tp_size, dtype):
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 def test_identical_layout_preserves_manager(tp_size):
     target = make_manager(tp_size)
-    assert target.get_draft_mem_manager(4, 256) is target
+    assert target.get_kv_layout_view(4, 256) is target
+
+
+@pytest.mark.parametrize("quant", [False, True])
+def test_layout_view_can_be_reused_and_converted_back(quant):
+    target = make_manager(dtype=torch.uint8 if quant else torch.bfloat16, quant=quant)
+    view = target.get_kv_layout_view(8, 128)
+    assert view.get_kv_layout_view(8, 128) is view
+    restored = view.get_kv_layout_view(4, 256)
+    assert restored.kv_buffer.data_ptr() == target.kv_buffer.data_ptr()
+    assert restored.kv_buffer.shape == target.kv_buffer.shape
+    if quant:
+        torch.testing.assert_close(restored.scales, target.scales)
+        torch.testing.assert_close(restored.q_scales, target.q_scales)
 
 
 @pytest.mark.parametrize(
@@ -95,7 +108,7 @@ def test_unsupported_layout_fails_before_rebinding(tp_size, heads, dim, error):
     target = make_manager(tp_size)
     operator, buffer = target.operator, target.kv_buffer
     with pytest.raises(ValueError, match=error):
-        target.get_draft_mem_manager(heads, dim)
+        target.get_kv_layout_view(heads, dim)
     assert target.kv_buffer is buffer
     assert target.operator is operator
     assert operator.mem_manager is target
@@ -105,7 +118,7 @@ def test_unsupported_layout_fails_before_rebinding(tp_size, heads, dim, error):
 def test_fp8_regroups_k_v_and_q_without_mutating_target(tp_size):
     target = make_manager(tp_size, torch.uint8, quant=True)
     old_scales, old_q = target.scales.clone(), target.q_scales.clone()
-    draft = target.get_draft_mem_manager(8, 128)
+    draft = target.get_kv_layout_view(8, 128)
     torch.testing.assert_close(draft.scales, old_scales.repeat_interleave(2, dim=-1))
     torch.testing.assert_close(draft.q_scales, old_q.repeat_interleave(2, dim=-1))
     draft.scales.fill_(99)
@@ -116,7 +129,7 @@ def test_fp8_regroups_k_v_and_q_without_mutating_target(tp_size):
 
 def test_fp8_merge_uses_largest_calibrated_range_separately_for_k_and_v():
     target = make_manager(dtype=torch.uint8, heads=8, head_dim=128, quant=True)
-    draft = target.get_draft_mem_manager(4, 256)
+    draft = target.get_kv_layout_view(4, 256)
     torch.testing.assert_close(draft.scales, target.scales.view(3, 2, 4, 2).amax(-1).reshape(3, 8))
     torch.testing.assert_close(draft.q_scales, target.q_scales.view(3, 4, 2).amax(-1))
 
@@ -125,7 +138,7 @@ def test_fp8_requires_complete_calibration_rows():
     target = make_manager(dtype=torch.uint8, quant=True)
     target.scales = target.scales[:2]
     with pytest.raises(ValueError, match="Invalid FP8 calibration scale shape"):
-        target.get_draft_mem_manager(8, 128)
+        target.get_kv_layout_view(8, 128)
 
 
 def page_io_reference(mem_indexes, page_tensor, kv_buffer, tp_index, tp_world_size, mode):
@@ -170,7 +183,7 @@ def test_target_owned_pd_transport_roundtrips_draft_across_tp(monkeypatch, sourc
         manager._buffer_mem_indexes_tensors = [torch.empty(2, dtype=torch.int64, pin_memory=device == "cuda")]
     expected = torch.arange(2 * 16 * 128, device=device).remainder(127).reshape(2, 16, 128).to(dtype)
     for rank, manager in enumerate(source):
-        draft = manager.get_draft_mem_manager(8, 128)
+        draft = manager.get_kv_layout_view(8, 128)
         k, v = draft.get_att_input_params(8)
         n = draft.head_num
         k[1:3] = expected[:, rank * n : (rank + 1) * n]
@@ -178,7 +191,7 @@ def test_target_owned_pd_transport_roundtrips_draft_across_tp(monkeypatch, sourc
     source[0].write_mem_to_page_kv_move_buffer([1, 2], 0, 0, source, source_tp)
     dest[0].read_page_kv_move_buffer_to_mem([3, 4], 0, 0, dest, dest_tp)
     for rank, manager in enumerate(dest):
-        draft = manager.get_draft_mem_manager(8, 128)
+        draft = manager.get_kv_layout_view(8, 128)
         k, v = draft.get_att_input_params(8)
         n = draft.head_num
         torch.testing.assert_close(k[3:5], expected[:, rank * n : (rank + 1) * n])
@@ -190,7 +203,7 @@ def test_target_owned_pd_transport_roundtrips_draft_across_tp(monkeypatch, sourc
 @pytest.mark.parametrize("quant", [False, True])
 def test_draft_operator_writes_and_reads_its_own_layout_on_cuda(quant):
     target = make_manager(dtype=torch.uint8 if quant else torch.bfloat16, quant=quant, device="cuda")
-    draft = target.get_draft_mem_manager(8, 128)
+    draft = target.get_kv_layout_view(8, 128)
     kv = torch.randn((2, 16, 128), dtype=torch.bfloat16, device="cuda")
     slots = torch.tensor([1, 9], dtype=torch.int32, device="cuda")
     draft.operator.copy_kv_to_mem_manager(8, slots, kv)
@@ -238,7 +251,7 @@ def test_target_owned_cpu_cache_restores_draft_bytes(monkeypatch, tp_size, dtype
     )
     expected = []
     for rank in range(tp_size):
-        draft = manager.get_draft_mem_manager(8, 128)
+        draft = manager.get_kv_layout_view(8, 128)
         draft.kv_buffer[:, :8].random_(0, 127)
         expected.append(draft.kv_buffer[:, :8].clone())
         copy_kv_buffer_to_cpu_cache(page_readies=ready, gpu_kv_full_att_state=manager.kv_buffer, tp_rank=rank, **common)
@@ -247,7 +260,7 @@ def test_target_owned_cpu_cache_restores_draft_bytes(monkeypatch, tp_size, dtype
         manager.kv_buffer.zero_()
         copy_cpu_cache_to_kv_buffer(gpu_full_att_kv_state=manager.kv_buffer, tp_rank=rank, **common)
         torch.cuda.synchronize()
-        torch.testing.assert_close(manager.get_draft_mem_manager(8, 128).kv_buffer[:, :8], expected[rank])
+        torch.testing.assert_close(manager.get_kv_layout_view(8, 128).kv_buffer[:, :8], expected[rank])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -264,7 +277,7 @@ def test_noncausal_fa3_draft_attention_and_cuda_graph(quant):
     if quant:
         target.scales.mul_(0.001)
         target.q_scales.mul_(0.001)
-    draft = target.get_draft_mem_manager(8, 128)
+    draft = target.get_kv_layout_view(8, 128)
     generator = torch.Generator(device="cuda").manual_seed(0)
     kv = torch.randn((4, 16, 128), dtype=torch.bfloat16, device="cuda", generator=generator)
     q = torch.randn((2, 32, 128), dtype=torch.bfloat16, device="cuda", generator=generator)

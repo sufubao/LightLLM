@@ -26,6 +26,6 @@ class Qwen3_5DSparkModel(Qwen3DSparkModel):
         self.mask_token_id = self.config["mask_token_id"]
 
     def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager.get_draft_mem_manager(
+        self.mem_manager = self.main_model.mem_manager.get_kv_layout_view(
             self.config["num_key_value_heads"], self.config["head_dim"]
         )

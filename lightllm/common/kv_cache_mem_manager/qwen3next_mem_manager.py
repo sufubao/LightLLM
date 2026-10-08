@@ -39,39 +39,40 @@ class Qwen3NextMemManager(MemoryManager):
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
 
-    def get_draft_mem_manager(self, num_kv_heads: int, head_dim: int):
-        """Return a draft memory manager sharing the target's KV storage."""
-        head_num = self._validate_draft_kv_layout(num_kv_heads, head_dim)
+    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int):
+        """Return a memory manager view with the requested KV head layout."""
+        head_num = self._validate_kv_layout(num_kv_heads, head_dim)
         if (head_num, head_dim) == (self.head_num, self.head_dim):
             return self
 
-        # Allocation and transport remain owned by the target.
-        draft = copy.copy(self)
-        draft.head_num = head_num
-        draft.head_dim = head_dim
-        draft.kv_buffer = self.kv_buffer.view(*self.kv_buffer.shape[:2], 2 * head_num, head_dim)
-        draft.operator = self.operator_class(draft)
-        return draft
+        # Allocation and transport remain owned by the original manager.
+        view = copy.copy(self)
+        view.head_num = head_num
+        view.head_dim = head_dim
+        view.kv_buffer = self.kv_buffer.view(*self.kv_buffer.shape[:2], 2 * head_num, head_dim)
+        view.operator = self.operator_class(view)
+        return view
 
-    def _validate_draft_kv_layout(self, num_kv_heads: int, head_dim: int) -> int:
-        target_heads = self.linear_config.full_att_all_num_kv_heads
+    def _validate_kv_layout(self, num_kv_heads: int, head_dim: int) -> int:
+        config = self.linear_config
+        current_heads = config.full_att_all_num_kv_heads * config.full_att_head_dim // self.head_dim
         tp_size = self.linear_config.tp_world_size
-        for heads in (target_heads, num_kv_heads):
+        for heads in (current_heads, num_kv_heads):
             if heads <= 0 or not (heads % tp_size == 0 or tp_size % heads == 0):
                 raise ValueError(f"KV heads {heads} cannot be sharded or replicated across TP={tp_size}")
-        if head_dim <= 0 or num_kv_heads * head_dim != target_heads * self.head_dim:
+        if head_dim <= 0 or num_kv_heads * head_dim != current_heads * self.head_dim:
             raise ValueError(
-                "Parallel block draft and target must have equal global KV widths, "
-                f"got draft=({num_kv_heads}, {head_dim}), target=({target_heads}, {self.head_dim})"
+                "KV layouts must have equal global KV widths, "
+                f"got requested=({num_kv_heads}, {head_dim}), current=({current_heads}, {self.head_dim})"
             )
-        draft_heads = max(num_kv_heads // tp_size, 1)
-        if draft_heads * head_dim != self.head_num * self.head_dim:
+        head_num = max(num_kv_heads // tp_size, 1)
+        if head_num * head_dim != self.head_num * self.head_dim:
             raise ValueError(
-                f"Parallel block draft and target have different per-rank KV widths at TP={tp_size}: "
-                f"draft={draft_heads * head_dim}, target={self.head_num * self.head_dim}. "
+                f"KV layouts have different per-rank KV widths at TP={tp_size}: "
+                f"requested={head_num * head_dim}, current={self.head_num * self.head_dim}. "
                 "Use a TP size that divides both KV head counts."
             )
-        return draft_heads
+        return head_num
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
@@ -199,12 +200,12 @@ class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
 class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerHeadQuantMemManager):
     operator_class = _FP8StaticPerHeadQuantLinearAttMemOperator
 
-    def get_draft_mem_manager(self, num_kv_heads: int, head_dim: int):
-        draft = super().get_draft_mem_manager(num_kv_heads, head_dim)
-        if draft is not self:
-            draft.scales = self._regroup_scales(self.scales, draft.head_num, groups=2)
-            draft.q_scales = self._regroup_scales(self.q_scales, draft.head_num, groups=1)
-        return draft
+    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int):
+        view = super().get_kv_layout_view(num_kv_heads, head_dim)
+        if view is not self:
+            view.scales = self._regroup_scales(self.scales, view.head_num, groups=2)
+            view.q_scales = self._regroup_scales(self.q_scales, view.head_num, groups=1)
+        return view
 
     def _regroup_scales(self, scales: torch.Tensor, head_num: int, groups: int):
         if scales.shape != (self.layer_num, groups * self.head_num):
@@ -217,7 +218,7 @@ class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPer
         elif self.head_num % head_num == 0:
             scales = scales.view(self.layer_num, groups, head_num, self.head_num // head_num).amax(dim=-1)
         else:
-            raise ValueError("Draft FP8 heads must split or merge complete calibration groups")
+            raise ValueError("FP8 heads must split or merge complete calibration groups")
         return scales.reshape(self.layer_num, groups * head_num).contiguous()
 
 

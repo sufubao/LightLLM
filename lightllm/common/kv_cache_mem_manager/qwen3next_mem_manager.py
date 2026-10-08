@@ -39,8 +39,14 @@ class Qwen3NextMemManager(MemoryManager):
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
 
-    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int):
-        """Return a memory manager view with the requested KV head layout."""
+    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int, *, layer_start=0, layer_num=None):
+        """Return a KV layout view, validating calibration for the given physical layer range.
+
+        Layer indices and storage ownership stay with the original manager.
+        """
+        layer_num = self.layer_num - layer_start if layer_num is None else layer_num
+        if layer_start < 0 or layer_num <= 0 or layer_start + layer_num > self.layer_num:
+            raise ValueError("KV layout layer range is outside the cache")
         head_num = self._validate_kv_layout(num_kv_heads, head_dim)
         if (head_num, head_dim) == (self.head_num, self.head_dim):
             return self
@@ -200,26 +206,20 @@ class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
 class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerHeadQuantMemManager):
     operator_class = _FP8StaticPerHeadQuantLinearAttMemOperator
 
-    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int):
-        view = super().get_kv_layout_view(num_kv_heads, head_dim)
-        if view is not self:
-            view.scales = self._regroup_scales(self.scales, view.head_num, groups=2)
-            view.q_scales = self._regroup_scales(self.q_scales, view.head_num, groups=1)
+    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int, *, layer_start=0, layer_num=None):
+        view = super().get_kv_layout_view(num_kv_heads, head_dim, layer_start=layer_start, layer_num=layer_num)
+        scales = self._kv_layout_scales.get((view.head_num, head_dim))
+        if scales is None:
+            raise ValueError(
+                f"No per-head FP8 calibration for KV layout ({num_kv_heads}, {head_dim}); "
+                "provide calibration layouts with native KV and Q scales"
+            )
+        layer_end = self.layer_num if layer_num is None else layer_start + layer_num
+        for tensor, heads in zip(scales, (2 * view.head_num, view.head_num)):
+            if tensor.shape != (self.layer_num, heads) or not torch.isfinite(tensor[layer_start:layer_end]).all():
+                raise ValueError(f"Missing FP8 calibration for KV layers [{layer_start}, {layer_end})")
+        view.scales, view.q_scales = scales
         return view
-
-    def _regroup_scales(self, scales: torch.Tensor, head_num: int, groups: int):
-        if scales.shape != (self.layer_num, groups * self.head_num):
-            raise ValueError(f"Invalid FP8 calibration scale shape {tuple(scales.shape)}")
-        scales = scales.view(self.layer_num, groups, self.head_num)
-        # Split groups inherit their scale; merged groups use the largest
-        # calibrated range. The group axis keeps K and V separate.
-        if head_num % self.head_num == 0:
-            scales = scales.repeat_interleave(head_num // self.head_num, dim=-1)
-        elif self.head_num % head_num == 0:
-            scales = scales.view(self.layer_num, groups, head_num, self.head_num // head_num).amax(dim=-1)
-        else:
-            raise ValueError("FP8 heads must split or merge complete calibration groups")
-        return scales.reshape(self.layer_num, groups * head_num).contiguous()
 
 
 class FP8StaticPerTensorQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerTensorQuantMemManager):

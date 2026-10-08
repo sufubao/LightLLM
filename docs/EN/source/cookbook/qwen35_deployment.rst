@@ -236,11 +236,12 @@ Use the TP size within each DP group when checking this condition.
 The draft uses a zero-copy cache view; the target continues to own token slots,
 padding pages, CPU cache and PD transfers. Prefill and decode nodes may use
 different supported TP sizes, with matching KV dtype and global KV calibration.
-BF16/FP16 KV and ``fp8kv_sph`` use the same storage
-layout. Per-head FP8 calibration must include the current draft's KV and Q rows
-in target-shaped groups; splitting groups inherits their scale, and merging
-groups uses the largest scale. Calibration for a different draft checkpoint
-must be regenerated.
+BF16/FP16 KV and ``fp8kv_sph`` use the same storage layout. For different head
+layouts, per-head FP8 requires independent native KV and Q scales for each
+model, using the ``layouts`` calibration format described in
+:doc:`../tutorial/fp8_kv_quantization`. Scales are never inferred by repeating
+or merging another layout's calibration. Legacy uniform-head files remain
+supported for matching layouts. Regenerate calibration when changing checkpoints.
 
 Parallel block decode still requires FA3. ``fp8kv_spt`` only supports FlashInfer
 and is therefore unavailable for DSpark/DFlash; this layout adaptation does not

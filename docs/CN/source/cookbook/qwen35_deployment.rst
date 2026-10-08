@@ -234,8 +234,10 @@ Qwen3.5 系列主模型可以搭配 attention head dimension 不同的并行块�
 草稿模型使用零拷贝缓存视图；token 槽位、padding 页、CPU cache 和 PD 传输
 仍由主模型管理。P、D 节点可以使用不同的受支持 TP 大小，但 KV dtype 和全局 KV 校准必须一致。
 BF16/FP16 KV 和 ``fp8kv_sph`` 使用相同的存储布局。
-per-head FP8 校准必须包含当前草稿模型的 KV 和 Q 行，按主模型形状分组；
-拆分分组继承原 scale，合并分组取最大 scale。更换草稿 checkpoint 后需要重新校准。
+head 布局不同时，per-head FP8 必须使用各模型独立的原生 KV 和 Q scale，
+采用 :doc:`../tutorial/fp8_kv_quantization` 中的 ``layouts`` 校准格式。
+不会通过重复或合并其他布局的 scale 推断校准值。旧的统一 head 格式仍支持同布局模型；
+更换 checkpoint 后需要重新校准。
 
 并行块 decode 仍要求 FA3。``fp8kv_spt`` 仅支持 FlashInfer，因此不能用于
 DSpark/DFlash；此布局兼容不改变已有后端限制。

@@ -15,6 +15,8 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
     Qwen35TransformerLayerInfer,
 )
 from lightllm.models.qwen3_5.infer_struct import Qwen35InferStateInfo
+from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector
+from lightllm.models.qwen3_5.hidden_collector import Qwen35HiddenCollector
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
 
@@ -56,6 +58,11 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
     infer_state_class = Qwen35InferStateInfo
+
+    def _init_hidden_collector(self):
+        super()._init_hidden_collector()
+        if isinstance(self.hidden_collector_prototype, FinalHiddenCollector):
+            self.hidden_collector_prototype = Qwen35HiddenCollector(self)
 
     def _init_config(self):
         config_path = os.path.join(self.weight_dir_, "config.json")

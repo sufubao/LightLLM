@@ -48,7 +48,7 @@ def test_image_count_mismatch(tokenizer, prompt, image_count):
     assert all(not hasattr(image, "start_idx") for image in images)
 
 
-@pytest.mark.parametrize("prompt", [[10], [10, 12], [10, 1, 11], [11], [10, 10, 11]])
+@pytest.mark.parametrize("prompt", [[10], [10, 12], [10, 1, 11], [10, 10, 11]])
 @pytest.mark.parametrize("params", [None, SimpleNamespace(images=[])])
 def test_invalid_image_sequence(tokenizer, prompt, params):
     with pytest.raises(InvalidRequestError, match="image"):
@@ -59,3 +59,11 @@ def test_text_and_encode_options(tokenizer):
     tokenizer.tokenizer.encode.return_value = [1, 12, 2]
     assert tokenizer.encode("text", SimpleNamespace(images=[]), add_special_tokens=False) == [1, 12, 2]
     tokenizer.tokenizer.encode.assert_called_once_with("text", add_special_tokens=False)
+
+
+def test_unpaired_image_end_tokens(tokenizer):
+    assert tokenizer.encode([1, 11, 2], SimpleNamespace(images=[])) == [1, 11, 2]
+    images = [SimpleNamespace(token_id=100, token_num=2), SimpleNamespace(token_id=200, token_num=1)]
+    prompt = [11, 1, 10, 12, 11, 11, 2, 10, 11, 11]
+    assert tokenizer.encode(prompt, SimpleNamespace(images=images)) == [11, 1, 10, 100, 101, 11, 11, 2, 10, 200, 11, 11]
+    assert tokenizer.encode(prompt, None) == [11, 1, 10, 11, 11, 2, 10, 11, 11]

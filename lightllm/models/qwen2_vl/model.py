@@ -84,23 +84,15 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
     def _find_image_spans(self, token_ids):
         spans = []
         offset = 0
-        token_count = len(token_ids)
         while True:
             try:
                 start = token_ids.index(self.image_start_id, offset)
             except ValueError:
-                start = token_count
-            try:
-                end = token_ids.index(self.image_end_id, offset)
-            except ValueError:
-                end = token_count
-
-            if start == end == token_count:
                 return spans
-            if end < start:
-                raise InvalidRequestError("image end token without image start token")
-            if end == token_count:
-                raise InvalidRequestError("invalid image token sequence")
+            try:
+                end = token_ids.index(self.image_end_id, start + 1)
+            except ValueError:
+                raise InvalidRequestError("invalid image token sequence") from None
             for index in range(start + 1, end):
                 if token_ids[index] != self.image_token_id:
                     raise InvalidRequestError("invalid image token sequence")

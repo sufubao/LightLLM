@@ -12,6 +12,7 @@ from .vision_process import smart_resize
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 import os
 from typing import Union, List
+from lightllm.utils.error_utils import InvalidRequestError
 
 # Warp of the origal tokenizer
 class QWen2VLTokenizer(BaseMultiModalTokenizer):
@@ -54,47 +55,45 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
 
     def encode(self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams = None, **kwargs):
         if isinstance(prompt, str):
-            origin_ids = self.tokenizer.encode(prompt)
+            origin_ids = self.tokenizer.encode(prompt, **kwargs)
         elif isinstance(prompt, list):
             origin_ids = prompt
         else:
             raise ValueError(f"Unsupported prompt type: {type(prompt)}")
 
-        # <img><image_pad></img> -> <img></img>
-        origin_ids = [token for token in origin_ids if token != self.image_token_id]
+        image_spans = []
+        index = 0
+        while index < len(origin_ids):
+            token = origin_ids[index]
+            if token == self.image_start_id:
+                end = index + 1
+                while end < len(origin_ids) and origin_ids[end] == self.image_token_id:
+                    end += 1
+                if end >= len(origin_ids) or origin_ids[end] != self.image_end_id:
+                    raise InvalidRequestError("invalid image token sequence")
+                image_spans.append((index, end))
+                index = end + 1
+            elif token == self.image_end_id:
+                raise InvalidRequestError("image end token without image start token")
+            else:
+                index += 1
 
-        # Token-counting paths do not have multimodal cache token ids yet.  Keep
-        # the vision boundary tokens in the text ids and let the caller account
-        # for the image tokens separately.
-        if multimodal_params is None:
-            return origin_ids
+        if multimodal_params is not None and len(multimodal_params.images) != len(image_spans):
+            raise InvalidRequestError(
+                f"invalid image tag num: {len(multimodal_params.images)} images vs {len(image_spans)} tags"
+            )
 
-        # <img></img> --> <img>id,id+1...id+num</img>
         input_ids = []
-        image_id = 0
-        while True:
-            try:
-                start_idx = origin_ids.index(self.image_start_id)
-                if start_idx + 1 >= len(origin_ids):
-                    break
-                if origin_ids[start_idx + 1] == self.image_end_id:
-                    input_ids.extend(origin_ids[: start_idx + 1])
-                    token_id = multimodal_params.images[image_id].token_id
-                    token_num = multimodal_params.images[image_id].token_num
-                    multimodal_params.images[image_id].start_idx = len(input_ids)
-                    input_ids.extend(range(token_id, token_id + token_num))
-                    input_ids.append(self.image_end_id)
-                    origin_ids = origin_ids[start_idx + 2 :]
-                    image_id += 1
-                else:
-                    raise ValueError("image token error")
-            except ValueError:
-                break
-        if multimodal_params:
-            image_cnt = len(multimodal_params.images)
-            if image_cnt != image_id:
-                raise ValueError(image_cnt == image_id, f"invalid image tag num: {image_cnt} vs {image_id}!")
-        input_ids.extend(origin_ids)
+        offset = 0
+        for image_id, (start, end) in enumerate(image_spans):
+            input_ids.extend(origin_ids[offset : start + 1])
+            if multimodal_params is not None:
+                image = multimodal_params.images[image_id]
+                image.start_idx = len(input_ids)
+                input_ids.extend(range(image.token_id, image.token_id + image.token_num))
+            input_ids.append(self.image_end_id)
+            offset = end + 1
+        input_ids.extend(origin_ids[offset:])
         return input_ids
 
 

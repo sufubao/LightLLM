@@ -8,12 +8,6 @@ from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-try:
-    from deep_gemm import ceil_div
-except:
-    pass
-
-
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/quantization/fp8_kernel.py
 @triton.jit
 def _per_token_group_quant_fp8(
@@ -237,7 +231,7 @@ def get_tma_aligned_size(x: int, element_size: int) -> int:
     tma_alignment_bytes = 16
     assert tma_alignment_bytes % element_size == 0
     alignment = tma_alignment_bytes // element_size
-    return ceil_div(x, alignment) * alignment
+    return triton.cdiv(x, alignment) * alignment
 
 
 @triton.jit

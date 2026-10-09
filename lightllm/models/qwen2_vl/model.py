@@ -61,22 +61,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         else:
             raise ValueError(f"Unsupported prompt type: {type(prompt)}")
 
-        image_spans = []
-        index = 0
-        while index < len(origin_ids):
-            token = origin_ids[index]
-            if token == self.image_start_id:
-                end = index + 1
-                while end < len(origin_ids) and origin_ids[end] == self.image_token_id:
-                    end += 1
-                if end >= len(origin_ids) or origin_ids[end] != self.image_end_id:
-                    raise InvalidRequestError("invalid image token sequence")
-                image_spans.append((index, end))
-                index = end + 1
-            elif token == self.image_end_id:
-                raise InvalidRequestError("image end token without image start token")
-            else:
-                index += 1
+        image_spans = self._find_image_spans(origin_ids)
 
         if multimodal_params is not None and len(multimodal_params.images) != len(image_spans):
             raise InvalidRequestError(
@@ -95,6 +80,24 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
             offset = end + 1
         input_ids.extend(origin_ids[offset:])
         return input_ids
+
+    def _find_image_spans(self, token_ids):
+        spans = []
+        start = None
+        for index, token in enumerate(token_ids):
+            if start is not None:
+                if token == self.image_end_id:
+                    spans.append((start, index))
+                    start = None
+                elif token != self.image_token_id:
+                    raise InvalidRequestError("invalid image token sequence")
+            elif token == self.image_start_id:
+                start = index
+            elif token == self.image_end_id:
+                raise InvalidRequestError("image end token without image start token")
+        if start is not None:
+            raise InvalidRequestError("invalid image token sequence")
+        return spans
 
 
 class Qwen2VLTpPartModel(Qwen2TpPartModel):

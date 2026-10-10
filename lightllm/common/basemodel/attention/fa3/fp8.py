@@ -3,26 +3,10 @@ import torch
 from ..base_att import AttControl
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_static_fp8_quant
-from lightllm.utils.log_utils import init_logger
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
 
-logger = init_logger(__name__)
-
-
 class Fp8Fa3AttBackend(Fa3AttBackend):
-    def _init_infer_page_size(self):
-        # TODO: FP8 FA3 完成多 token 推理页适配后，改为继承模型 page_size。
-        self.infer_page_size = 1
-        assert self.model.args.page_size % self.infer_page_size == 0, (
-            f"model page_size {self.model.args.page_size} "
-            f"must be divisible by infer_page_size {self.infer_page_size}"
-        )
-        logger.warning(
-            f"Fp8Fa3AttBackend temporarily uses infer_page_size=1 with model page_size={self.model.args.page_size}; "
-            "multi-token FP8 inference pages are not implemented yet."
-        )
-
     def create_att_prefill_state(self, infer_state) -> "Fp8Fa3PrefillAttState":
         return Fp8Fa3PrefillAttState(backend=self, infer_state=infer_state)
 
@@ -79,8 +63,8 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         q_head_dim = q.shape[2]
         k_head_num = k.shape[1]
         k_head_dim = k.shape[2]
-        cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
-        cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+        cache_k = k.view(-1, self.backend.infer_page_size, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+        cache_v = v.view(-1, self.backend.infer_page_size, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
         static_q_scales = self.backend.model.mem_manager.q_scales[layer_index]
         q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales)
@@ -163,8 +147,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         k_head_num = k.shape[1]
         k_head_dim = k.shape[2]
 
-        cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
-        cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+        cache_k = k.view(-1, self.backend.infer_page_size, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+        cache_v = v.view(-1, self.backend.infer_page_size, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
 
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
 

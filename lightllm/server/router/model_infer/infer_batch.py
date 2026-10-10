@@ -46,6 +46,7 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
+    use_hybrid_checkpoint_cache: bool = True
 
     def register(
         self,
@@ -70,6 +71,8 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_hybrid_att_model = isinstance(self.req_manager, HybridAttentionReqManager)
+        # PD Decode reuses KV prefixes, but receives the final recurrent state from Prefill.
+        self.use_hybrid_checkpoint_cache = self.args.run_mode != "decode"
 
         return
 
@@ -133,7 +136,7 @@ class InferenceContext:
         elif CacheTier.GPU not in req.cache_tiers:
             self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
         else:
-            if not self.is_hybrid_att_model:
+            if not self.is_hybrid_att_model or not self.use_hybrid_checkpoint_cache:
                 self._full_att_free_req(free_token_index=free_token_index, req=req)
             else:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
@@ -147,7 +150,7 @@ class InferenceContext:
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.hold_kv_len])
 
-        if self.is_hybrid_att_model:
+        if self.is_hybrid_att_model and self.use_hybrid_checkpoint_cache:
             # 释放请求尾部尚未移交给 radix cache 的 hybrid attention 小页状态。
             if req.tail_small_page_buffer_id is not None:
                 self.radix_cache.small_page_buffers.free_state_cache([req.tail_small_page_buffer_id])
@@ -379,7 +382,7 @@ class InferenceContext:
                 if alloc_token_num > can_alloc_token_num:
                     break
 
-                if g_infer_context.is_hybrid_att_model:
+                if g_infer_context.is_hybrid_att_model and g_infer_context.use_hybrid_checkpoint_cache:
                     req._hybrid_match_radix_cache()
                 else:
                     req._match_radix_cache()
@@ -402,7 +405,7 @@ class InferenceContext:
 
     def save_hybrid_state_to_cache(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
-        if not self.is_hybrid_att_model or self.radix_cache is None:
+        if not self.is_hybrid_att_model or not self.use_hybrid_checkpoint_cache or self.radix_cache is None:
             return
 
         # Request-state snapshot at a big-page boundary.
@@ -601,7 +604,7 @@ class InferReq:
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:
-            if g_infer_context.is_hybrid_att_model:
+            if g_infer_context.is_hybrid_att_model and g_infer_context.use_hybrid_checkpoint_cache:
                 self._hybrid_match_radix_cache()
             else:
                 self._match_radix_cache()
@@ -639,9 +642,9 @@ class InferReq:
         return
 
     def _match_radix_cache(self):
-        assert (
-            g_infer_context.is_hybrid_att_model is False
-        ), "current _match_radix_cache does not support hybrid attention models, to do..."
+        assert not g_infer_context.is_hybrid_att_model or not g_infer_context.use_hybrid_checkpoint_cache
+        if g_infer_context.is_hybrid_att_model:
+            g_infer_context.req_manager.init_hybrid_attention_state(req=self)
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         if enable_prompt_cache and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]

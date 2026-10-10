@@ -127,7 +127,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
         group = PDChunckedTransTaskGroup()
         input_len = req_obj.shm_req.input_len
         # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
-        if input_len - req_obj.cur_kv_len > 1:
+        # Hybrid models still need Prefill's final recurrent state when all but one KV token is cached.
+        if input_len - req_obj.cur_kv_len > 1 or g_infer_context.is_hybrid_att_model:
             trans_page_size = self.args.pd_kv_page_size
             assert trans_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len

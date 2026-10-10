@@ -483,7 +483,8 @@ def test_autotune_candidates_match_recurrence(dtype, run_config, mode):
 
 @pytest.mark.parametrize("save_big", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeypatch, dtype):
+@pytest.mark.parametrize("mtp_step,history_len", [(2, 16), (3, 8)])
+def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeypatch, dtype, mtp_step, history_len):
     from types import SimpleNamespace
     from lightllm.common.req_manager.linear_att import ReqManagerForMamba
     from lightllm.common.state_cache_manager import LinearAttCacheManager, LayerCache
@@ -509,15 +510,15 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
         conv_kernel_size=4,
     )
     manager.linear_config = config
-    manager.mtp_step = 2
+    manager.mtp_step = mtp_step
     manager.ssm_slots_per_req = 1
     manager.req_to_mtp_state_index = torch.zeros(4, device="cuda", dtype=torch.int32)
     manager.req_to_mtp_state_index[1] = 1
-    manager.req_to_conv_state = LayerCache(4, torch.bfloat16, (192, 5), 2, "cuda")
+    manager.req_to_conv_state = LayerCache(4, torch.bfloat16, (192, 3 + mtp_step), 2, "cuda")
     manager.req_to_conv_state.buffer.copy_(torch.randn_like(manager.req_to_conv_state.buffer))
     manager.req_to_ssm_state = LayerCache(4, dtype, (2, 32, 64), 2, "cuda")
     manager.req_to_ssm_state.buffer.zero_()
-    manager.ssm_update_cache = ReplaySSMCache(manager.req_to_ssm_state.buffer, 16, 3)
+    manager.ssm_update_cache = ReplaySSMCache(manager.req_to_ssm_state.buffer, history_len, mtp_step + 1)
     cache = manager.ssm_update_cache
     cache.raw_keys.normal_()
     cache.raw_values.normal_()
@@ -562,7 +563,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
 
     import lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager as memory_module
 
-    monkeypatch.setattr(memory_module, "get_env_start_args", lambda: SimpleNamespace(mtp_step=2))
+    monkeypatch.setattr(memory_module, "get_env_start_args", lambda: SimpleNamespace(mtp_step=mtp_step))
     mem = SimpleNamespace(
         linear_config=config,
         req_to_conv_state=manager.req_to_conv_state,
@@ -602,6 +603,29 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
     manager.init_hybrid_attention_state(SimpleNamespace(req_idx=2))
     assert torch.count_nonzero(manager.req_to_ssm_state.buffer[:, 2]).item() == 0
     assert torch.count_nonzero(manager.req_to_conv_state.buffer[:, 2]).item() == 0
+
+    native_mem = SimpleNamespace(
+        linear_config=config,
+        req_to_conv_state=LayerCache(4, torch.bfloat16, (192, 4), 2, "cuda"),
+        req_to_ssm_state=LayerCache(8, dtype, (2, 32, 64), 2, "cuda"),
+        ssm_update_cache=None,
+        ssm_slots_per_req=2,
+        req_to_mtp_state_index=None,
+    )
+    native_mem.req_to_conv_state.buffer.normal_()
+    native_mem.req_to_ssm_state.buffer.normal_()
+    native_helper = Qwen3NextLinearAttPageHelper(native_mem)
+    native_helper._write_one_rank(native_mem, 0, 1, conv_page, ssm_page)
+    cache.cursors[2] = 7
+    manager.req_to_mtp_state_index[2] = 2
+    helper._read_one_rank(mem, 0, 2, conv_page, ssm_page)
+    torch.testing.assert_close(
+        manager.req_to_ssm_state.buffer[:, 2], native_mem.req_to_ssm_state.buffer[:, 2], rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        manager.req_to_conv_state.buffer[:, 2, :, :3], native_mem.req_to_conv_state.buffer[:, 1, :, :3], rtol=0, atol=0
+    )
+    assert cache.cursors[2].item() == manager.req_to_mtp_state_index[2].item() == 0
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

@@ -151,7 +151,7 @@ class ModeBackend:
         set_random_seed(2147483647)
         self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
 
-        if self.is_hybrid_att_model:
+        if self.is_hybrid_att_model and self.args.run_mode != "decode":
             self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size,
             )
@@ -161,7 +161,7 @@ class ModeBackend:
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
-            if self.is_hybrid_att_model:
+            if self.is_hybrid_att_model and self.args.run_mode != "decode":
                 self.radix_cache = HybridAttPagedRadixCache(
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,

@@ -143,3 +143,27 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     assert len(tasks) == 1
     assert tasks[0].mem_indexes.tolist() == list(range(4, 10))
     assert len(tasks[0].max_kv_len_mem_indexes) == 6
+
+
+def test_pd_hybrid_one_missing_kv_token_still_transfers_recurrent_state(monkeypatch):
+    table = torch.full((1, 8), -1, dtype=torch.int32)
+    table[0, :4] = torch.arange(4)
+    allocations, tasks = [], []
+    backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
+    backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
+    backend.is_master_in_dp = False
+    backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, allocations, [4], size)
+
+    def create_task(**kwargs):
+        tasks.append((kwargs["kv_start_index"], kwargs["kv_end_index"], kwargs["mem_indexes"],
+                      kwargs.get("page_kind", "kv")))
+        kwargs["group"].task_list.append(SimpleNamespace())
+
+    backend._create_pd_trans_task = create_task
+    monkeypatch.setattr(decode_impl.g_infer_context, "is_hybrid_att_model", True)
+    req = _bind_alloc_need(SimpleNamespace(req_idx=0, cur_kv_len=4, hold_kv_len=4,
+                                          shm_req=SimpleNamespace(input_len=5)), 4)
+    backend._decode_node_gen_trans_tasks(req)
+    assert allocations == [4]
+    assert req.cur_kv_len == 5 and req.hold_kv_len == 8
+    assert tasks == [(4, 5, [4], "kv"), (5, 5, [], "att_state")]

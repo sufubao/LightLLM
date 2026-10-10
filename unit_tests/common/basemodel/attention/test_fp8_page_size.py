@@ -3,7 +3,6 @@ from unittest.mock import patch
 
 import pytest
 
-from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
 from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
 from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3AttBackend
@@ -15,7 +14,7 @@ from lightllm.common.basemodel.attention.flashinfer.mla import MlaFlashInferAttB
 
 @pytest.mark.parametrize(
     "backend_class",
-    [Fa3AttBackend, MlaFa3AttBackend, FlashInferAttBackend, MlaFlashInferAttBackend],
+    [Fa3AttBackend, Fp8Fa3AttBackend, MlaFa3AttBackend, FlashInferAttBackend, MlaFlashInferAttBackend],
 )
 def test_default_infer_page_size_matches_model_page_size(backend_class):
     backend = object.__new__(backend_class)
@@ -29,7 +28,6 @@ def test_default_infer_page_size_matches_model_page_size(backend_class):
 @pytest.mark.parametrize(
     ("backend_class", "backend_module"),
     [
-        (Fp8Fa3AttBackend, fa3_fp8),
         (Fp8FlashInferAttBackend, flashinfer_fp8),
     ],
 )

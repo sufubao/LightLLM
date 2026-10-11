@@ -133,6 +133,23 @@ def test_prefill_full_cache_hit_never_enters_running_request_count():
     asyncio.run(run())
 
 
+def test_prefill_full_kv_cache_hit_still_computes_requested_attention_state():
+    async def run():
+        manager = _make_manager(NodeRole.P)
+        websocket = AsyncMock()
+        pd_event = asyncio.Event()
+        pd_event.decode_node_info = SimpleNamespace(ready_kv_len=2, needs_att_state=True)
+        pd_event.set()
+
+        with pytest.raises(RuntimeError, match="alloc failed"):
+            await _drain_generate(manager, _sampling_params(), _multimodal_params(), websocket, pd_event)
+
+        manager._register_running_request.assert_awaited_once()
+        manager._unregister_running_request.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def test_prefill_upload_preserves_int64_multimodal_prompt_ids():
     async def run():
         manager = _make_manager(NodeRole.P)

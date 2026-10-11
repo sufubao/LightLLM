@@ -1,12 +1,43 @@
 import asyncio
 import copy
+import pickle
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
+from lightllm.server.pd_io_struct import PDDecodeNodeInfo, PDUpKVStatus
+
+
+@pytest.mark.parametrize("needs_att_state", [False, True])
+def test_master_waits_for_prefill_state_even_when_decode_has_all_but_last_kv(needs_att_state):
+    async def run():
+        manager = object.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(pd_node_id=1)
+        manager.req_id_to_out_inf = {}
+        node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        info = PDDecodeNodeInfo(2, 1, "agent", b"", 1, b"", 123, 2, needs_att_state)
+
+        async def wait(event, request, **kwargs):
+            if kwargs["stage"] == "prefill":
+                event.prompt_ids = [10, 11, 12]
+            else:
+                event.upkv_status = PDUpKVStatus(123, 1, pickle.dumps(info))
+
+        manager._wait_for_event_or_disconnect = wait
+        manager._wait_for_prefill_token_if_needed = AsyncMock(side_effect=RuntimeError("first-token wait"))
+        params = SamplingParams()
+        params.group_request_id = 123
+        params.max_new_tokens = 10
+        stream = manager.fetch_pd_stream(node, node, "prompt", params, None, None)
+        with pytest.raises(RuntimeError, match="first-token wait"):
+            await stream.__anext__()
+        assert manager._wait_for_prefill_token_if_needed.await_args.kwargs["needs_prefill_first_token"] is needs_att_state
+
+    asyncio.run(run())
 
 
 def _make_manager(monkeypatch):

@@ -412,7 +412,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
                 sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
 
-                if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
+                if decode_node_info.ready_kv_len == len(prompt_ids) - 1 and not getattr(
+                    decode_node_info, "needs_att_state", False
+                ):
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
                     # 直接 raise PDPrefillNodeStopGenToken
                     raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)

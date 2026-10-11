@@ -126,6 +126,7 @@ class PDDecodeNodeInfo:
 
     request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
+    needs_att_state: bool = False
 
 
 @dataclass

@@ -565,7 +565,9 @@ class HttpServerManagerForPDMaster:
         )
 
         first_token_gen = False
-        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1 or getattr(
+            decode_node_info, "needs_att_state", False
+        )
         prompt_cache_len_from_prefill = await self._wait_for_prefill_token_if_needed(
             req_status=req_status,
             request=request,

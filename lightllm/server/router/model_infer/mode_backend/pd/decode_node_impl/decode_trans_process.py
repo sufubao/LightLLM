@@ -229,6 +229,7 @@ class _DecodeTransModule:
                 page_reg_desc=self.transporter.local_page_mem_desc,
                 request_id=task.request_id,
                 ready_kv_len=task.start_kv_index,
+                needs_att_state=any(t.page_kind == "att_state" for t in trans_task_group.task_list),
             )
 
             up_status = PDUpKVStatus(

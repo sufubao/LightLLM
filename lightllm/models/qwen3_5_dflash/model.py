@@ -35,11 +35,13 @@ class Qwen3_5DFlashModel(Qwen3DFlashModel):
             target_mem_manager.linear_config.full_att_all_num_kv_heads,
             target_mem_manager.head_dim,
         )
-        assert draft_kv_shape == target_kv_shape, (
-            "Qwen3.5 parallel block drafter requires matching draft and target KV shapes, "
+        draft_heads, draft_dim = draft_kv_shape
+        target_heads, target_dim = target_kv_shape
+        assert draft_heads * draft_dim == target_heads * target_dim and draft_heads % target_heads == 0, (
+            "Qwen3.5 parallel block drafter requires the same KV width per token, "
             f"got draft={draft_kv_shape}, target={target_kv_shape}."
         )
-        super()._init_mem_manager()
+        self.mem_manager = target_mem_manager.create_kv_head_view(draft_dim)
 
     def _init_weights(self, start_layer_index=None):
         super()._init_weights(start_layer_index=start_layer_index)

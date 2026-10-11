@@ -514,3 +514,22 @@ def test_vanilla_markov_tp4_sampling_matches_full_logits(monkeypatch):
     )
 
     torch.testing.assert_close(sampled_tokens, expected_tokens)
+
+
+@pytest.mark.parametrize('own_embedding_loaded', [True, False])
+@pytest.mark.parametrize('own_head_loaded', [True, False])
+def test_qwen35_dspark_uses_target_only_for_omitted_embeddings(monkeypatch, own_embedding_loaded, own_head_loaded):
+    from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import Qwen3DFlashPreAndPostLayerWeight
+
+    monkeypatch.setattr(Qwen3DFlashPreAndPostLayerWeight, 'verify_load', lambda self: None)
+    weight = dspark_pre_post_weight.Qwen3DSparkPreAndPostLayerWeight.__new__(
+        dspark_pre_post_weight.Qwen3DSparkPreAndPostLayerWeight
+    )
+    own_embedding = SimpleNamespace(verify_load=lambda: own_embedding_loaded)
+    own_head = SimpleNamespace(verify_load=lambda: own_head_loaded)
+    target_embedding, target_head = object(), object()
+    weight.wte_weight_, weight.lm_head_weight_ = own_embedding, own_head
+    weight.target_pre_post_weight = SimpleNamespace(wte_weight_=target_embedding, lm_head_weight_=target_head)
+    weight.verify_load()
+    assert weight.wte_weight_ is (own_embedding if own_embedding_loaded else target_embedding)
+    assert weight.lm_head_weight_ is (own_head if own_head_loaded else target_head)

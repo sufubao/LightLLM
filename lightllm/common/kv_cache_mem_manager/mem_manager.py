@@ -1,3 +1,4 @@
+import copy
 import math
 import os
 import re
@@ -59,6 +60,27 @@ class MemoryManager:
 
         # 构建对外的操作类接口
         self.operator: BaseMemManagerOperator = self.operator_class(self)
+
+    def create_kv_head_view(self, head_dim: int):
+        if head_dim == self.head_dim:
+            return self
+        if head_dim <= 0 or self.head_dim % head_dim != 0:
+            raise ValueError(f"Cannot split KV heads of width {self.head_dim} into width {head_dim}")
+        if hasattr(self, "kv_scale_buffer"):
+            raise ValueError("KV head views require unquantized or statically quantized storage")
+
+        # The target retains ownership of allocation, offload and PD transfer.
+        # Only the draft's attention and KV writes use this storage view.
+        factor = self.head_dim // head_dim
+        view = copy.copy(self)
+        view.head_num = self.head_num * factor
+        view.head_dim = head_dim
+        view.kv_buffer = self.kv_buffer.view(*self.kv_buffer.shape[:-2], 2 * view.head_num, head_dim)
+        if hasattr(self, "q_scales"):
+            view.scales = self.scales.repeat_interleave(factor, dim=-1)
+            view.q_scales = self.q_scales.repeat_interleave(factor, dim=-1)
+        view.operator = self.operator_class(view)
+        return view
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]

@@ -6,6 +6,15 @@ from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import
 class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
     """DSpark heads on top of the shared DFlash block backbone weights."""
 
+    def verify_load(self):
+        target = getattr(self, "target_pre_post_weight", None)
+        if target is not None:
+            # Released draft checkpoints can omit target-owned word embeddings.
+            for name in ("wte_weight_", "lm_head_weight_"):
+                if not getattr(self, name).verify_load():
+                    setattr(self, name, getattr(target, name))
+        return super().verify_load()
+
     def __init__(self, data_type, network_config, quant_cfg: Quantcfg):
         super().__init__(data_type, network_config, quant_cfg)
 

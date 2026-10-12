@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from lightllm.common.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.hidden_collector import FinalHiddenOutput
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -10,6 +11,7 @@ from .layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerW
 
 
 class Glm5NextMTPModel(TpPartBaseModel):
+    mtp_final_hidden_output = FinalHiddenOutput.POST_NORM
     is_mtp_draft_model = True
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
@@ -33,7 +35,6 @@ class Glm5NextMTPModel(TpPartBaseModel):
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, self.config, self.quant_cfg)
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
-        self.pre_post_weight.main_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         self.trans_layers_weight = [
             self.transformer_weight_class(self.config["num_hidden_layers"], self.data_type, self.config, self.quant_cfg)
         ]

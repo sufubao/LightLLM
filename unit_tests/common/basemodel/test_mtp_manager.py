@@ -131,14 +131,62 @@ def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, 
     assert collector is not prototype
 
 
-@pytest.mark.parametrize("spec_mode", [None, "vanilla_with_att"])
-@pytest.mark.parametrize("is_draft_model", [False, True])
-def test_qwen35_hidden_output(monkeypatch, spec_mode, is_draft_model):
-    from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "path,mode,expected",
+    [
+        ("deepseek2.model:Deepseek2TpPartModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
+        ("deepseek_mtp.model:Deepseek3MTPModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
+        ("glm4_moe_lite.model:Glm4MoeLiteTpPartModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
+        ("glm4_moe_lite_mtp.model:Glm4MoeLiteMTPModel", "vanilla_with_att", FinalHiddenOutput.PRE_NORM),
+        ("glm5_next.model:Glm5NextTpPartModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
+        ("glm5_next_mtp.model:Glm5NextMTPModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
+        ("qwen3_5.model:Qwen3_5TpPartModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
+        ("qwen3_5_mtp.model:Qwen3_5MTPModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
+        ("qwen3_5_moe.model:Qwen3_5MOETpPartModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
+        ("qwen3_5_moe_mtp.model:Qwen3_5MoeMTPModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
+        ("mistral.model:MistralTpPartModel", "vanilla_no_att", FinalHiddenOutput.PRE_NORM),
+        ("mistral_mtp.model:MistralMTPModel", "vanilla_no_att", FinalHiddenOutput.PRE_NORM),
+        ("qwen3_moe.model:Qwen3MOEModel", "eagle_no_att", FinalHiddenOutput.PRE_NORM),
+        ("qwen3_moe_mtp.model:Qwen3MOEMTPModel", "eagle_no_att", FinalHiddenOutput.PRE_NORM),
+        ("qwen3_eagle.model:Qwen3EagleModel", "eagle3", FinalHiddenOutput.PRE_NORM),
+        ("qwen3_dflash.model:Qwen3DFlashModel", "dflash", FinalHiddenOutput.NONE),
+        ("qwen3_5_dflash.model:Qwen3_5DFlashModel", "dflash", FinalHiddenOutput.NONE),
+        ("qwen3_dspark.model:Qwen3DSparkModel", "dspark", FinalHiddenOutput.NONE),
+        ("qwen3_5_dspark.model:Qwen3_5DSparkModel", "dspark", FinalHiddenOutput.NONE),
+    ],
+)
+def test_model_hidden_output(monkeypatch, path, mode, expected, enabled):
+    from importlib import import_module
 
-    monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: SimpleNamespace(mtp_mode=spec_mode))
-    model = Qwen3_5TpPartModel.__new__(Qwen3_5TpPartModel)
-    model.is_mtp_draft_model = is_draft_model
+    module, name = path.split(":")
+    cls = getattr(import_module("lightllm.models." + module), name)
+    model = cls.__new__(cls)
+    monkeypatch.setattr(
+        mtp_manager_module, "get_env_start_args", lambda: SimpleNamespace(mtp_mode=mode if enabled else None)
+    )
     collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
-    expected = FinalHiddenOutput.NONE if spec_mode is None else FinalHiddenOutput.POST_NORM
-    assert collector.final_hidden_output is expected
+    assert collector.final_hidden_output is (expected if enabled else FinalHiddenOutput.NONE)
+
+
+@pytest.mark.parametrize("mode", ["eagle3", "dflash", "dspark"])
+@pytest.mark.parametrize(
+    "path",
+    ["deepseek2.model:Deepseek2TpPartModel", "glm5_next.model:Glm5NextTpPartModel", "qwen3_5.model:Qwen3_5TpPartModel"],
+)
+def test_intermediate_hidden_output(monkeypatch, mode, path):
+    from importlib import import_module
+
+    args = SimpleNamespace(mtp_mode=mode, mtp_draft_model_dir=["/models/draft"])
+    monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(hidden_collector_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(
+        hidden_collector_module.PretrainedConfig, "get_config_dict", lambda _: ({"target_layer_ids": [0]}, {})
+    )
+    module, name = path.split(":")
+    cls = getattr(import_module("lightllm.models." + module), name)
+    model = cls.__new__(cls)
+    model.layers_num = 2
+    collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
+    assert isinstance(collector, LayerHiddenCollector)
+    assert collector.final_hidden_output is FinalHiddenOutput.NONE

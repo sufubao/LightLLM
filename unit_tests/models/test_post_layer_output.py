@@ -409,3 +409,99 @@ def test_norm_and_hidden_output(monkeypatch, hidden_output, is_prefill, prompt, 
     else:
         assert output.final_hidden is None
     assert norm_rows == [5 if prompt or hidden_output is FinalHiddenOutput.POST_NORM else state.batch_size]
+
+
+@pytest.mark.parametrize("model_name", ["qwen2", "internlm2"])
+@pytest.mark.parametrize("hidden_output", list(FinalHiddenOutput))
+def test_reward_hidden_output(model_name, hidden_output):
+    from lightllm.models.qwen2_reward.layer_infer.post_layer_infer import Qwen2RewardPostLayerInfer
+    from lightllm.models.internlm2_reward.layer_infer.post_layer_infer import Internlm2RewardPostLayerInfer
+
+    head_class = Qwen2RewardPostLayerInfer if model_name == "qwen2" else Internlm2RewardPostLayerInfer
+    head = head_class.__new__(head_class)
+    head.alloc_tensor = lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype)
+    hidden = torch.arange(1, 16, dtype=torch.float32).reshape(5, 3)
+    norm_weight = torch.tensor([0.5, 1.5, 2.0])
+    score_weight = torch.tensor([[1.0], [-2.0], [0.5]])
+    norm_rows = []
+
+    def norm(value, state, weight):
+        norm_rows.append(value.shape[0])
+        return torch.nn.functional.rms_norm(value, (3,), norm_weight, eps=1e-6)
+
+    head._norm = norm
+    weight = SimpleNamespace(
+        score_up_weight_=SimpleNamespace(mm=lambda value: value),
+        score_down_weight_=SimpleNamespace(mm=lambda value: value @ score_weight),
+        score_head_=SimpleNamespace(mm=lambda value: value @ score_weight),
+    )
+    collector = (
+        NoopHiddenCollector() if hidden_output is FinalHiddenOutput.NONE else FinalHiddenCollector(output=hidden_output)
+    )
+    state = SimpleNamespace(
+        is_prefill=True,
+        batch_size=2,
+        b_seq_len=torch.tensor([2, 3]),
+        b_ready_cache_len=torch.zeros(2, dtype=torch.long),
+        return_all_prompt_logics=False,
+        hidden_collector=collector,
+    )
+    output = head.token_forward(hidden, state, weight)
+    normed = torch.nn.functional.rms_norm(hidden, (3,), norm_weight, eps=1e-6)
+    torch.testing.assert_close(output.logits, normed[[1, 4]] @ score_weight)
+    if hidden_output is FinalHiddenOutput.PRE_NORM:
+        assert output.final_hidden is hidden
+    elif hidden_output is FinalHiddenOutput.POST_NORM:
+        torch.testing.assert_close(output.final_hidden, normed)
+    else:
+        assert output.final_hidden is None
+    assert norm_rows == [5 if hidden_output is FinalHiddenOutput.POST_NORM else 2]
+    collector.add_final_hidden(output.final_hidden)
+    collected = collector.finish_output(state).spec_hidden
+    if hidden_output is FinalHiddenOutput.NONE:
+        assert collected is None
+    else:
+        torch.testing.assert_close(collected, output.final_hidden)
+
+
+@pytest.mark.parametrize(
+    "forward",
+    ["_context_forward", "_token_forward", "_overlap_tpsp_context_forward", "_overlap_tpsp_token_forward"],
+)
+def test_model_does_not_fallback_to_raw_hidden(monkeypatch, forward):
+    from lightllm.common.basemodel import basemodel
+
+    monkeypatch.setattr(basemodel.g_cache_manager, "cache_env_in", lambda: None)
+    monkeypatch.setattr(basemodel.g_cache_manager, "cache_env_out", lambda: None)
+    monkeypatch.setattr(basemodel.Autotuner, "is_autotune_warmup", lambda: False)
+    monkeypatch.setattr(basemodel, "get_env_start_args", lambda: SimpleNamespace(enable_dp_prefill_balance=False))
+    hidden = torch.ones(2, 3)
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.layers_num = 0
+    model.prefill_graph = None
+    model.pre_post_weight = None
+    model.args = SimpleNamespace(enable_dp_prefill_balance=False)
+    model.pre_infer = SimpleNamespace(
+        context_forward=lambda *args: hidden,
+        token_forward=lambda *args: hidden,
+        overlap_tpsp_context_forward=lambda *args: (hidden, hidden),
+        overlap_tpsp_token_forward=lambda *args: (hidden, hidden),
+        _tpsp_sp_split=lambda input, infer_state: input,
+    )
+    model.post_infer = SimpleNamespace(
+        token_forward=lambda *args, **kwargs: PostLayerOutput(torch.ones(2, 4)),
+        overlap_tpsp_token_forward=lambda *args: (PostLayerOutput(torch.ones(2, 4)), PostLayerOutput(torch.ones(2, 4))),
+        _tpsp_allgather=lambda input, infer_state: input,
+    )
+
+    def state():
+        return SimpleNamespace(
+            input_ids=torch.ones(2, dtype=torch.long),
+            hidden_collector=FinalHiddenCollector(output=FinalHiddenOutput.POST_NORM),
+            need_dp_prefill_balance=False,
+            call_overlap_hook=lambda: None,
+        )
+
+    states = (state(), state()) if "overlap" in forward else (state(),)
+    with pytest.raises(AssertionError, match="post layer must return the requested final hidden"):
+        getattr(model, forward)(*states)

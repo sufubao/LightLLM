@@ -57,9 +57,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         assert False, "Error State"
 
-    def _token_forward(
+    def _prepare_output_hidden(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
-    ) -> PostLayerOutput:
+    ):
         hidden_output = infer_state.hidden_collector.final_hidden_output
         final_hidden = input_embdings if hidden_output is FinalHiddenOutput.PRE_NORM else None
         if hidden_output is FinalHiddenOutput.POST_NORM or (
@@ -72,6 +72,12 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         else:
             last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
             last_input = self._norm(last_input, infer_state, layer_weight)
+        return last_input, token_num, final_hidden
+
+    def _token_forward(
+        self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
+    ) -> PostLayerOutput:
+        last_input, token_num, final_hidden = self._prepare_output_hidden(input_embdings, infer_state, layer_weight)
         input_embdings = None
 
         # 正常采样使用的 logits，始终只对应每个请求最后一个位置。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from abc import ABC, abstractmethod
+from enum import Enum, auto
 from typing import List, Optional
 
 import torch
@@ -10,6 +11,12 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+
+
+class FinalHiddenOutput(Enum):
+    NONE = auto()
+    PRE_NORM = auto()
+    POST_NORM = auto()
 
 
 class HiddenCollector(ABC):
@@ -24,6 +31,8 @@ class HiddenCollector(ABC):
     :meth:`new_instance` 获得独立收集器，使不同请求和 microbatch 的临时 hidden
     state 自然隔离，具体实现无需感知 microbatch 编号。
     """
+
+    final_hidden_output = FinalHiddenOutput.NONE
 
     @abstractmethod
     def new_instance(self) -> "HiddenCollector":
@@ -159,11 +168,12 @@ class MtpHeadOutputCollector(NoopHiddenCollector):
 class FinalHiddenCollector(HiddenCollector):
     """Returns the final decoder hidden state without per-layer bookkeeping."""
 
-    def __init__(self) -> None:
+    def __init__(self, output: FinalHiddenOutput = FinalHiddenOutput.PRE_NORM) -> None:
+        self.final_hidden_output = output
         self.final_hidden: Optional[torch.Tensor] = None
 
     def new_instance(self) -> HiddenCollector:
-        return FinalHiddenCollector()
+        return FinalHiddenCollector(output=self.final_hidden_output)
 
     def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
         self.final_hidden = final_hidden

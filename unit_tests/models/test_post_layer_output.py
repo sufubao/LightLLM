@@ -5,7 +5,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import PostLayerOutput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
+from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, FinalHiddenOutput, NoopHiddenCollector
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk
 from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
     pack_vocab_parallel_topk,
@@ -270,7 +270,14 @@ def test_local_vocab_topk_graph_replay_reads_updated_logits(top_k) -> None:
 @pytest.mark.parametrize("draft", [False, True])
 def test_prefill_prompt_logits_do_not_replace_candidate_output(draft) -> None:
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
-    state = SimpleNamespace(is_draft_model=draft, prompt_logics=torch.ones(5, 2))
+    state = SimpleNamespace(
+        is_draft_model=draft,
+        is_prefill=True,
+        return_all_prompt_logics=True,
+        hidden_collector=NoopHiddenCollector(),
+        prompt_logics=torch.ones(5, 2),
+    )
+    head._norm = lambda hidden, state, weight: hidden
     head._slice_get_last_input = lambda *args: (torch.ones(1, 2), 1)
     candidates = PostLayerOutput(
         torch.ones(1, 2),
@@ -316,3 +323,89 @@ def test_overlap_keeps_each_microbatch_mapping() -> None:
     output0, output1 = head.overlap_tpsp_token_forward(None, None, 0, 1, None)
     assert output0 is outputs[0]
     assert output1 is outputs[1]
+
+
+@pytest.mark.parametrize(
+    "hidden_output,is_prefill,prompt,draft,top_k",
+    [
+        (FinalHiddenOutput.NONE, True, False, False, None),
+        (FinalHiddenOutput.PRE_NORM, True, False, False, None),
+        (FinalHiddenOutput.POST_NORM, True, False, False, None),
+        (FinalHiddenOutput.NONE, True, True, False, None),
+        (FinalHiddenOutput.PRE_NORM, True, True, False, None),
+        (FinalHiddenOutput.POST_NORM, True, True, True, None),
+        (FinalHiddenOutput.NONE, True, True, True, 2),
+        (FinalHiddenOutput.POST_NORM, True, True, False, 2),
+        (FinalHiddenOutput.POST_NORM, False, False, True, None),
+        (FinalHiddenOutput.POST_NORM, False, False, True, 2),
+    ],
+)
+def test_norm_and_hidden_output(monkeypatch, hidden_output, is_prefill, prompt, draft, top_k):
+    hidden = torch.arange(1, 16, dtype=torch.float32).reshape(5, 3)
+    norm_weight = torch.tensor([0.5, 1.5, 2.0])
+    projection = torch.arange(1, 13, dtype=torch.float32).reshape(4, 3) / 10
+    norm_rows = []
+    head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
+    head.tp_world_size_ = 1
+    head.alloc_tensor = lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype)
+
+    def norm(value, state, weight):
+        norm_rows.append(value.shape[0])
+        return torch.nn.functional.rms_norm(value, (3,), norm_weight, eps=1e-6)
+
+    class LMHead:
+        vocab_size = 4
+
+        def __call__(self, input, alloc_func):
+            return projection @ input
+
+    head._norm = norm
+    monkeypatch.setattr(
+        llama_post,
+        "get_env_start_args",
+        lambda: SimpleNamespace(target_vocab_topk_sampling=top_k, draft_vocab_topk_sampling=top_k),
+    )
+    monkeypatch.setattr(
+        llama_post,
+        "local_vocab_topk",
+        lambda logits, top_k, alloc_func: torch.topk(logits.T, top_k, dim=1),
+    )
+    collector = (
+        NoopHiddenCollector() if hidden_output is FinalHiddenOutput.NONE else FinalHiddenCollector(output=hidden_output)
+    )
+    state = SimpleNamespace(
+        is_prefill=is_prefill,
+        is_draft_model=draft,
+        batch_size=2 if is_prefill else 5,
+        b_seq_len=torch.tensor([2, 3]),
+        b_ready_cache_len=torch.zeros(2, dtype=torch.long),
+        return_all_prompt_logics=prompt,
+        prompt_logics=None,
+        hidden_collector=collector,
+    )
+    weight = SimpleNamespace(lm_head_weight_=LMHead())
+    output = head.token_forward(hidden, state, weight)
+    normed = torch.nn.functional.rms_norm(hidden, (3,), norm_weight, eps=1e-6)
+    all_logits = normed @ projection.T
+    selected_logits = all_logits[[1, 4]] if is_prefill else all_logits
+    expected_logits = selected_logits
+    if top_k is not None:
+        values, ids = torch.topk(selected_logits, top_k, dim=1)
+        if draft:
+            expected_logits = values
+            torch.testing.assert_close(output.logits_token_ids, ids)
+        else:
+            expected_logits = torch.full_like(selected_logits, llama_post._MASKED_LOGIT_VALUE)
+            expected_logits.scatter_(1, ids, values)
+    torch.testing.assert_close(output.logits, expected_logits)
+    if prompt:
+        torch.testing.assert_close(state.prompt_logics, all_logits)
+    else:
+        assert state.prompt_logics is None
+    if hidden_output is FinalHiddenOutput.POST_NORM:
+        torch.testing.assert_close(output.final_hidden, normed)
+    elif hidden_output is FinalHiddenOutput.PRE_NORM:
+        assert output.final_hidden is hidden
+    else:
+        assert output.final_hidden is None
+    assert norm_rows == [5 if prompt or hidden_output is FinalHiddenOutput.POST_NORM else state.batch_size]

@@ -6,6 +6,7 @@ import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
+    FinalHiddenOutput,
     LayerHiddenCollector,
     MtpHeadOutputCollector,
     NoopHiddenCollector,
@@ -128,3 +129,16 @@ def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, 
     assert isinstance(prototype, expected_type)
     assert isinstance(collector, expected_type)
     assert collector is not prototype
+
+
+@pytest.mark.parametrize("spec_mode", [None, "vanilla_with_att"])
+@pytest.mark.parametrize("is_draft_model", [False, True])
+def test_qwen35_hidden_output(monkeypatch, spec_mode, is_draft_model):
+    from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+
+    monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: SimpleNamespace(mtp_mode=spec_mode))
+    model = Qwen3_5TpPartModel.__new__(Qwen3_5TpPartModel)
+    model.is_mtp_draft_model = is_draft_model
+    collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
+    expected = FinalHiddenOutput.NONE if spec_mode is None else FinalHiddenOutput.POST_NORM
+    assert collector.final_hidden_output is expected

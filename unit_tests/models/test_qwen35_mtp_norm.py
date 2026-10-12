@@ -3,10 +3,9 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector
+from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, FinalHiddenOutput
 from lightllm.common.basemodel.layer_weights.meta_weights import NoTpGEMMANormWeight
 from lightllm.models.llama.layer_infer import post_layer_infer as llama_post
-from lightllm.models.qwen3_5.layer_infer.post_layer_infer import Qwen35PostLayerInfer
 from lightllm.models.qwen3_5_mtp.layer_infer.pre_layer_infer import Qwen3_5MTPPreLayerInfer
 
 
@@ -44,7 +43,7 @@ def test_qwen35_main_to_draft_two_steps(monkeypatch) -> None:
         hnorm_weight_=hnorm,
         eh_proj_weight_=SimpleNamespace(mm=lambda hidden: hidden @ fusion.T),
     )
-    post = Qwen35PostLayerInfer.__new__(Qwen35PostLayerInfer)
+    post = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
     post.eps_ = 1e-6
     post.tp_world_size_ = 1
     post.alloc_tensor = lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype)
@@ -70,7 +69,7 @@ def test_qwen35_main_to_draft_two_steps(monkeypatch) -> None:
         is_draft_model=False,
         batch_size=2,
         prompt_logics=None,
-        hidden_collector=FinalHiddenCollector(),
+        hidden_collector=FinalHiddenCollector(output=FinalHiddenOutput.POST_NORM),
     )
     monkeypatch.setattr(
         llama_post,

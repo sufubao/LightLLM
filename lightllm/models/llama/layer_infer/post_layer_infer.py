@@ -1,7 +1,6 @@
 import os
 import torch
-from lightllm.common.basemodel.batch_objs import PostLayerOutput
-from lightllm.common.basemodel.hidden_collector import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, PostLayerOutput
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
@@ -60,7 +59,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def _prepare_output_hidden(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
-        hidden_policy = infer_state.hidden_collector.final_hidden_policy
+        hidden_policy = infer_state.final_hidden_policy
         norm_all_tokens = hidden_policy is FinalHiddenPolicy.POST_NORM or (
             infer_state.is_prefill and infer_state.return_all_prompt_logics
         )

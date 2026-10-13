@@ -35,7 +35,7 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, ModelInput, ModelOutput, PostLayerOutput
 from lightllm.common.basemodel.hidden_collector import (
     NoopHiddenCollector,
 )
@@ -349,6 +349,7 @@ class TpPartBaseModel:
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
+        infer_state.final_hidden_policy = self.mtp_manager.get_final_hidden_policy(self)
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_draft_model = self.is_mtp_draft_model
@@ -640,6 +641,7 @@ class TpPartBaseModel:
         input_tensors = [input_embs]
         if Autotuner.is_autotune_warmup():
             infer_state.hidden_collector = NoopHiddenCollector()
+            infer_state.final_hidden_policy = FinalHiddenPolicy.NONE
 
         def prefill_func(input_tensors, _infer_state):
             hidden_collector = _infer_state.hidden_collector

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.basemodel.layer_weights.meta_weights import NoTpGEMMANormWeight, RMSNormWeight
 from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
@@ -100,6 +100,7 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
 
     def forward(hidden, weight, producer):
         state.hidden_collector = manager.create_hidden_collector(producer)
+        state.final_hidden_policy = manager.get_final_hidden_policy(producer)
         model.pre_post_weight = weight
         model.pre_infer = SimpleNamespace(
             token_forward=lambda *args: hidden,
@@ -130,7 +131,7 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
         draft_weight.final_norm_weight_ = main_norm
 
     def collected(hidden, weight, producer):
-        if manager.create_hidden_collector(producer).final_hidden_policy is FinalHiddenPolicy.POST_NORM:
+        if manager.get_final_hidden_policy(producer) is FinalHiddenPolicy.POST_NORM:
             return reference_norm(hidden, weight.final_norm_weight_)
         return hidden.clone()
 

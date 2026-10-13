@@ -3,9 +3,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import PostLayerOutput
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, PostLayerOutput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, FinalHiddenPolicy, NoopHiddenCollector
+from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, NoopHiddenCollector
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk
 from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
     pack_vocab_parallel_topk,
@@ -274,7 +274,7 @@ def test_prefill_prompt_logits_do_not_replace_candidate_output(draft) -> None:
         is_draft_model=draft,
         is_prefill=True,
         return_all_prompt_logics=True,
-        hidden_collector=NoopHiddenCollector(),
+        final_hidden_policy=FinalHiddenPolicy.NONE,
         prompt_logics=torch.ones(5, 2),
     )
     head._norm = lambda hidden, state, weight: hidden
@@ -370,9 +370,6 @@ def test_norm_and_hidden_policy(monkeypatch, hidden_policy, is_prefill, prompt, 
         "local_vocab_topk",
         lambda logits, top_k, alloc_func: torch.topk(logits.T, top_k, dim=1),
     )
-    collector = (
-        NoopHiddenCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenCollector(policy=hidden_policy)
-    )
     state = SimpleNamespace(
         is_prefill=is_prefill,
         is_draft_model=draft,
@@ -381,7 +378,7 @@ def test_norm_and_hidden_policy(monkeypatch, hidden_policy, is_prefill, prompt, 
         b_ready_cache_len=torch.zeros(2, dtype=torch.long),
         return_all_prompt_logics=prompt,
         prompt_logics=None,
-        hidden_collector=collector,
+        final_hidden_policy=hidden_policy,
     )
     weight = SimpleNamespace(lm_head_weight_=LMHead())
     output = head.token_forward(hidden, state, weight)
@@ -435,9 +432,7 @@ def test_reward_hidden_policy(model_name, hidden_policy):
         score_down_weight_=SimpleNamespace(mm=lambda value: value @ score_weight),
         score_head_=SimpleNamespace(mm=lambda value: value @ score_weight),
     )
-    collector = (
-        NoopHiddenCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenCollector(policy=hidden_policy)
-    )
+    collector = NoopHiddenCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenCollector()
     state = SimpleNamespace(
         is_prefill=True,
         batch_size=2,
@@ -445,6 +440,7 @@ def test_reward_hidden_policy(model_name, hidden_policy):
         b_ready_cache_len=torch.zeros(2, dtype=torch.long),
         return_all_prompt_logics=False,
         hidden_collector=collector,
+        final_hidden_policy=hidden_policy,
     )
     output = head.token_forward(hidden, state, weight)
     normed = torch.nn.functional.rms_norm(hidden, (3,), norm_weight, eps=1e-6)
@@ -497,7 +493,7 @@ def test_model_does_not_fallback_to_raw_hidden(monkeypatch, forward):
     def state():
         return SimpleNamespace(
             input_ids=torch.ones(2, dtype=torch.long),
-            hidden_collector=FinalHiddenCollector(policy=FinalHiddenPolicy.POST_NORM),
+            hidden_collector=FinalHiddenCollector(),
             need_dp_prefill_balance=False,
             call_overlap_hook=lambda: None,
         )

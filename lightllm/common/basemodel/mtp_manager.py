@@ -1,8 +1,8 @@
 from typing import ClassVar, Optional
 
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
-    FinalHiddenPolicy,
     HiddenCollector,
     LayerHiddenCollector,
     MtpHeadOutputCollector,
@@ -67,6 +67,14 @@ class MtpManager:
 
         return self.get_decode_tokens_per_request(is_draft_model) - 1
 
+    def get_final_hidden_policy(self, model) -> FinalHiddenPolicy:
+        spec_mode = self.args.mtp_mode
+        if spec_mode is None or spec_mode in self._BLOCK_DRAFT_MODES:
+            return FinalHiddenPolicy.NONE
+        if spec_mode == "eagle3" and not model.is_mtp_draft_model:
+            return FinalHiddenPolicy.NONE
+        return getattr(model, "mtp_final_hidden_policy", FinalHiddenPolicy.PRE_NORM)
+
     def create_hidden_collector(
         self,
         model,
@@ -90,6 +98,4 @@ class MtpManager:
         else:
             collector_type = FinalHiddenCollector
 
-        if collector_type is FinalHiddenCollector:
-            collector_kwargs["policy"] = getattr(model, "mtp_final_hidden_policy", FinalHiddenPolicy.PRE_NORM)
         return collector_type(**collector_kwargs)

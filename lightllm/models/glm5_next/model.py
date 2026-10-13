@@ -6,7 +6,7 @@ import triton
 
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager

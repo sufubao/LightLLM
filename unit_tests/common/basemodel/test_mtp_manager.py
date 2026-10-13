@@ -2,11 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
-    FinalHiddenPolicy,
     LayerHiddenCollector,
     MtpHeadOutputCollector,
     NoopHiddenCollector,
@@ -165,8 +165,8 @@ def test_model_hidden_output(monkeypatch, path, mode, expected, enabled):
     monkeypatch.setattr(
         mtp_manager_module, "get_env_start_args", lambda: SimpleNamespace(mtp_mode=mode if enabled else None)
     )
-    collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
-    assert collector.final_hidden_policy is (expected if enabled else FinalHiddenPolicy.NONE)
+    policy = MtpManager.get_instance().get_final_hidden_policy(model)
+    assert policy is (expected if enabled else FinalHiddenPolicy.NONE)
 
 
 @pytest.mark.parametrize("mode", ["eagle3", "dflash", "dspark"])
@@ -189,4 +189,4 @@ def test_intermediate_hidden_output(monkeypatch, mode, path):
     model.layers_num = 2
     collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
     assert isinstance(collector, LayerHiddenCollector)
-    assert collector.final_hidden_policy is FinalHiddenPolicy.NONE
+    assert MtpManager.get_instance().get_final_hidden_policy(model) is FinalHiddenPolicy.NONE

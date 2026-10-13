@@ -15,7 +15,7 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
     Qwen35TransformerLayerInfer,
 )
 from lightllm.models.qwen3_5.infer_struct import Qwen35InferStateInfo
-from lightllm.common.basemodel.hidden_collector import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
 

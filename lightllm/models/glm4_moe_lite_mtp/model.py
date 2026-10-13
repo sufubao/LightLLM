@@ -5,7 +5,7 @@ from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight i
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.basemodel.basemodel import load_hf_weights
 
 

@@ -61,17 +61,23 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
         hidden_policy = infer_state.hidden_collector.final_hidden_policy
-        final_hidden = input_embdings if hidden_policy is FinalHiddenPolicy.PRE_NORM else None
-        if hidden_policy is FinalHiddenPolicy.POST_NORM or (
+        norm_all_tokens = hidden_policy is FinalHiddenPolicy.POST_NORM or (
             infer_state.is_prefill and infer_state.return_all_prompt_logics
-        ):
+        )
+
+        if norm_all_tokens:
             normed = self._norm(input_embdings, infer_state, layer_weight)
             last_input, token_num = self._slice_get_last_input(normed, infer_state)
-            if hidden_policy is FinalHiddenPolicy.POST_NORM:
-                final_hidden = normed
         else:
             last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
             last_input = self._norm(last_input, infer_state, layer_weight)
+
+        final_hidden = None
+        if hidden_policy is FinalHiddenPolicy.PRE_NORM:
+            final_hidden = input_embdings
+        elif hidden_policy is FinalHiddenPolicy.POST_NORM:
+            final_hidden = normed
+
         return last_input, token_num, final_hidden
 
     def _token_forward(

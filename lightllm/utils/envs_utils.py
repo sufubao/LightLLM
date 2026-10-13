@@ -79,6 +79,12 @@ def enable_env_vars(args):
 
 
 @lru_cache(maxsize=None)
+def is_stop_matching_in_reasoning_enabled() -> bool:
+    """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""
+    return os.getenv("LIGHTLLM_STOP_IN_REASONING", "False").upper() in ["ON", "TRUE", "1"]
+
+
+@lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
     # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大。
     # 如果未显式配置，则默认至少覆盖当前进程的 `batch_max_tokens`，避免 DeepEP V2 在 autotune

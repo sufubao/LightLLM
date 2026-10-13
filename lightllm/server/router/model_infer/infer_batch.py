@@ -624,7 +624,8 @@ class InferReq:
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
-        self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
+        # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
+        self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
@@ -924,6 +925,9 @@ class InferReq:
         return
 
     def _stop_sequences_matched(self, output_len: int):
+        # 显式 token ID stop 始终生效，包括 reasoning 阶段；stop_str_match_mode 只控制字符串。
+        if not self.stop_sequences:
+            return False
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
             if stop_len > 0:

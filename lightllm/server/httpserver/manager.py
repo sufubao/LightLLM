@@ -23,6 +23,7 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
+from .stop_seq_match import wrap_stop_match_stream
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -316,7 +317,22 @@ class HttpServerManager(HttpRlManagerHelper, object):
             assert False, "dead code path"
         return group_request_id
 
-    async def generate(
+    def generate(
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        pd_upload_websocket: ClientConnection = None,
+        pd_event: asyncio.Event = None,
+    ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+        """客户端输出统一包裹 stop；P/D 节点和 TP slave 转发原始流。"""
+        generator = self._generate(prompt, sampling_params, multimodal_params, request, pd_upload_websocket, pd_event)
+        if self.pd_mode.is_normal() and not self.is_multinode_tp_slave:
+            return wrap_stop_match_stream(self, generator, sampling_params, prompt)
+        return generator
+
+    async def _generate(
         self,
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
@@ -917,6 +933,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 req_status.out_token_info_list.clear()
         return
 
+    async def stop_request(self, request_id: int):
+        """停止指定 choice，保留同组其他请求。"""
+        from ..req_id_generator import convert_sub_id_to_group_id
+
+        req_status = self.req_id_to_out_inf.get(convert_sub_id_to_group_id(request_id))
+        if req_status is not None:
+            for req in req_status.group_req_objs.shm_req_objs:
+                if req.request_id == request_id and not req.finish_status.is_finished():
+                    req.is_aborted = True
+
     async def abort(self, group_req_id: int) -> bool:
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
         if req_status is None:
@@ -1046,17 +1072,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
 
-                                finished_token_index = (
-                                    req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
-                                )
-
-                                if finished_token_index != src_index:
+                                if req.finish_token_index != src_index:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
-                                    if req.stop_str_matched:
-                                        finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
-                                    else:
-                                        finish_status = FinishStatus(req.finish_status.status)
+                                    finish_status = FinishStatus(req.finish_status.status)
 
                                     await req.merge_final_token_metadata(
                                         metadata,

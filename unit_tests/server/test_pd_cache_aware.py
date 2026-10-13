@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,6 +13,36 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import (
     LoadBalancedCacheAwareSelector,
     PDSelectionExtraInfo,
 )
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import PromptCacheTree
+
+
+def test_prompt_cache_tree_long_prompt_insert_match_and_reinsert():
+    tree = PromptCacheTree()
+    # The sampled key must exceed the actual interpreter recursion limit.
+    prompt = "x" * ((sys.getrecursionlimit() + 512) * tree.sample_stride + 1)
+    tree.insert(prompt, "P0")
+    result = tree.prefix_match(prompt)
+    assert result.prefill_node == "P0"
+    assert result.matched_char_count == len(prompt)
+
+    tree.insert(prompt, "P1")
+    result = tree.prefix_match(prompt + "different suffix")
+    assert result.prefill_node == "P1"
+    assert result.matched_char_count == len(prompt)
+    assert len(tree._leaf_lru) == 1
+
+
+def test_prompt_cache_tree_long_prompt_eviction_and_branch_recency():
+    tree = PromptCacheTree(sample_stride=1, max_node_count=8, evict_node_batch=1)
+    tree.insert("abc-old", "P0")
+    tree.insert("abc-new", "P1")
+    assert tree.prefix_match("abc-new").prefill_node == "P1"
+    # Eviction must still run after a key longer than the recursion limit.
+    tree.insert("z" * (sys.getrecursionlimit() + 512), "P2")
+    assert tree._node_count <= tree.max_node_count
+    assert tree.prefix_match("abc-old").matched_char_count == 0
+    assert tree.prefix_match("abc-new").matched_char_count == 0
+    assert len(tree._leaf_lru) <= 1
 
 
 def _worker(address: str, dispatched_prompt_chars: int = 0, dispatched_req_num: int = 0):

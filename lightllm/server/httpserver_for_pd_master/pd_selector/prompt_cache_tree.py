@@ -40,7 +40,7 @@ class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    prompt 先按 sample_stride 抽稀成 key，再递归按单字符建树/匹配。
+    prompt 先按 sample_stride 抽稀成 key，再迭代按单字符建树/匹配。
     recursion_limit 在初始化时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
     整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
     """
@@ -106,11 +106,8 @@ class PromptCacheTree:
             self._evict_if_needed()
 
     def _insert_at(self, node: _PromptCacheNode, key: str, depth: int, prefill_node: str) -> None:
-        try:
-            if depth >= len(key):
-                return
-
-            ch = key[depth]
+        path = [node]
+        for ch in key[depth:]:
             child = node.children.get(ch)
             if child is None:
                 child = _PromptCacheNode(
@@ -122,8 +119,12 @@ class PromptCacheTree:
                 node.children[ch] = child
                 self._node_count += 1
 
-            self._insert_at(child, key, depth + 1, prefill_node)
-        finally:
+            node = child
+            path.append(node)
+
+        # Preserve the recursive implementation's leaf-to-root LRU refresh order
+        # without consuming one Python stack frame per sampled character.
+        for node in reversed(path):
             if node is not self.root:
                 node.last_prefill_node = prefill_node
                 node.last_insert_time = time.monotonic()
@@ -179,14 +180,13 @@ class PromptCacheTree:
             )
 
     def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:
-        if depth >= len(key):
-            return node, depth
-
-        child = node.children.get(key[depth])
-        if child is None:
-            return node, depth
-
-        return self._match_at(child, key, depth + 1)
+        while depth < len(key):
+            child = node.children.get(key[depth])
+            if child is None:
+                break
+            node = child
+            depth += 1
+        return node, depth
 
     def evict_lru_nodes(self) -> int:
         """节点数超上限时，按 LRU 从叶节点批量删除。

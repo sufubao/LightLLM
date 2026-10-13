@@ -41,9 +41,8 @@ def _launch_subprocesses(args: StartArgs):
     if args.target_vocab_topk_sampling is not None:
         # 在加载模型和启动子进程前拒绝该组合，避免候选裁剪使输出约束失效。
         # 数值冲突与后续兼容方案见 LlamaPostLayerInfer._target_lm_head_and_gather。
-        assert args.output_constraint_mode == "none" and not args.first_token_constraint_mode, (
-            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode outlines/xgrammar "
-            "or --first_token_constraint_mode: candidate pruning can cause forbidden tokens to be selected. "
+        assert args.output_constraint_mode == "none", (
+            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode xgrammar "
             "Disable --target_vocab_topk_sampling when using output constraints."
         )
 
@@ -137,12 +136,16 @@ def _launch_subprocesses(args: StartArgs):
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # mode setting check.
-    if args.output_constraint_mode != "none":
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
+    is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    if is_hybrid_model:
+        # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
+        assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
+        assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
+        # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。
+        assert not is_hybrid_model, "--diverse_mode does not support hybrid attention models"
+        assert not args.disable_dynamic_prompt_cache, "--diverse_mode requires dynamic prompt cache"
+        assert not args.disable_chunked_prefill, "--diverse_mode requires chunked prefill"
     if args.use_reward_model:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
@@ -183,7 +186,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.page_size > 1:
         # hybrid radix cache 的共享边界按 linear_att_hash_page_size 划分。只有该
         # 边界同时落在模型 KV 页面边界上，hold_kv_len 才能保持统一的分页语义。
-        is_hybrid_model = is_hybrid_att_model(args.model_dir)
         if is_hybrid_model and args.linear_att_hash_page_size % args.page_size != 0:
             raise ValueError(
                 "--linear_att_hash_page_size must be divisible by --page_size when paged KV cache is enabled"

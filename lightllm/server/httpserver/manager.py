@@ -14,7 +14,7 @@ from array import array
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator
+from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator, Sequence
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
@@ -24,6 +24,7 @@ from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from .stop_seq_match import wrap_stop_match_stream
+from .grammar import create_output_grammar_compiler
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -113,6 +114,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
@@ -261,24 +263,23 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     self.cache_client.root.release(ids_to_release)
         return
 
-    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
+    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
-        img_count = 0
         audio_tokens = 0
         audio_count = 0
         for img in multimodal_params.images:
-            img_count += 1
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
             token_num = self.tokenizer.get_image_token_length(img)
             self._assert_image_token_count(token_num)
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
-        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
+        # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
+        return len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def loop_for_request(self):
         assert self.args.node_rank > 0
@@ -345,6 +346,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
+        # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
+        compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
@@ -463,6 +466,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     self.tokenizer,
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
+                # None 表示没有输出约束；有约束时需在转发 Router 前发布编译结果，供推理进程加载。
+                if compiled_grammar is not None:
+                    req_obj.set_compiled_grammar(compiled_grammar)
                 req_objs.append(req_obj)
             self._log_stage_timing(
                 group_request_id,
@@ -564,12 +570,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
         pd_high_priority_request: bool = False,
         pd_node_resource_wait_timeout_seconds: int = -1,
     ) -> List[int]:
-        """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
+        """为一个请求一次性申请全部 shm_req 索引，等待时不占用部分槽。
 
         PD Master 下发非负值时启用资源等待超时，负数表示无限等待。多机 TP slave
         不独立限流，由 master 节点统一判断。请求优先级只影响重试间隔，不影响超时值。
         """
-        alloced_req_indexes = []
+        if req_num > self.args.running_max_req_size:
+            raise ValueError(
+                f"req_num ({req_num}) must not exceed running_max_req_size ({self.args.running_max_req_size})"
+            )
         alloc_timeout_seconds = None
         # 多机 TP 各 rank 必须保持请求执行一致；slave 若按本地计时独立超时退出，可能导致
         # master/其他 rank 继续进入 collective 而发生状态不一致或阻塞，因此超时由 master 统一决策。
@@ -577,32 +586,25 @@ class HttpServerManager(HttpRlManagerHelper, object):
             alloc_timeout_seconds = pd_node_resource_wait_timeout_seconds
         alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
 
-        try:
-            while len(alloced_req_indexes) < req_num:
-                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
-                sleep_time_factor = 0.2 if pd_high_priority_request else 1
-                sleep_time = 0.1
-                while alloc_req_index is None:
-                    if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
-                        logger.warning(
-                            f"{self.args.run_mode} node shm_req allocation timed out after "
-                            f"{alloc_timeout_seconds} seconds"
-                        )
-                        raise ServerBusyError(
-                            f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
-                            f"within {alloc_timeout_seconds} seconds"
-                        )
-                    await asyncio.sleep(sleep_time * sleep_time_factor)
-                    sleep_time = min(1, sleep_time * 1.1)
-                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                alloced_req_indexes.append(alloc_req_index)
-            return alloced_req_indexes
-        except BaseException:
-            # 批量申请中途失败时，释放已申请的索引，避免 shm_req 资源泄漏。
-            for req_index in alloced_req_indexes:
-                await self.shm_req_manager.async_release_req_index(req_index)
-            raise
+        # 空闲槽不足时整组重试，避免多个 n > 1 的请求各占部分槽后互相等待。
+        alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
+        sleep_time_factor = 0.2 if pd_high_priority_request else 1
+        sleep_time = 0.1
+        while alloced_req_indexes is None:
+            if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
+                logger.warning(
+                    f"{self.args.run_mode} node shm_req allocation timed out after "
+                    f"{alloc_timeout_seconds} seconds"
+                )  # fmt: skip
+                raise ServerBusyError(
+                    f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
+                    f"within {alloc_timeout_seconds} seconds"
+                )
+            await asyncio.sleep(sleep_time * sleep_time_factor)
+            sleep_time = min(1, sleep_time * 1.1)
+            alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        return alloced_req_indexes
 
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")
@@ -692,7 +694,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             self.max_req_total_len,
         )
 
-    async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
+    async def _check_and_repair_length(self, prompt_ids: Sequence[int], sampling_params: SamplingParams):
         if not prompt_ids:
             raise InvalidRequestError("The input prompt must not be empty.")
         prompt_tokens = len(prompt_ids)

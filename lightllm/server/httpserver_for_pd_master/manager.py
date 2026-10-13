@@ -23,6 +23,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
+from lightllm.server.httpserver.grammar import create_output_grammar_compiler
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -70,6 +71,7 @@ class HttpServerManagerForPDMaster:
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -111,16 +113,14 @@ class HttpServerManagerForPDMaster:
             pass
         return
 
-    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
-        kwargs = {} if kwargs is None else kwargs
+    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
+        kwargs = {"add_special_tokens": sampling_params.add_special_tokens, **(kwargs or {})}
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
-        img_count = 0
         audio_tokens = 0
         audio_count = 0
         for img in multimodal_params.images:
-            img_count += 1
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
             token_num = self.tokenizer.get_image_token_length(img)
             if token_num > self.args.max_image_token_count:
                 err_msg = (
@@ -133,9 +133,10 @@ class HttpServerManagerForPDMaster:
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
-        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
+        # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
+        return len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
@@ -191,7 +192,8 @@ class HttpServerManagerForPDMaster:
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
         input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
-        fake_prompt_ids = [0 for _ in range(input_token_num)]
+        # Length validation only checks emptiness and len(); no token list is needed.
+        fake_prompt_ids = range(input_token_num)
         from lightllm.server.httpserver.manager import HttpServerManager
 
         await HttpServerManager._check_and_repair_length(
@@ -345,7 +347,7 @@ class HttpServerManagerForPDMaster:
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
             # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
-            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的 block_prompt 长度。
+            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的输入长度。
             prompt_tokens = sys.maxsize
 
             # Decode 节点容量不足时会用专用状态结束当前分段。
@@ -373,6 +375,23 @@ class HttpServerManagerForPDMaster:
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
                 block_prompt = prompt + "".join(history_gen_token_strs)
                 pending_prefill_load_chars = len(block_prompt)
+                sampling_params.constraint_out_params.pd_previous_output_len = 0
+                if history_gen_token_strs and sampling_params.constraint_out_params.has_constraint():
+                    block_token_num = await asyncio.to_thread(
+                        self.tokens, block_prompt, multimodal_params, sampling_params
+                    )
+                    # 原始输入长度已在准入时计算；长度差作为重新编码后的历史输出长度。
+                    # TODO: 暂不处理 PD 分段续跑时的跨边界分词合并；该问题主要出现在 /generate
+                    # 原始字符串 prompt 的极少数边界，例如末尾空格与历史 JSON 开头 {" 合并。
+                    # 长度差可能漏掉历史前缀或包含 prompt 内容，导致语法恢复失败或输出不符合约束；
+                    # 仅影响当前请求，matcher 拒绝 token 会记录错误并结束请求，不会导致服务崩溃。
+                    # OpenAI Chat 的标准模板通常通过独立角色/思考分隔 token 和稳定换行保护边界，
+                    # 当前已验证模板下基本不会出现；使用原始 prompt 的 /v1/completions 仍有同类风险。
+                    # 后续需要严格支持时，应按真实输出 token 或完整历史文本恢复状态。
+                    # 分词边界合并可能使差值为负，按 0 处理，避免非法的重放长度。
+                    sampling_params.constraint_out_params.pd_previous_output_len = max(
+                        0, block_token_num - input_token_num
+                    )
                 p_node.dispatched_prompt_chars += pending_prefill_load_chars
                 p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(

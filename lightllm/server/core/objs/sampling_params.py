@@ -1,4 +1,5 @@
 import os
+import json
 import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
@@ -13,10 +14,10 @@ SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "False").upper() in ["ON"
 # 从环境变量获取最大长度限制
 STOP_SEQUENCE_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_MAX_LENGTH", 256))
 STOP_SEQUENCE_STR_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_STR_MAX_LENGTH", 256))
-ALLOWED_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_ALLOWED_TOKEN_IDS_MAX_LENGTH", 256))
 MAX_STOP_SEQUENCES = int(os.getenv("LIGHTLLM_MAX_STOP_SEQUENCES", 10))
 REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_LENGTH", 2048))
-GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 2048))
+# EBNF expanded from a small JSON schema is often several kilobytes.
+GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 8192))
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
@@ -142,12 +143,6 @@ class RegularConstraint(ctypes.Structure):
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
-        try:
-            import interegular
-
-            interegular.parse_pattern(constraint)
-        except Exception as e:
-            raise ValueError(f"regular_expression '{constraint}' has parse_pattern_error: {str(e)}")
         return
 
     def to_str(self):
@@ -167,15 +162,6 @@ class GuidedGrammar(ctypes.Structure):
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
-        try:
-            if self.length > 0 and tokenizer is not None and constraint != "json":
-                import xgrammar as xgr
-
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
-                xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-                xgrammar_compiler.compile_grammar(constraint)
-        except Exception as e:
-            raise ValueError(f"guided_grammar '{constraint}' has compile_grammar_error: {str(e)}")
         return
 
     def to_str(self):
@@ -191,21 +177,14 @@ class GuidedJsonSchema(ctypes.Structure):
         ("length", ctypes.c_int),
     ]
 
-    def initialize(self, constraint: str, tokenizer):
+    def initialize(self, constraint: Union[str, dict], tokenizer):
+        if isinstance(constraint, dict):
+            constraint = json.dumps(constraint, ensure_ascii=False, separators=(",", ":"))
         constraint_bytes = constraint.encode("utf-8")
         assert len(constraint_bytes) < JSON_SCHEMA_MAX_LENGTH, "Guided json schema is too long."
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
-        try:
-            if self.length > 0 and tokenizer is not None:
-                import xgrammar as xgr
-
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
-                xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-                xgrammar_compiler.compile_json_schema(constraint)
-        except Exception as e:
-            raise ValueError(f"guided_grammar '{constraint}' has compile_grammar_error: {str(e)}")
         return
 
     def to_str(self):
@@ -214,18 +193,45 @@ class GuidedJsonSchema(ctypes.Structure):
         return bytes(self.constraint[0 : self.length]).decode("utf-8").rstrip("\x00")
 
 
-class AllowedTokenIds(ctypes.Structure):
+class ConstraintOutParams(ctypes.Structure):
+    """Static parameters for output constraints and PD continuation."""
+
     _pack_ = 4
     _fields_ = [
-        ("ids", ctypes.c_int * ALLOWED_TOKEN_IDS_MAX_LENGTH),
-        ("size", ctypes.c_int),
+        # 正则表达式约束，限制模型生成的输出文本格式。
+        ("regular_constraint", RegularConstraint),
+        # EBNF 语法约束；特殊值 "json" 表示输出一个 JSON 对象。
+        ("guided_grammar", GuidedGrammar),
+        # JSON Schema 约束，限制输出 JSON 的类型、字段及取值。
+        ("guided_json", GuidedJsonSchema),
+        # 思考结束标记的 token ID 序列；完整匹配后，从下一个 token 开始启用输出约束。
+        # 标记本身不参与语法匹配，也不会触发请求停止；为空时立即启用输出约束。
+        ("guided_reasoning_end", StopSequence),
+        # PD 续跑输入末尾需要重放的 token 数，首段为 0。
+        # PD Master 按拼接文本与原始 prompt 的编码长度差设置，推理侧重放该后缀恢复思考和语法进度。
+        # 支持从序列化参数恢复该值。
+        ("pd_previous_output_len", ctypes.c_int),
     ]
 
-    def initialize(self, ids: List[int]):
-        self.size = _check_and_store_int_token_ids(self.ids, ids, ALLOWED_TOKEN_IDS_MAX_LENGTH, "allowed token ids")
+    def initialize(
+        self,
+        tokenizer,
+        regular_constraint: str,
+        guided_grammar: str,
+        guided_json: Union[str, dict],
+        guided_reasoning_end: List[int],
+        pd_previous_output_len: int = 0,
+    ):
+        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2 ** 31 - 1:
+            raise ValueError("pd_previous_output_len must be an integer in [0, 2147483647]")
+        self.regular_constraint.initialize(regular_constraint)
+        self.guided_grammar.initialize(guided_grammar, tokenizer)
+        self.guided_json.initialize(guided_json, tokenizer)
+        self.guided_reasoning_end.initialize(guided_reasoning_end)
+        self.pd_previous_output_len = pd_previous_output_len
 
-    def to_list(self):
-        return list(self.ids[: self.size])
+    def has_constraint(self):
+        return bool(self.regular_constraint.length or self.guided_grammar.length or self.guided_json.length)
 
 
 class InvalidTokenIds(ctypes.Structure):
@@ -299,13 +305,7 @@ class SamplingParams(ctypes.Structure):
         ("min_new_tokens", ctypes.c_int),
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
         ("input_penalty", ctypes.c_bool),
-        ("regular_constraint", RegularConstraint),
-        ("guided_grammar", GuidedGrammar),
-        ("guided_json", GuidedJsonSchema),
-        # If provided, the engine will construct a logits,
-        # processor which only retains scores for the given token ids. Defaults to None.
-        # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
-        ("allowed_token_ids", AllowedTokenIds),
+        ("constraint_out_params", ConstraintOutParams),
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
@@ -353,6 +353,7 @@ class SamplingParams(ctypes.Structure):
     _top_k: int = -1  # -1 is for all
 
     def init(self, tokenizer, **kwargs):
+        """Initialize and validate sampling parameters synchronously."""
         super().__init__()
         self.best_of = kwargs.get("best_of", 1)
         self.n = kwargs.get("n", self.best_of)
@@ -371,7 +372,7 @@ class SamplingParams(ctypes.Structure):
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
-        # 这两个字段是 PD Master 的内部调度信息，不能由外部请求参数开启或修改。
+        # PD Master 的内部调度信息，不能由外部请求参数开启或修改。
         self.pd_high_priority_request = False
         self.pd_node_resource_wait_timeout_seconds = -1
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
@@ -395,20 +396,15 @@ class SamplingParams(ctypes.Structure):
         self.pd_master_node_id = NodeUUId()
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
-        # Initialize regular_constraint
-        regular_constraint = kwargs.get("regular_constraint", "")
-        self.regular_constraint = RegularConstraint()
-        self.regular_constraint.initialize(regular_constraint)
-
-        # Initialize guided_grammar
-        guided_grammar = kwargs.get("guided_grammar", "")
-        self.guided_grammar = GuidedGrammar()
-        self.guided_grammar.initialize(guided_grammar, tokenizer)
-
-        # Initialize guided_json
-        guided_json = kwargs.get("guided_json", "")
-        self.guided_json = GuidedJsonSchema()
-        self.guided_json.initialize(guided_json, tokenizer)
+        self.constraint_out_params = ConstraintOutParams()
+        self.constraint_out_params.initialize(
+            tokenizer=tokenizer,
+            regular_constraint=kwargs.get("regular_constraint", ""),
+            guided_grammar=kwargs.get("guided_grammar", ""),
+            guided_json=kwargs.get("guided_json", ""),
+            guided_reasoning_end=kwargs.get("guided_reasoning_end", []),
+            pd_previous_output_len=kwargs.get("pd_previous_output_len", 0),
+        )
 
         # Initialize stop_sequence_groups
         stop_sequences = kwargs.get("stop_sequences", [])
@@ -418,11 +414,6 @@ class SamplingParams(ctypes.Structure):
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
         # 运行时状态由 StopStrMatchBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
-
-        # Initialize allowed_token_ids
-        allowed_token_ids = kwargs.get("allowed_token_ids", [])
-        self.allowed_token_ids = AllowedTokenIds()
-        self.allowed_token_ids.initialize(allowed_token_ids)
 
         # Initialize invalid_token_ids
         invalid_token_ids = map(int, kwargs.get("logit_bias", {}).keys())
@@ -491,7 +482,6 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
         if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
-        self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 
         return
@@ -504,22 +494,37 @@ class SamplingParams(ctypes.Structure):
         return seed
 
     def _verify_grammar_constraint(self):
-        if self.guided_grammar.length != 0:
-            if self.regular_constraint.length != 0:
+        if self.constraint_out_params.guided_grammar.length != 0:
+            if self.constraint_out_params.regular_constraint.length != 0:
                 raise ValueError("guided_grammar and regular_constraint can not be used in same time")
-            if self.guided_json.length != 0:
+            if self.constraint_out_params.guided_json.length != 0:
                 raise ValueError("guided_grammar and guided_json can not be used in same time")
         return
 
-    def _verify_allowed_token_ids(self):
-        if self.allowed_token_ids.size != 0:
-            if self.regular_constraint.length != 0:
-                raise ValueError("allowed_token_ids and regular_constraint can not be used in same time")
-            if self.guided_grammar.length != 0:
-                raise ValueError("allowed_token_ids and guided_grammar can not be used in same time")
-            if self.guided_json.length != 0:
-                raise ValueError("allowed_token_ids and guided_json can not be used in same time")
-        return
+    async def verify_cpu_async(self, compiler) -> None:
+        """Run CPU-heavy validation before admission or HTTP streaming.
+
+        Each validator must offload expensive work to keep the event loop responsive.
+        Ordinary sampling parameters are already validated synchronously by init().
+        """
+        await self.verify_output_constraint(compiler)
+
+    async def verify_output_constraint(self, compiler) -> None:
+        """在请求准入或发送流式响应头前完成编译校验；结果由编译器缓存，不保存在采样参数对象上。"""
+        await self.get_compiled_grammar(compiler)
+
+    async def get_compiled_grammar(self, compiler) -> Optional[bytes]:
+        """获取编译器缓存中的结果，未命中时执行异步编译；无输出约束时返回 None。"""
+        for kind, constraint in (
+            ("grammar", self.constraint_out_params.guided_grammar),
+            ("regex", self.constraint_out_params.regular_constraint),
+            ("json", self.constraint_out_params.guided_json),
+        ):
+            if constraint.length:
+                if compiler is None:
+                    raise ValueError("Output constraints require --output_constraint_mode xgrammar")
+                return await compiler.compile(kind, constraint.to_str())
+        return None
 
     def to_dict(self):
         return {
@@ -543,10 +548,11 @@ class SamplingParams(ctypes.Structure):
             "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,
             "input_penalty": self.input_penalty,
-            "regular_constraint": self.regular_constraint.to_str(),
-            "guided_grammar": self.guided_grammar.to_str(),
-            "guided_json": self.guided_json.to_str(),
-            "allowed_token_ids": self.allowed_token_ids.to_list(),
+            "regular_constraint": self.constraint_out_params.regular_constraint.to_str(),
+            "guided_grammar": self.constraint_out_params.guided_grammar.to_str(),
+            "guided_json": self.constraint_out_params.guided_json.to_str(),
+            "guided_reasoning_end": self.constraint_out_params.guided_reasoning_end.to_list(),
+            "pd_previous_output_len": self.constraint_out_params.pd_previous_output_len,
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
             "pd_high_priority_request": self.pd_high_priority_request,

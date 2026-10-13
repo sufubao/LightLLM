@@ -12,8 +12,9 @@ from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 from .logprob_utils import logprob_info
 from .token_metadata import ReqFinalTokenMetadata
 
@@ -274,6 +275,29 @@ class Req(ctypes.Structure):
         hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
         self.hybrid_token_hash_list.fill(hash_values)
         return
+
+    def set_compiled_grammar(self, payload: bytes) -> None:
+        """在请求转发 Router 前，将 HTTP 侧编译好的语法写入当前请求槽的共享内存。"""
+        if not payload:
+            return
+        # 共享内存按请求槽复用，只在旧请求释放该槽后重建。
+        # 按编译结果的实际长度创建内存块，读取侧直接使用块长度，无需在 Req 中另存长度字段。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", len(payload), force_mode="create")
+        try:
+            shm.buf[: len(payload)] = payload
+        finally:
+            shm.close()
+
+    def get_compiled_grammar(self) -> Optional[bytes]:
+        # 无约束请求跳过读取，避免请求槽复用时误读旧请求留下的语法。
+        if not self.sample_params.constraint_out_params.has_constraint():
+            return None
+        # 只连接写入侧已发布的内存块，读取整个块即可取得完整编译结果。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", -1, force_mode="link")
+        try:
+            return bytes(shm.buf)
+        finally:
+            shm.close()
 
     def create_prompt_ids_shm_array(self):
         name = f"shm_prompts_{self.index_in_shm_mem}"

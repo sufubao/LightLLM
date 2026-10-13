@@ -169,20 +169,31 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     """Whether this request uses forced thinking / reasoning (parser + template)."""
     from .build_prompt import tokenizer_supports_force_thinking
 
-    if not tokenizer_supports_force_thinking():
-        return False
-
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
-    if reasoning_parser in ["qwen3-thinking", "gpt-oss", "minimax"]:
+    # Always-thinking models may have no thinking switch in their chat template.
+    # Their answer grammar must wait for the reasoning delimiter nonetheless.
+    if reasoning_parser in ["deepseek-r1", "qwen3-thinking", "gpt-oss", "minimax"]:
         return True
+    if not tokenizer_supports_force_thinking():
+        return False
     if reasoning_parser in ["deepseek-v3"]:
         return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
         # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
         return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True
     return True  # default
+
+
+def _get_guided_reasoning_end(request: ChatCompletionRequest, tokenizer) -> List[int]:
+    """Use the same thinking mode as the chat template for grammar activation."""
+    if not _is_force_thinking_mode(request):
+        return []
+    parser_name = get_env_start_args().reasoning_parser
+    detector = ReasoningParser.DetectorMap[parser_name.lower()]()
+    token_ids = tokenizer.encode(detector.grammar_start_token, add_special_tokens=False)
+    return token_ids
 
 
 def _process_reasoning_stream(
@@ -377,10 +388,15 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+        if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
+            sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
+                request, g_objs.httpserver_manager.tokenizer
+            )
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
-    sampling_params.verify()
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
@@ -898,7 +914,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-    sampling_params.verify()
+    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
     # v1/completions does not support multimodal inputs, so we use an empty MultimodalParams
     multimodal_params = MultimodalParams()

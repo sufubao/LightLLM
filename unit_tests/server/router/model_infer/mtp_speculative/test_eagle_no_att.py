@@ -16,12 +16,12 @@ def test_eagle_no_att_recurrently_proposes_from_accepted_tails():
         SimpleNamespace(
             token_ids=torch.tensor([21, 24], device=device),
             token_probs=torch.tensor([0.8, 0.7], device=device),
-            mtp_collector=SimpleNamespace(spec_hidden=torch.tensor([[102.0, 103.0], [108.0, 109.0]], device=device)),
+            mtp_output=SimpleNamespace(spec_hidden=torch.tensor([[102.0, 103.0], [108.0, 109.0]], device=device)),
         ),
         SimpleNamespace(
             token_ids=torch.tensor([31, 34], device=device),
             token_probs=torch.tensor([0.6, 0.5], device=device),
-            mtp_collector=SimpleNamespace(spec_hidden=torch.tensor([[202.0, 203.0], [208.0, 209.0]], device=device)),
+            mtp_output=SimpleNamespace(spec_hidden=torch.tensor([[202.0, 203.0], [208.0, 209.0]], device=device)),
         ),
     ]
 
@@ -58,7 +58,7 @@ def test_eagle_no_att_recurrently_proposes_from_accepted_tails():
         multimodal_params=[{"images": [], "audios": []} for _ in range(5)],
     )
     target_model_output = SimpleNamespace(
-        mtp_collector=SimpleNamespace(spec_hidden=torch.arange(10, dtype=torch.float32, device=device).reshape(5, 2))
+        mtp_output=SimpleNamespace(spec_hidden=torch.arange(10, dtype=torch.float32, device=device).reshape(5, 2))
     )
 
     proposal = proposer.propose_next(

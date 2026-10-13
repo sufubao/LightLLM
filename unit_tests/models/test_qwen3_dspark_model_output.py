@@ -4,7 +4,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel import batch_objs
-from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelMtpOutput, ModelOutput
+from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.mtp_collector import MtpHeadCollector
 from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
 from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
 from lightllm.models.qwen3_dflash.layer_infer import transformer_layer_infer as qwen3_dflash_layer_infer
@@ -98,7 +100,7 @@ def test_dspark_decode_unpad_uses_common_output_and_slices_mtp_fields(model_clas
     model = model_class.__new__(model_class)
     output = ModelOutput(
         logits=torch.arange(48).view(12, 4),
-        mtp_collector=ModelMtpOutputCollector(
+        mtp_output=ModelMtpOutput(
             spec_hidden=torch.arange(36).view(12, 3),
             confidence_logits=torch.arange(12).view(3, 4),
             draft_token_ids=torch.arange(12),
@@ -109,19 +111,19 @@ def test_dspark_decode_unpad_uses_common_output_and_slices_mtp_fields(model_clas
 
     assert isinstance(unpadded, ModelOutput)
     assert unpadded.logits.shape == (8, 4)
-    assert unpadded.mtp_collector.spec_hidden.shape == (8, 3)
-    assert unpadded.mtp_collector.confidence_logits.shape == (2, 4)
-    assert unpadded.mtp_collector.draft_token_ids.shape == (8,)
+    assert unpadded.mtp_output.spec_hidden.shape == (8, 3)
+    assert unpadded.mtp_output.confidence_logits.shape == (2, 4)
+    assert unpadded.mtp_output.draft_token_ids.shape == (8,)
     assert output.logits.shape == (12, 4)
-    assert output.mtp_collector.confidence_logits.shape == (3, 4)
-    assert output.mtp_collector.draft_token_ids.shape == (12,)
+    assert output.mtp_output.confidence_logits.shape == (3, 4)
+    assert output.mtp_output.draft_token_ids.shape == (12,)
 
 
 def test_common_output_no_ref_conversion_includes_dspark_fields(monkeypatch):
     monkeypatch.setattr(batch_objs, "tensor_to_no_ref_tensor", torch.clone)
     output = ModelOutput(
         logits=torch.ones((2, 4)),
-        mtp_collector=ModelMtpOutputCollector(
+        mtp_output=ModelMtpOutput(
             spec_hidden=torch.ones((2, 3)),
             confidence_logits=torch.ones((1, 2)),
             draft_token_ids=torch.ones((2,), dtype=torch.int64),
@@ -129,23 +131,23 @@ def test_common_output_no_ref_conversion_includes_dspark_fields(monkeypatch):
     )
     original_ptrs = (
         output.logits.data_ptr(),
-        output.mtp_collector.spec_hidden.data_ptr(),
-        output.mtp_collector.confidence_logits.data_ptr(),
-        output.mtp_collector.draft_token_ids.data_ptr(),
+        output.mtp_output.spec_hidden.data_ptr(),
+        output.mtp_output.confidence_logits.data_ptr(),
+        output.mtp_output.draft_token_ids.data_ptr(),
     )
 
     output.to_no_ref_tensor()
 
     converted_ptrs = (
         output.logits.data_ptr(),
-        output.mtp_collector.spec_hidden.data_ptr(),
-        output.mtp_collector.confidence_logits.data_ptr(),
-        output.mtp_collector.draft_token_ids.data_ptr(),
+        output.mtp_output.spec_hidden.data_ptr(),
+        output.mtp_output.confidence_logits.data_ptr(),
+        output.mtp_output.draft_token_ids.data_ptr(),
     )
     assert all(converted != original for converted, original in zip(converted_ptrs, original_ptrs))
 
 
-def test_dspark_post_layer_publishes_head_results_through_collector():
+def test_dspark_post_layer_returns_head_results():
     post_infer = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
     post_infer.block_size_ = 2
     post_infer.markov_rank_ = 2
@@ -158,19 +160,13 @@ def test_dspark_post_layer_publishes_head_results_through_collector():
     confidence_logits = torch.arange(4, dtype=torch.float32).view(2, 2)
     post_infer.predict_confidence_logits = lambda *args, **kwargs: confidence_logits
 
-    class RecordingCollector:
-        def add_mtp_outputs(self, **kwargs):
-            self.outputs = kwargs
-
     class LMHead:
         def __call__(self, input, alloc_func):
             return torch.empty((8, input.shape[1]))
 
-    collector = RecordingCollector()
     infer_state = SimpleNamespace(
         is_prefill=False,
         input_ids=torch.tensor([10, 0, 20, 0]),
-        hidden_collector=collector,
     )
     layer_weight = SimpleNamespace(lm_head_weight_=LMHead())
 
@@ -182,11 +178,21 @@ def test_dspark_post_layer_publishes_head_results_through_collector():
 
     assert output.logits.shape == (4, 1)
     assert output.logits_token_ids is None
-    assert torch.equal(collector.outputs["draft_token_ids"], torch.tensor([1, 2, 3, 4]))
-    assert collector.outputs["confidence_logits"] is confidence_logits
+    assert torch.equal(output.draft_token_ids, torch.tensor([1, 2, 3, 4]))
+    assert output.confidence_logits is confidence_logits
+
+    collector = MtpHeadCollector()
+    state = SimpleNamespace(mtp_collector=collector, prompt_logics=None)
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model_output = model._create_model_output(output, state)
+    assert model_output.mtp_output.draft_token_ids is output.draft_token_ids
+    assert model_output.mtp_output.confidence_logits is confidence_logits
+    assert collector.draft_token_ids is None
+    assert collector.confidence_logits is None
 
 
-def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids():
+@pytest.mark.parametrize("confidence", [False, True])
+def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids(confidence):
     post_infer = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
     post_infer.block_size_ = 2
     post_infer.markov_rank_ = 0
@@ -196,6 +202,7 @@ def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids():
         logits_token_ids=torch.tensor([[10, 20], [30, 40], [50, 60], [70, 80]]),
     )
     observed = {}
+    confidence_logits = torch.ones(2, 2) if confidence else None
     hidden = torch.randn(4, 3)
     post_infer._norm = lambda hidden, infer_state, layer_weight: hidden + 1
 
@@ -207,26 +214,29 @@ def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids():
 
     def predict_confidence_logits(*args, sampled_tokens, **kwargs):
         observed["sampled_tokens"] = sampled_tokens
-        return None
+        return confidence_logits
 
     post_infer.predict_confidence_logits = predict_confidence_logits
 
-    class RecordingCollector:
-        def add_mtp_outputs(self, **kwargs):
-            self.outputs = kwargs
-
-    collector = RecordingCollector()
     infer_state = SimpleNamespace(
         is_prefill=False,
         input_ids=torch.tensor([10, 0, 20, 0]),
-        hidden_collector=collector,
     )
 
     output = post_infer.token_forward(hidden, infer_state, object())
 
     assert output is candidate_output
+    assert output.final_hidden is None
     assert observed["sampled_tokens"] is None
-    assert collector.outputs["draft_token_ids"] is None
+    assert output.draft_token_ids is None
+    assert output.confidence_logits is confidence_logits
+
+    state = SimpleNamespace(mtp_collector=MtpHeadCollector(), prompt_logics=None)
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model_output = model._create_model_output(output, state)
+    assert model_output.logits_token_ids is candidate_output.logits_token_ids
+    assert model_output.mtp_output.draft_token_ids is None
+    assert model_output.mtp_output.confidence_logits is confidence_logits
 
 
 @pytest.mark.parametrize(

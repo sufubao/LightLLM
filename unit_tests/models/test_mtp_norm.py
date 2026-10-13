@@ -99,7 +99,7 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
     post._tpsp_allgather = lambda input, infer_state: input
 
     def forward(hidden, weight, producer):
-        state.hidden_collector = manager.create_hidden_collector(producer)
+        state.mtp_collector = manager.create_mtp_collector(producer)
         state.final_hidden_policy = manager.get_final_hidden_policy(producer)
         model.pre_post_weight = weight
         model.pre_infer = SimpleNamespace(
@@ -138,14 +138,14 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
     hidden = torch.tensor([[1.0, 2.0, -3.0], [4.0, -2.0, 1.0]], device=device, dtype=dtype)
     expected = collected(hidden, main_weight, producers[0])
     output = forward(hidden, main_weight, producers[0])
-    torch.testing.assert_close(output.mtp_collector.spec_hidden, expected)
+    torch.testing.assert_close(output.mtp_output.spec_hidden, expected)
     torch.testing.assert_close(output.logits, (reference_norm(hidden, main_norm) @ projection.T).float())
-    assert state.hidden_collector.final_hidden is None
+    assert state.mtp_collector.final_hidden is None
 
     state.is_draft_model = True
     for step in range(2):
         embedding = torch.tensor([[2.0, -1.0, 3.0], [-3.0, 2.0, 1.0]], device=device, dtype=dtype) + step
-        state.mtp_draft_input_hiddens = output.mtp_collector.spec_hidden
+        state.mtp_draft_input_hiddens = output.mtp_output.spec_hidden
         fusion_hidden = reference_norm(expected, main_norm) if family == "mistral" else expected
         expected_fused = (
             torch.cat(
@@ -164,14 +164,14 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
         torch.testing.assert_close(fused, expected_fused)
         expected = collected(expected_fused, draft_weight, producers[1])
         output = forward(fused, draft_weight, producers[1])
-        torch.testing.assert_close(output.mtp_collector.spec_hidden, expected)
+        torch.testing.assert_close(output.mtp_output.spec_hidden, expected)
         torch.testing.assert_close(
             output.logits,
             (reference_norm(expected_fused, draft_weight.final_norm_weight_) @ projection.T).float(),
             atol=0.02 if device == "cuda" else 1e-5,
             rtol=0.02 if device == "cuda" else 1e-5,
         )
-        assert state.hidden_collector.final_hidden is None
+        assert state.mtp_collector.final_hidden is None
         if family not in ("mistral", "qwen3_moe"):
             assert not torch.allclose(
                 reference_norm(expected_fused, draft_norm), reference_norm(expected_fused, main_norm)

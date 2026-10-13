@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import lightllm.common.basemodel.attention.base_att as base_att_module
-import lightllm.common.basemodel.hidden_collector as hidden_collector_module
+import lightllm.common.basemodel.mtp_collector as mtp_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
@@ -119,7 +119,7 @@ def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
         req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4)),
     )
     state = state_class(
-        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1),
+        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1, infer_page_size=1),
         infer_state=infer_state,
     )
 
@@ -261,7 +261,7 @@ def test_draft_model_registry_rejects_unsupported_mode(model_type, spec_mode):
         )
 
 
-def test_hidden_collector_reads_target_layer_ids(monkeypatch):
+def test_mtp_collector_reads_target_layer_ids(monkeypatch):
     config_reads = []
 
     def get_config_dict(path):
@@ -269,18 +269,18 @@ def test_hidden_collector_reads_target_layer_ids(monkeypatch):
         return {"target_layer_ids": [1, 20, 36]}, {}
 
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig,
+        mtp_collector_module.PretrainedConfig,
         "get_config_dict",
         get_config_dict,
     )
     monkeypatch.setattr(
-        hidden_collector_module,
+        mtp_collector_module,
         "get_env_start_args",
         lambda: SimpleNamespace(mtp_draft_model_dir=["/models/dspark"]),
     )
     model = SimpleNamespace(is_mtp_draft_model=False, layers_num=40)
 
-    collector = hidden_collector_module.LayerHiddenCollector(model=model)
+    collector = mtp_collector_module.LayerHiddenMtpCollector(model=model)
     new_collector = collector.new_instance()
 
     assert collector.layer_ids == frozenset((1, 20, 36))

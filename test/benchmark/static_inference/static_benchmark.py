@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.api_cli import make_argument_parser
@@ -300,7 +300,7 @@ class StaticBenchmarkExecutor:
             draft_input = self._prepare_mtp_prefill_input(
                 model_input=draft_input,
                 b_next_token_ids=current_next_ids,
-                mtp_draft_input_hiddens=draft_output.mtp_collector.spec_hidden,
+                mtp_draft_input_hiddens=draft_output.mtp_output.spec_hidden,
             )
             draft_output = self.draft_models[draft_index].forward(draft_input)
             current_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
@@ -435,7 +435,7 @@ class StaticBenchmarkExecutor:
 
         for step in range(self.args.mtp_step):
             draft_input.input_ids = draft_next_ids
-            draft_input.mtp_draft_input_hiddens = draft_output.mtp_collector.spec_hidden
+            draft_input.mtp_draft_input_hiddens = draft_output.mtp_output.spec_hidden
             draft_model = self.draft_models[step % self._num_mtp_modules()]
             draft_output = draft_model.forward(draft_input)
             draft_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
@@ -689,18 +689,18 @@ class StaticBenchmarkExecutor:
 
         return ModelOutput(
             logits=torch.cat((output0.logits, output1.logits), dim=0),
-            mtp_collector=ModelMtpOutputCollector(
+            mtp_output=ModelMtpOutput(
                 spec_hidden=concat_optional(
-                    output0.mtp_collector.spec_hidden,
-                    output1.mtp_collector.spec_hidden,
+                    output0.mtp_output.spec_hidden,
+                    output1.mtp_output.spec_hidden,
                 ),
                 draft_token_ids=concat_optional(
-                    output0.mtp_collector.draft_token_ids,
-                    output1.mtp_collector.draft_token_ids,
+                    output0.mtp_output.draft_token_ids,
+                    output1.mtp_output.draft_token_ids,
                 ),
                 confidence_logits=concat_optional(
-                    output0.mtp_collector.confidence_logits,
-                    output1.mtp_collector.confidence_logits,
+                    output0.mtp_output.confidence_logits,
+                    output1.mtp_output.confidence_logits,
                 ),
             ),
             prefill_mem_indexes_ready_event=(

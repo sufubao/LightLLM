@@ -228,7 +228,7 @@ def test_infer_state_carries_effective_final_hidden_policy(monkeypatch, is_prefi
     model.mtp_final_hidden_policy = policy
     model.mtp_manager = MtpManager.__new__(MtpManager)
     model.mtp_manager.args = SimpleNamespace(mtp_mode=mode)
-    model._init_hidden_collector()
+    model._init_mtp_collector()
     model.return_all_prompt_logics = False
     model.mem_manager = model.req_manager = None
     model._select_mem_indexes = lambda model_input: None
@@ -241,4 +241,4 @@ def test_infer_state_carries_effective_final_hidden_policy(monkeypatch, is_prefi
 
     expected = policy if mode == "vanilla_with_att" else FinalHiddenPolicy.NONE
     assert state.final_hidden_policy is expected
-    assert not hasattr(state.hidden_collector, "final_hidden_policy")
+    assert not hasattr(state.mtp_collector, "final_hidden_policy")

@@ -44,7 +44,7 @@ def test_chained_prefill_advances_local_input_without_mutating_target():
             )
             return SimpleNamespace(
                 token_ids=output_tokens,
-                mtp_collector=SimpleNamespace(spec_hidden=output_hidden),
+                mtp_output=SimpleNamespace(spec_hidden=output_hidden),
             )
 
         return SimpleNamespace(forward=forward)
@@ -62,7 +62,7 @@ def test_chained_prefill_advances_local_input_without_mutating_target():
 
     proposer.fill_draft_model_kv_state(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=torch.tensor([13, 23], dtype=torch.int64, device=device),
     )
 
@@ -105,7 +105,7 @@ def test_overlap_chained_prefill_uses_local_microbatch_inputs(monkeypatch):
             return tuple(
                 SimpleNamespace(
                     token_ids=torch.full((2,), self.token_offset + index, dtype=torch.int64),
-                    mtp_collector=SimpleNamespace(spec_hidden=hidden + self.token_offset),
+                    mtp_output=SimpleNamespace(spec_hidden=hidden + self.token_offset),
                 )
                 for index, hidden in enumerate((target_hidden0, target_hidden1))
             )
@@ -119,10 +119,10 @@ def test_overlap_chained_prefill_uses_local_microbatch_inputs(monkeypatch):
 
     proposer.fill_draft_model_kv_state_overlap(
         target_model_input0=target_input0,
-        target_model_output0=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden0)),
+        target_model_output0=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden0)),
         target_next_token_ids0=torch.tensor([5, 6], dtype=torch.int64),
         target_model_input1=target_input1,
-        target_model_output1=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden1)),
+        target_model_output1=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden1)),
         target_next_token_ids1=torch.tensor([7, 8], dtype=torch.int64),
     )
 
@@ -163,7 +163,7 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
             return SimpleNamespace(
                 token_ids=output_tokens,
                 token_probs=output_probs,
-                mtp_collector=SimpleNamespace(spec_hidden=output_hidden),
+                mtp_output=SimpleNamespace(spec_hidden=output_hidden),
             )
 
         return SimpleNamespace(forward=forward)
@@ -190,7 +190,7 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
 
     proposal = proposer.propose_next(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=original_input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32, device=device),
         draft_step=3,
@@ -229,7 +229,7 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
     with pytest.raises(AssertionError, match="requires the full chained draft depth"):
         proposer.propose_next(
             target_model_input=target_input,
-            target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
+            target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
             target_next_token_ids=original_input_ids,
             b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32, device=device),
             draft_step=2,

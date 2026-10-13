@@ -1,12 +1,12 @@
 from typing import ClassVar, Optional
 
 from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
-from lightllm.common.basemodel.hidden_collector import (
-    FinalHiddenCollector,
-    HiddenCollector,
-    LayerHiddenCollector,
-    MtpHeadOutputCollector,
-    NoopHiddenCollector,
+from lightllm.common.basemodel.mtp_collector import (
+    FinalHiddenMtpCollector,
+    MtpCollector,
+    LayerHiddenMtpCollector,
+    MtpHeadCollector,
+    NoopMtpCollector,
 )
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -75,27 +75,27 @@ class MtpManager:
             return FinalHiddenPolicy.NONE
         return getattr(model, "mtp_final_hidden_policy", FinalHiddenPolicy.PRE_NORM)
 
-    def create_hidden_collector(
+    def create_mtp_collector(
         self,
         model,
-    ) -> HiddenCollector:
+    ) -> MtpCollector:
         """Create a model-local hidden-collector prototype for the configured MTP mode."""
 
         spec_mode = self.args.mtp_mode
         collector_kwargs = {}
         if spec_mode is None:
-            collector_type = NoopHiddenCollector
+            collector_type = NoopMtpCollector
         elif model.is_mtp_draft_model:
             if spec_mode == "dspark":
-                collector_type = MtpHeadOutputCollector
+                collector_type = MtpHeadCollector
             elif spec_mode in self._BLOCK_DRAFT_MODES:
-                collector_type = NoopHiddenCollector
+                collector_type = NoopMtpCollector
             else:
-                collector_type = FinalHiddenCollector
+                collector_type = FinalHiddenMtpCollector
         elif spec_mode in ("eagle3", *self._BLOCK_DRAFT_MODES):
-            collector_type = LayerHiddenCollector
+            collector_type = LayerHiddenMtpCollector
             collector_kwargs.update(model=model)
         else:
-            collector_type = FinalHiddenCollector
+            collector_type = FinalHiddenMtpCollector
 
         return collector_type(**collector_kwargs)

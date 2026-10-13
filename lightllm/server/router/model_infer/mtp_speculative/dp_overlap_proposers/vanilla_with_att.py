@@ -42,8 +42,8 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
 
         model_inputs = [copy.copy(model_input) for model_input in target_model_inputs]
         draft_hiddens = [
-            target_model_output0.mtp_collector.spec_hidden,
-            target_model_output1.mtp_collector.spec_hidden,
+            target_model_output0.mtp_output.spec_hidden,
+            target_model_output1.mtp_output.spec_hidden,
         ]
         draft_token_ids = list(target_next_token_ids)
 
@@ -56,7 +56,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
                 )
             draft_outputs = draft_model._microbatch_overlap_prefill_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
-                draft_hiddens[batch_index] = draft_output.mtp_collector.spec_hidden
+                draft_hiddens[batch_index] = draft_output.mtp_output.spec_hidden
                 draft_token_ids[batch_index] = self.backend._gen_argmax_token_ids(draft_output)
 
     def propose_next_overlap(
@@ -99,8 +99,8 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         model_inputs = [copy.copy(target_model_input0), copy.copy(target_model_input1)]
         draft_token_ids = [target_next_token_ids0, target_next_token_ids1]
         draft_hiddens = [
-            target_model_output0.mtp_collector.spec_hidden,
-            target_model_output1.mtp_collector.spec_hidden,
+            target_model_output0.mtp_output.spec_hidden,
+            target_model_output1.mtp_output.spec_hidden,
         ]
         proposal_token_ids = target_next_token_ids0.new_empty((sum(req_num_by_batch), draft_step))
         proposal_schedule_scores = (
@@ -121,7 +121,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
 
             draft_outputs = self.backend.draft_models[step]._microbatch_overlap_decode_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
-                draft_hiddens[batch_index] = draft_output.mtp_collector.spec_hidden
+                draft_hiddens[batch_index] = draft_output.mtp_output.spec_hidden
                 if self.enable_dynmaic_mtp:
                     draft_token_ids[batch_index], draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(
                         draft_output

@@ -5,7 +5,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, PostLayerOutput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, NoopHiddenCollector
+from lightllm.common.basemodel.mtp_collector import FinalHiddenMtpCollector, NoopMtpCollector
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk
 from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
     pack_vocab_parallel_topk,
@@ -297,7 +297,7 @@ def test_model_output_and_unpadding_preserve_candidate_mapping() -> None:
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     logits = torch.randn(3, 2)
     ids = torch.tensor([[10, 20], [30, 40], [50, 60]])
-    state = SimpleNamespace(hidden_collector=NoopHiddenCollector(), prompt_logics=None)
+    state = SimpleNamespace(mtp_collector=NoopMtpCollector(), prompt_logics=None)
     output = model._create_model_output(PostLayerOutput(logits, ids), state)
     unpadded = model._create_unpad_decode_model_output(output, 2)
     torch.testing.assert_close(unpadded.logits, logits[:2])
@@ -432,14 +432,14 @@ def test_reward_hidden_policy(model_name, hidden_policy):
         score_down_weight_=SimpleNamespace(mm=lambda value: value @ score_weight),
         score_head_=SimpleNamespace(mm=lambda value: value @ score_weight),
     )
-    collector = NoopHiddenCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenCollector()
+    collector = NoopMtpCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenMtpCollector()
     state = SimpleNamespace(
         is_prefill=True,
         batch_size=2,
         b_seq_len=torch.tensor([2, 3]),
         b_ready_cache_len=torch.zeros(2, dtype=torch.long),
         return_all_prompt_logics=False,
-        hidden_collector=collector,
+        mtp_collector=collector,
         final_hidden_policy=hidden_policy,
     )
     output = head.token_forward(hidden, state, weight)
@@ -452,7 +452,7 @@ def test_reward_hidden_policy(model_name, hidden_policy):
     else:
         assert output.final_hidden is None
     assert norm_rows == [5 if hidden_policy is FinalHiddenPolicy.POST_NORM else 2]
-    collector.add_final_hidden(output.final_hidden)
+    collector.collect_post_output(output)
     collected = collector.finish_output(state).spec_hidden
     if hidden_policy is FinalHiddenPolicy.NONE:
         assert collected is None
@@ -493,7 +493,7 @@ def test_model_does_not_fallback_to_raw_hidden(monkeypatch, forward):
     def state():
         return SimpleNamespace(
             input_ids=torch.ones(2, dtype=torch.long),
-            hidden_collector=FinalHiddenCollector(),
+            mtp_collector=FinalHiddenMtpCollector(),
             need_dp_prefill_balance=False,
             call_overlap_hook=lambda: None,
         )

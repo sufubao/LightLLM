@@ -5,31 +5,31 @@ import pytest
 
 from lightllm.common.basemodel import basemodel
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutput, ModelOutput
 
 
 def test_decode_unpad_slices_spec_output_with_logits():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(24).view(6, 4),
-        mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(18).view(6, 3)),
+        mtp_output=ModelMtpOutput(spec_hidden=torch.arange(18).view(6, 3)),
     )
 
     unpadded = model._create_unpad_decode_model_output(output, origin_batch_size=4)
 
     assert unpadded.logits.shape == (4, 4)
-    assert unpadded.mtp_collector.spec_hidden.shape == (4, 3)
+    assert unpadded.mtp_output.spec_hidden.shape == (4, 3)
     # Unpadding returns a shallow output copy and leaves the graph-owned
     # tensors on the original ModelOutput intact.
     assert output.logits.shape == (6, 4)
-    assert output.mtp_collector.spec_hidden.shape == (6, 3)
+    assert output.mtp_output.spec_hidden.shape == (6, 3)
 
 
 def test_prefill_unpad_uses_token_rows_for_spec_hidden():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(20).view(5, 4),
-        mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(24).view(8, 3)),
+        mtp_output=ModelMtpOutput(spec_hidden=torch.arange(24).view(8, 3)),
         prompt_logics=torch.arange(32).view(8, 4),
     )
 
@@ -40,7 +40,7 @@ def test_prefill_unpad_uses_token_rows_for_spec_hidden():
     )
 
     assert unpadded.logits.shape == (3, 4)
-    assert unpadded.mtp_collector.spec_hidden.shape == (6, 3)
+    assert unpadded.mtp_output.spec_hidden.shape == (6, 3)
     assert unpadded.prompt_logics.shape == (6, 4)
 
 
@@ -48,20 +48,20 @@ def test_decode_unpad_restores_empty_output():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(4).view(1, 4),
-        mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(3).view(1, 3)),
+        mtp_output=ModelMtpOutput(spec_hidden=torch.arange(3).view(1, 3)),
     )
 
     unpadded = model._create_unpad_decode_model_output(output, origin_batch_size=0)
 
     assert unpadded.logits.shape == (0, 4)
-    assert unpadded.mtp_collector.spec_hidden.shape == (0, 3)
+    assert unpadded.mtp_output.spec_hidden.shape == (0, 3)
 
 
 def test_prefill_unpad_restores_empty_output():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(4).view(1, 4),
-        mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(6).view(2, 3)),
+        mtp_output=ModelMtpOutput(spec_hidden=torch.arange(6).view(2, 3)),
         prompt_logics=torch.arange(8).view(2, 4),
     )
 
@@ -72,7 +72,7 @@ def test_prefill_unpad_restores_empty_output():
     )
 
     assert unpadded.logits.shape == (0, 4)
-    assert unpadded.mtp_collector.spec_hidden.shape == (0, 3)
+    assert unpadded.mtp_output.spec_hidden.shape == (0, 3)
     assert unpadded.prompt_logics.shape == (0, 4)
 
 

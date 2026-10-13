@@ -67,7 +67,7 @@ class InferStateInfo:
 
         # 当前 forward 独占的 hidden state 收集器。普通推理使用短生命周期实例；
         # Prefill CUDA Graph 使用随 graph infer state 长期保存的实例。
-        self.hidden_collector = None
+        self.mtp_collector = None
         self.final_hidden_policy = FinalHiddenPolicy.NONE
 
         # 衍生使用的管理变量，为了方便扩展接入其他的高性能attention推理算子，在

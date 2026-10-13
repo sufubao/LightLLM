@@ -26,7 +26,7 @@ def test_dflash_prefill_uses_a_shallow_copy_for_target_hidden():
     proposer.fill_draft_model_kv_state(
         target_model_input=model_input,
         target_model_output=SimpleNamespace(
-            mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
+            mtp_output=SimpleNamespace(spec_hidden=target_hidden),
         ),
         target_next_token_ids=torch.tensor([11, 13], dtype=torch.int64),
     )
@@ -87,7 +87,7 @@ def test_dflash_commits_verify_kv_and_builds_parallel_block(monkeypatch):
     proposal = proposer.propose_next(
         target_model_input=model_input,
         target_model_output=SimpleNamespace(
-            mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
+            mtp_output=SimpleNamespace(spec_hidden=target_hidden),
         ),
         target_next_token_ids=model_input.input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32),

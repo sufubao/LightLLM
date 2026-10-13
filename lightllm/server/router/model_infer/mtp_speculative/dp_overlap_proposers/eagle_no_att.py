@@ -93,7 +93,7 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
                 b_req_mtp_start_loc=req_mtp_start_loc,
                 accept_len=batch_accept_len,
                 input_ids=token_ids,
-                hidden=model_output.mtp_collector.spec_hidden,
+                hidden=model_output.mtp_output.spec_hidden,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 b_seq_len=model_input.b_seq_len,
@@ -130,7 +130,7 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
                 else:
                     draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
                 draft_token_ids_by_batch[batch_index] = draft_token_ids
-                draft_hiddens_by_batch[batch_index] = draft_output.mtp_collector.spec_hidden
+                draft_hiddens_by_batch[batch_index] = draft_output.mtp_output.spec_hidden
 
                 batch_req_num = req_num_by_batch[batch_index]
                 proposal_row_start = proposal_row_offsets[batch_index]

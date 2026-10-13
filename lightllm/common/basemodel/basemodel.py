@@ -36,8 +36,8 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, ModelInput, ModelOutput, PostLayerOutput
-from lightllm.common.basemodel.hidden_collector import (
-    NoopHiddenCollector,
+from lightllm.common.basemodel.mtp_collector import (
+    NoopMtpCollector,
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
@@ -135,7 +135,7 @@ class TpPartBaseModel:
             logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
-        self._init_hidden_collector()
+        self._init_mtp_collector()
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -317,8 +317,8 @@ class TpPartBaseModel:
     def _init_custom(self):
         pass
 
-    def _init_hidden_collector(self):
-        self.hidden_collector_prototype = self.mtp_manager.create_hidden_collector(model=self)
+    def _init_mtp_collector(self):
+        self.mtp_collector_prototype = self.mtp_manager.create_mtp_collector(model=self)
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
@@ -348,7 +348,7 @@ class TpPartBaseModel:
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
-        infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
+        infer_state.mtp_collector = self.mtp_collector_prototype.new_instance()
         infer_state.final_hidden_policy = self.mtp_manager.get_final_hidden_policy(self)
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
@@ -487,9 +487,10 @@ class TpPartBaseModel:
         return new_model_input
 
     def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo) -> ModelOutput:
+        infer_state.mtp_collector.collect_post_output(post_output)
         output = ModelOutput(
             logits=post_output.logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            mtp_output=infer_state.mtp_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
         )
@@ -503,7 +504,7 @@ class TpPartBaseModel:
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
+        new_model_output.mtp_output = model_output.mtp_output.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
         )
@@ -517,7 +518,7 @@ class TpPartBaseModel:
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
+        new_model_output.mtp_output = padded_model_output.mtp_output.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
         # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
@@ -640,16 +641,16 @@ class TpPartBaseModel:
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_tensors = [input_embs]
         if Autotuner.is_autotune_warmup():
-            infer_state.hidden_collector = NoopHiddenCollector()
+            infer_state.mtp_collector = NoopMtpCollector()
             infer_state.final_hidden_policy = FinalHiddenPolicy.NONE
 
         def prefill_func(input_tensors, _infer_state):
-            hidden_collector = _infer_state.hidden_collector
+            mtp_collector = _infer_state.mtp_collector
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 _input_embs = layer.context_forward(_input_embs, _infer_state, self.trans_layers_weight[i])
-                hidden_collector.add(
+                mtp_collector.add(
                     layer_index=i,
                     hidden=_input_embs,
                 )
@@ -686,8 +687,6 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
         post_output = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
-        hidden_collector = infer_state.hidden_collector
-        hidden_collector.add_final_hidden(post_output.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         del post_output
 
@@ -697,7 +696,7 @@ class TpPartBaseModel:
         return model_output
 
     def _token_forward(self, infer_state: InferStateInfo):
-        hidden_collector = infer_state.hidden_collector
+        mtp_collector = infer_state.mtp_collector
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
@@ -706,14 +705,13 @@ class TpPartBaseModel:
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
-            hidden_collector.add(layer_index=i, hidden=input_embs)
+            mtp_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         post_output: PostLayerOutput = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
-        hidden_collector.add_final_hidden(post_output.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         del post_output
 
@@ -870,8 +868,8 @@ class TpPartBaseModel:
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
         g_cache_manager.cache_env_in()
-        hidden_collector0 = infer_state.hidden_collector
-        hidden_collector1 = infer_state1.hidden_collector
+        mtp_collector0 = infer_state.mtp_collector
+        mtp_collector1 = infer_state1.mtp_collector
 
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
             infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
@@ -892,11 +890,11 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
-            hidden_collector0.add(
+            mtp_collector0.add(
                 layer_index=i,
                 hidden=input_embs,
             )
-            hidden_collector1.add(
+            mtp_collector1.add(
                 layer_index=i,
                 hidden=input_embs1,
             )
@@ -916,8 +914,6 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        hidden_collector0.add_final_hidden(post_output.final_hidden)
-        hidden_collector1.add_final_hidden(post_output1.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
@@ -926,8 +922,8 @@ class TpPartBaseModel:
 
     @final
     def _overlap_tpsp_token_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
-        hidden_collector0 = infer_state.hidden_collector
-        hidden_collector1 = infer_state1.hidden_collector
+        mtp_collector0 = infer_state.mtp_collector
+        mtp_collector1 = infer_state1.mtp_collector
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
             infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
         )
@@ -938,11 +934,11 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
-            hidden_collector0.add(
+            mtp_collector0.add(
                 layer_index=i,
                 hidden=input_embs,
             )
-            hidden_collector1.add(
+            mtp_collector1.add(
                 layer_index=i,
                 hidden=input_embs1,
             )
@@ -958,8 +954,6 @@ class TpPartBaseModel:
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        hidden_collector0.add_final_hidden(post_output.final_hidden)
-        hidden_collector1.add_final_hidden(post_output1.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1

@@ -31,7 +31,7 @@ class DSparkProposer(BaseSpecProposer):
         assert target_next_token_ids.shape == target_model_input.b_req_idx.shape
         assert len(self.backend.draft_models) == 1
 
-        target_hidden = target_model_output.mtp_collector.spec_hidden
+        target_hidden = target_model_output.mtp_output.spec_hidden
         assert target_hidden is not None
         assert target_hidden.shape[0] == target_model_input.input_ids.shape[0]
         if target_hidden.numel() == 0:
@@ -74,8 +74,8 @@ class DSparkProposer(BaseSpecProposer):
         assert accept_len is not None
         assert accept_len.shape == (req_num,)
         assert target_next_token_ids.shape[0] == target_model_input.batch_size
-        assert target_model_output.mtp_collector.spec_hidden is not None
-        assert target_model_output.mtp_collector.spec_hidden.shape[0] == target_model_input.batch_size
+        assert target_model_output.mtp_output.spec_hidden is not None
+        assert target_model_output.mtp_output.spec_hidden.shape[0] == target_model_input.batch_size
         assert target_model_input.b_position_delta is not None
         assert len(self.backend.draft_models) == 1
 
@@ -85,7 +85,7 @@ class DSparkProposer(BaseSpecProposer):
         # 仅附加 target hidden 后执行一次 draft forward，即可把这些行提交到
         # DSpark KV cache；浅副本保证 target_model_input 本身不被修改。
         verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_output.spec_hidden
         draft_model.forward(verify_draft_input)
 
         # DSpark 每个请求固定展开一个完整 block。block 第一行是
@@ -141,16 +141,16 @@ class DSparkProposer(BaseSpecProposer):
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         draft_output = draft_model.forward(draft_input)
 
-        if draft_output.mtp_collector.draft_token_ids is None:
+        if draft_output.mtp_output.draft_token_ids is None:
             flat_draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
         else:
-            flat_draft_token_ids = draft_output.mtp_collector.draft_token_ids
+            flat_draft_token_ids = draft_output.mtp_output.draft_token_ids
         assert flat_draft_token_ids.numel() == req_num * block_size
         block_draft_token_ids = flat_draft_token_ids.reshape(req_num, block_size)
         proposal_token_ids = block_draft_token_ids[:, :draft_step].contiguous()
 
         if self.enable_dynmaic_mtp:
-            confidence_logits = draft_output.mtp_collector.confidence_logits
+            confidence_logits = draft_output.mtp_output.confidence_logits
             if confidence_logits is None:
                 raise RuntimeError("DSpark dynamic verify requires confidence head logits")
             assert confidence_logits.ndim == 2

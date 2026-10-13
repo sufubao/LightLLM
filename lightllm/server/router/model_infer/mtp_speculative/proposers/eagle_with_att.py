@@ -31,7 +31,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         self._prepare_eagle_prefill_inputs(
             model_input=draft_input,
             b_next_token_ids=target_next_token_ids,
-            mtp_draft_input_hiddens=target_model_output.mtp_collector.spec_hidden,
+            mtp_draft_input_hiddens=target_model_output.mtp_output.spec_hidden,
         )
         self.backend.draft_models[0].forward(draft_input)
 
@@ -60,7 +60,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         assert accept_len is not None
         assert accept_len.shape == (req_num,)
         assert target_next_token_ids.shape[0] == target_model_input.batch_size
-        assert target_model_output.mtp_collector.spec_hidden.shape[0] == target_model_input.batch_size
+        assert target_model_output.mtp_output.spec_hidden.shape[0] == target_model_input.batch_size
         assert target_model_input.b_position_delta is not None
         assert len(self.backend.draft_models) == 1
 
@@ -72,7 +72,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         # draft forward 不会改变 target_model_input 对象自身的字段。
         verify_draft_input = copy.copy(target_model_input)
         verify_draft_input.input_ids = target_next_token_ids
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_output.spec_hidden
         extend_output = draft_model.forward(verify_draft_input)
 
         # 只在 req_num 行 logits 上进行 argmax，避免为未接受的 verify 行执行
@@ -107,7 +107,7 @@ class EagleWithAttProposer(BaseSpecProposer):
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             accept_len=accept_len,
             input_ids=target_next_token_ids,
-            hidden=extend_output.mtp_collector.spec_hidden,
+            hidden=extend_output.mtp_output.spec_hidden,
             b_req_idx=target_model_input.b_req_idx,
             b_mtp_index=target_model_input.b_mtp_index,
             b_seq_len=target_model_input.b_seq_len,
@@ -140,7 +140,7 @@ class EagleWithAttProposer(BaseSpecProposer):
             draft_input.max_kv_seq_len = max_kv_seq_len + step
             draft_input.total_token_num = req_num * draft_input.max_kv_seq_len
             draft_output = draft_model.forward(draft_input)
-            draft_hidden = draft_output.mtp_collector.spec_hidden
+            draft_hidden = draft_output.mtp_output.spec_hidden
 
             if self.enable_dynmaic_mtp:
                 draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(draft_output)

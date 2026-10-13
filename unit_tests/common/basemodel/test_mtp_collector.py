@@ -4,13 +4,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import lightllm.common.basemodel.hidden_collector as hidden_collector_module
-from lightllm.common.basemodel.hidden_collector import (
-    FinalHiddenCollector,
-    HiddenCollector,
-    LayerHiddenCollector,
-    MtpHeadOutputCollector,
-    NoopHiddenCollector,
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
+
+import lightllm.common.basemodel.mtp_collector as mtp_collector_module
+from lightllm.common.basemodel.mtp_collector import (
+    FinalHiddenMtpCollector,
+    MtpCollector,
+    LayerHiddenMtpCollector,
+    MtpHeadCollector,
+    NoopMtpCollector,
 )
 
 
@@ -23,49 +25,49 @@ class _IdentityPreInfer:
 
 def _mock_target_layer_ids(monkeypatch, layer_ids):
     monkeypatch.setattr(
-        hidden_collector_module,
+        mtp_collector_module,
         "get_env_start_args",
         lambda: SimpleNamespace(mtp_draft_model_dir=["/models/draft"]),
     )
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig,
+        mtp_collector_module.PretrainedConfig,
         "get_config_dict",
         lambda _: ({"target_layer_ids": layer_ids}, {}),
     )
 
 
-def test_hidden_collector_is_base_class_for_implementations():
-    assert isabstract(HiddenCollector)
-    assert issubclass(NoopHiddenCollector, HiddenCollector)
-    assert issubclass(FinalHiddenCollector, HiddenCollector)
-    assert issubclass(LayerHiddenCollector, HiddenCollector)
+def test_mtp_collector_is_base_class_for_implementations():
+    assert isabstract(MtpCollector)
+    assert issubclass(NoopMtpCollector, MtpCollector)
+    assert issubclass(FinalHiddenMtpCollector, MtpCollector)
+    assert issubclass(LayerHiddenMtpCollector, MtpCollector)
 
 
-def test_final_hidden_collectors_are_independent_instances():
-    prototype = FinalHiddenCollector()
+def test_final_mtp_collectors_are_independent_instances():
+    prototype = FinalHiddenMtpCollector()
     collector0 = prototype.new_instance()
     collector1 = prototype.new_instance()
     hidden0 = torch.randn(2, 3)
     hidden1 = torch.randn(2, 3)
     infer_state = SimpleNamespace(need_dp_prefill_balance=False)
 
-    collector0.add_final_hidden(hidden0)
+    collector0.collect_post_output(PostLayerOutput(logits=torch.empty(0), final_hidden=hidden0))
     collected = collector0.finish_output(infer_state=infer_state).spec_hidden
     assert collected.data_ptr() == hidden0.data_ptr()
     assert collector0.final_hidden is None
 
-    collector0.add_final_hidden(hidden0)
-    collector1.add_final_hidden(hidden1)
+    collector0.collect_post_output(PostLayerOutput(logits=torch.empty(0), final_hidden=hidden0))
+    collector1.collect_post_output(PostLayerOutput(logits=torch.empty(0), final_hidden=hidden1))
     collected0 = collector0.finish_output(infer_state=infer_state).spec_hidden
     collected1 = collector1.finish_output(infer_state=infer_state).spec_hidden
     assert collected0.data_ptr() == hidden0.data_ptr()
     assert collected1.data_ptr() == hidden1.data_ptr()
 
 
-def test_layer_hidden_collector_keeps_microbatch_state_separate(monkeypatch):
+def test_layer_mtp_collector_keeps_microbatch_state_separate(monkeypatch):
     _mock_target_layer_ids(monkeypatch, [0])
     model = SimpleNamespace(is_mtp_draft_model=False, layers_num=2, pre_infer=_IdentityPreInfer())
-    prototype = LayerHiddenCollector(model=model)
+    prototype = LayerHiddenMtpCollector(model=model)
     collector0 = prototype.new_instance()
     collector1 = prototype.new_instance()
     hidden0 = torch.full((2, 3), 1.0)
@@ -82,32 +84,36 @@ def test_layer_hidden_collector_keeps_microbatch_state_separate(monkeypatch):
     assert torch.equal(collected1, hidden1)
 
 
-def test_layer_hidden_collector_requires_target_layer_ids_from_config(monkeypatch):
+def test_layer_mtp_collector_requires_target_layer_ids_from_config(monkeypatch):
     _mock_target_layer_ids(monkeypatch, None)
     model = SimpleNamespace(layers_num=2, pre_infer=_IdentityPreInfer())
 
     with pytest.raises(AssertionError, match="target_layer_ids is required in draft config"):
-        LayerHiddenCollector(model=model)
+        LayerHiddenMtpCollector(model=model)
 
 
 def test_noop_collector_keeps_normal_forward_output_minimal():
     final_hidden = torch.randn(2, 3)
-    collector = NoopHiddenCollector()
+    collector = NoopMtpCollector()
 
     collector.add(layer_index=0, hidden=final_hidden)
-    collector.add_final_hidden(final_hidden)
+    collector.collect_post_output(PostLayerOutput(logits=torch.empty(0), final_hidden=final_hidden))
 
     assert collector.finish_output(infer_state=None).spec_hidden is None
 
 
 def test_mtp_head_output_collector_returns_and_clears_outputs():
-    collector = MtpHeadOutputCollector()
+    collector = MtpHeadCollector()
     draft_token_ids = torch.arange(6)
     confidence_logits = torch.arange(6).view(2, 3)
 
-    collector.add_mtp_outputs(
-        draft_token_ids=draft_token_ids,
-        confidence_logits=confidence_logits,
+    collector.collect_post_output(
+        PostLayerOutput(
+            logits=torch.empty(0),
+            final_hidden=torch.ones(2, 3),
+            draft_token_ids=draft_token_ids,
+            confidence_logits=confidence_logits,
+        )
     )
     output = collector.finish_output(infer_state=None)
 
@@ -117,11 +123,38 @@ def test_mtp_head_output_collector_returns_and_clears_outputs():
     assert collector.draft_token_ids is None
     assert collector.confidence_logits is None
 
+    collector.collect_post_output(
+        PostLayerOutput(
+            logits=torch.empty(0),
+            final_hidden=torch.ones(2, 3),
+            draft_token_ids=draft_token_ids,
+            confidence_logits=confidence_logits,
+        )
+    )
+    collector.collect_post_output(PostLayerOutput(logits=torch.empty(0), final_hidden=torch.ones(2, 3)))
+    empty_output = collector.finish_output(infer_state=None)
+    assert empty_output.draft_token_ids is None
+    assert empty_output.confidence_logits is None
+
+
+@pytest.mark.parametrize("collector_type", [NoopMtpCollector, FinalHiddenMtpCollector, LayerHiddenMtpCollector])
+@pytest.mark.parametrize("field", ["draft_token_ids", "confidence_logits"])
+def test_collect_post_output_rejects_unsupported_head_outputs(monkeypatch, collector_type, field):
+    _mock_target_layer_ids(monkeypatch, [0])
+    if collector_type is LayerHiddenMtpCollector:
+        collector = collector_type(SimpleNamespace(layers_num=1, pre_infer=_IdentityPreInfer()))
+    else:
+        collector = collector_type()
+    post_output = PostLayerOutput(logits=torch.empty(0), final_hidden=torch.ones(2, 3), **{field: torch.ones(2)})
+
+    with pytest.raises(RuntimeError, match="does not collect MTP head outputs"):
+        collector.collect_post_output(post_output)
+
 
 def test_final_collector_returns_final_hidden_without_layer_bookkeeping():
     final_hidden = torch.randn(2, 3)
-    collector = FinalHiddenCollector()
-    collector.add_final_hidden(final_hidden)
+    collector = FinalHiddenMtpCollector()
+    collector.collect_post_output(PostLayerOutput(logits=torch.empty(0), final_hidden=final_hidden))
     collected = collector.finish_output(infer_state=None).spec_hidden
 
     assert collected.data_ptr() == final_hidden.data_ptr()
@@ -133,7 +166,7 @@ def test_layer_collector_preserves_selected_layers_in_model_order(monkeypatch):
     layer1 = torch.full((2, 2), 2.0)
     layer2 = torch.full((2, 2), 3.0)
     model = SimpleNamespace(layers_num=3, pre_infer=_IdentityPreInfer())
-    collector = LayerHiddenCollector(model=model)
+    collector = LayerHiddenMtpCollector(model=model)
 
     collector.add(layer_index=0, hidden=layer0)
     collector.add(layer_index=1, hidden=layer1)
@@ -156,7 +189,7 @@ def test_layer_collector_preserves_selected_layers_in_model_order(monkeypatch):
 def test_layer_collector_restores_graph_state_without_sharing_runtime_container(monkeypatch):
     _mock_target_layer_ids(monkeypatch, [0])
     model = SimpleNamespace(layers_num=2, pre_infer=_IdentityPreInfer())
-    graph_collector = LayerHiddenCollector(model=model)
+    graph_collector = LayerHiddenMtpCollector(model=model)
     collector = graph_collector.new_instance()
     infer_state = SimpleNamespace(need_dp_prefill_balance=False)
     graph_collector.add(layer_index=0, hidden=torch.full((2, 3), 1.0))
@@ -172,7 +205,7 @@ def test_layer_collector_restores_graph_state_without_sharing_runtime_container(
 def test_layer_collector_releases_graph_tensor_ownership_with_statistics(monkeypatch):
     _mock_target_layer_ids(monkeypatch, [0, 2])
     model = SimpleNamespace(layers_num=3, pre_infer=_IdentityPreInfer())
-    collector = LayerHiddenCollector(model=model)
+    collector = LayerHiddenMtpCollector(model=model)
     hidden0 = torch.randn(2, 3)
     hidden2 = torch.randn(2, 3)
     converted = []
@@ -181,7 +214,7 @@ def test_layer_collector_releases_graph_tensor_ownership_with_statistics(monkeyp
         converted.append(hidden)
         return hidden
 
-    monkeypatch.setattr(hidden_collector_module, "tensor_to_no_ref_tensor", to_no_ref)
+    monkeypatch.setattr(mtp_collector_module, "tensor_to_no_ref_tensor", to_no_ref)
     collector.add(layer_index=0, hidden=hidden0)
     collector.add(layer_index=2, hidden=hidden2)
 
@@ -190,4 +223,4 @@ def test_layer_collector_releases_graph_tensor_ownership_with_statistics(monkeyp
     assert tensor_count == 2
     assert total_nbytes == hidden0.numel() * hidden0.element_size() + hidden2.numel() * hidden2.element_size()
     assert all(actual is expected for actual, expected in zip(converted, collector.layer_hiddens))
-    assert NoopHiddenCollector().release_graph_tensor_ownership() == (0, 0)
+    assert NoopMtpCollector().release_graph_tensor_ownership() == (0, 0)

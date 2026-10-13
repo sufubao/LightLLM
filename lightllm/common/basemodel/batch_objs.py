@@ -119,7 +119,7 @@ class ModelInput:
 
 
 @dataclass
-class ModelMtpOutputCollector:
+class ModelMtpOutput:
     """保存一次模型 forward 为 MTP 推理产生的可选输出。"""
 
     # MTP drafter 使用的 hidden 特征。
@@ -153,25 +153,25 @@ class ModelMtpOutputCollector:
         if self.confidence_logits is not None:
             self.confidence_logits = tensor_to_no_ref_tensor(self.confidence_logits)
 
-    def unpad_decode(self, padded_batch_size: int, origin_batch_size: int) -> "ModelMtpOutputCollector":
-        collector = copy.copy(self)
-        if collector.spec_hidden is not None:
-            collector.spec_hidden = collector.spec_hidden[:origin_batch_size]
-        if collector.draft_token_ids is not None:
-            collector.draft_token_ids = collector.draft_token_ids[:origin_batch_size]
-        if collector.confidence_logits is not None:
-            confidence_row_count = collector.confidence_logits.shape[0]
+    def unpad_decode(self, padded_batch_size: int, origin_batch_size: int) -> "ModelMtpOutput":
+        output = copy.copy(self)
+        if output.spec_hidden is not None:
+            output.spec_hidden = output.spec_hidden[:origin_batch_size]
+        if output.draft_token_ids is not None:
+            output.draft_token_ids = output.draft_token_ids[:origin_batch_size]
+        if output.confidence_logits is not None:
+            confidence_row_count = output.confidence_logits.shape[0]
             assert confidence_row_count > 0 and padded_batch_size % confidence_row_count == 0
             rows_per_confidence = padded_batch_size // confidence_row_count
             assert origin_batch_size % rows_per_confidence == 0
-            collector.confidence_logits = collector.confidence_logits[: origin_batch_size // rows_per_confidence]
-        return collector
+            output.confidence_logits = output.confidence_logits[: origin_batch_size // rows_per_confidence]
+        return output
 
-    def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutputCollector":
-        collector = copy.copy(self)
-        if collector.spec_hidden is not None:
-            collector.spec_hidden = collector.spec_hidden[:origin_handle_token_num]
-        return collector
+    def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutput":
+        output = copy.copy(self)
+        if output.spec_hidden is not None:
+            output.spec_hidden = output.spec_hidden[:origin_handle_token_num]
+        return output
 
 
 class FinalHiddenPolicy(Enum):
@@ -182,21 +182,23 @@ class FinalHiddenPolicy(Enum):
 
 @dataclass
 class PostLayerOutput:
-    """输出层 logits、可选的候选 token ID 映射和供 collector 收集的最终 hidden。"""
+    """输出层 logits、最终层 hidden、可选的候选 token ID 映射和 MTP head 输出。"""
 
     logits: torch.Tensor
     logits_token_ids: Optional[torch.Tensor] = None
     final_hidden: Optional[torch.Tensor] = None
+    draft_token_ids: Optional[torch.Tensor] = None
+    confidence_logits: Optional[torch.Tensor] = None
 
 
 @dataclass
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
-    # MTP collector is finalized by HiddenCollector.finish_output before being
+    # MTP output is finalized by MtpCollector.finish_output before being
     # attached here. ModelOutput therefore owns a stable output view instead
     # of the mutable collector used while the forward is still running.
-    mtp_collector: Optional[ModelMtpOutputCollector] = None
+    mtp_output: Optional[ModelMtpOutput] = None
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
 
@@ -211,11 +213,11 @@ class ModelOutput:
     logits_token_ids: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
-        if self.mtp_collector is None:
-            self.mtp_collector = ModelMtpOutputCollector()
+        if self.mtp_output is None:
+            self.mtp_output = ModelMtpOutput()
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
         if self.logits_token_ids is not None:
             self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
-        self.mtp_collector.to_no_ref_tensor()
+        self.mtp_output.to_no_ref_tensor()

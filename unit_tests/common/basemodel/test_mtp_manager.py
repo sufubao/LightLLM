@@ -3,13 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
-import lightllm.common.basemodel.hidden_collector as hidden_collector_module
+import lightllm.common.basemodel.mtp_collector as mtp_collector_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
-from lightllm.common.basemodel.hidden_collector import (
-    FinalHiddenCollector,
-    LayerHiddenCollector,
-    MtpHeadOutputCollector,
-    NoopHiddenCollector,
+from lightllm.common.basemodel.mtp_collector import (
+    FinalHiddenMtpCollector,
+    LayerHiddenMtpCollector,
+    MtpHeadCollector,
+    NoopMtpCollector,
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
 
@@ -99,15 +99,15 @@ def test_get_instance_returns_singleton(monkeypatch):
 @pytest.mark.parametrize(
     "spec_mode,is_draft_model,expected_type",
     [
-        (None, False, NoopHiddenCollector),
-        ("vanilla_with_att", False, FinalHiddenCollector),
-        ("eagle3", False, LayerHiddenCollector),
-        ("dspark", False, LayerHiddenCollector),
-        ("eagle3", True, FinalHiddenCollector),
-        ("dspark", True, MtpHeadOutputCollector),
+        (None, False, NoopMtpCollector),
+        ("vanilla_with_att", False, FinalHiddenMtpCollector),
+        ("eagle3", False, LayerHiddenMtpCollector),
+        ("dspark", False, LayerHiddenMtpCollector),
+        ("eagle3", True, FinalHiddenMtpCollector),
+        ("dspark", True, MtpHeadCollector),
     ],
 )
-def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, is_draft_model, expected_type):
+def test_create_mtp_collector_selects_implementation(monkeypatch, spec_mode, is_draft_model, expected_type):
     args = SimpleNamespace(
         mtp_mode=spec_mode,
         mtp_step=7,
@@ -115,15 +115,15 @@ def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, 
         mtp_draft_model_dir=["/models/draft"],
     )
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(hidden_collector_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(mtp_collector_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig,
+        mtp_collector_module.PretrainedConfig,
         "get_config_dict",
         lambda _: ({"target_layer_ids": [0]}, {}),
     )
     model = SimpleNamespace(is_mtp_draft_model=is_draft_model, layers_num=2)
 
-    prototype = MtpManager.get_instance().create_hidden_collector(model=model)
+    prototype = MtpManager.get_instance().create_mtp_collector(model=model)
     collector = prototype.new_instance()
 
     assert isinstance(prototype, expected_type)
@@ -179,14 +179,14 @@ def test_intermediate_hidden_output(monkeypatch, mode, path):
 
     args = SimpleNamespace(mtp_mode=mode, mtp_draft_model_dir=["/models/draft"])
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(hidden_collector_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(mtp_collector_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig, "get_config_dict", lambda _: ({"target_layer_ids": [0]}, {})
+        mtp_collector_module.PretrainedConfig, "get_config_dict", lambda _: ({"target_layer_ids": [0]}, {})
     )
     module, name = path.split(":")
     cls = getattr(import_module("lightllm.models." + module), name)
     model = cls.__new__(cls)
     model.layers_num = 2
-    collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
-    assert isinstance(collector, LayerHiddenCollector)
+    collector = MtpManager.get_instance().create_mtp_collector(model).new_instance()
+    assert isinstance(collector, LayerHiddenMtpCollector)
     assert MtpManager.get_instance().get_final_hidden_policy(model) is FinalHiddenPolicy.NONE

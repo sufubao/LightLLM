@@ -28,7 +28,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
         # 在局部副本上逐级左移 token 并传递 hidden，避免修改 target
         # prefill 输入。Chunked prefill 边界继续用当前级预测 token 补齐。
         draft_input = copy.copy(target_model_input)
-        draft_hidden = target_model_output.mtp_collector.spec_hidden
+        draft_hidden = target_model_output.mtp_output.spec_hidden
         draft_token_ids = target_next_token_ids
         for draft_model in self.backend.draft_models:
             draft_input = self._prepare_mtp_prefill_inputs(
@@ -37,7 +37,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
                 mtp_draft_input_hiddens=draft_hidden,
             )
             draft_output = draft_model.forward(draft_input)
-            draft_hidden = draft_output.mtp_collector.spec_hidden
+            draft_hidden = draft_output.mtp_output.spec_hidden
             draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
 
     def propose_next(
@@ -65,7 +65,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
         assert accept_len is not None
         assert accept_len.shape == (req_num,)
         assert target_next_token_ids.shape[0] == target_model_input.batch_size
-        assert target_model_output.mtp_collector.spec_hidden.shape[0] == target_model_input.batch_size
+        assert target_model_output.mtp_output.spec_hidden.shape[0] == target_model_input.batch_size
         assert draft_step == self.backend.max_draft_step, (
             "vanilla_with_att requires the full chained draft depth: "
             f"draft_step={draft_step}, max_draft_step={self.backend.max_draft_step}"
@@ -81,14 +81,14 @@ class VanillaWithAttProposer(BaseSpecProposer):
         # 但 input_ids 与 hidden 会逐级更新。使用浅副本避免覆盖 target 输入
         # 中这两个字段；布局 tensor 仍然共享，不引入额外拷贝。
         draft_token_ids = target_next_token_ids
-        draft_hidden = target_model_output.mtp_collector.spec_hidden
+        draft_hidden = target_model_output.mtp_output.spec_hidden
         draft_input = copy.copy(target_model_input)
 
         for step in range(draft_step):
             draft_input.input_ids = draft_token_ids
             draft_input.mtp_draft_input_hiddens = draft_hidden
             draft_output = self.backend.draft_models[step].forward(draft_input)
-            draft_hidden = draft_output.mtp_collector.spec_hidden
+            draft_hidden = draft_output.mtp_output.spec_hidden
 
             if self.enable_dynmaic_mtp:
                 # Vanilla With-Att 没有独立的 confidence head；动态调度使用

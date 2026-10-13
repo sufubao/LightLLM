@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelMtpOutput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
@@ -18,7 +18,7 @@ def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
         assert model_input.mtp_draft_input_hiddens is target_hidden
         return ModelOutput(
             logits=torch.tensor([[1.0], [2.0]]),
-            mtp_collector=ModelMtpOutputCollector(spec_hidden=target_hidden + 10),
+            mtp_output=ModelMtpOutput(spec_hidden=target_hidden + 10),
         )
 
     draft_model = SimpleNamespace(
@@ -42,7 +42,7 @@ def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
 
     proposal = proposer.propose_next(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=target_input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         draft_step=1,
@@ -107,7 +107,7 @@ def test_eagle_with_att_prefill_builds_draft_kv_without_mutating_target():
     )
     proposer.fill_draft_model_kv_state(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=torch.tensor([13, 23], dtype=torch.int64, device=device),
     )
 
@@ -150,11 +150,11 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
         if len(draft_calls) == 1:
             return ModelOutput(
                 logits=torch.arange(30, 36, dtype=torch.float32, device=device).unsqueeze(1),
-                mtp_collector=ModelMtpOutputCollector(spec_hidden=extend_hidden),
+                mtp_output=ModelMtpOutput(spec_hidden=extend_hidden),
             )
         return ModelOutput(
             logits=torch.tensor([[40.0], [41.0]], device=device),
-            mtp_collector=ModelMtpOutputCollector(spec_hidden=decode_hidden),
+            mtp_output=ModelMtpOutput(spec_hidden=decode_hidden),
         )
 
     backend = SimpleNamespace(
@@ -183,7 +183,7 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
     )
     proposal = proposer.propose_next(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=original_input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32, device=device),
         draft_step=2,

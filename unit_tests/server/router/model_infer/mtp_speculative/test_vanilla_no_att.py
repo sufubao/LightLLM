@@ -63,7 +63,7 @@ def test_vanilla_no_att_runs_all_draft_steps_for_empty_dp_batch():
         draft_batch_sizes.append(model_input.batch_size)
         return SimpleNamespace(
             token_ids=torch.empty((0,), dtype=torch.int64, device=device),
-            mtp_collector=SimpleNamespace(
+            mtp_output=SimpleNamespace(
                 spec_hidden=torch.empty((0, 2), dtype=torch.float32, device=device),
             ),
         )
@@ -85,7 +85,7 @@ def test_vanilla_no_att_runs_all_draft_steps_for_empty_dp_batch():
         multimodal_params=[],
     )
     target_model_output = SimpleNamespace(
-        mtp_collector=SimpleNamespace(
+        mtp_output=SimpleNamespace(
             spec_hidden=torch.empty((0, 2), dtype=torch.float32, device=device),
         )
     )
@@ -111,12 +111,12 @@ def test_vanilla_no_att_proposes_from_one_accepted_tail_per_request():
         SimpleNamespace(
             token_ids=torch.tensor([21, 24]),
             token_probs=torch.tensor([0.8, 0.7]),
-            mtp_collector=SimpleNamespace(spec_hidden=torch.tensor([[102.0, 103.0], [108.0, 109.0]])),
+            mtp_output=SimpleNamespace(spec_hidden=torch.tensor([[102.0, 103.0], [108.0, 109.0]])),
         ),
         SimpleNamespace(
             token_ids=torch.tensor([31, 34]),
             token_probs=torch.tensor([0.6, 0.5]),
-            mtp_collector=SimpleNamespace(spec_hidden=torch.tensor([[202.0, 203.0], [208.0, 209.0]])),
+            mtp_output=SimpleNamespace(spec_hidden=torch.tensor([[202.0, 203.0], [208.0, 209.0]])),
         ),
     ]
 
@@ -154,7 +154,7 @@ def test_vanilla_no_att_proposes_from_one_accepted_tail_per_request():
         multimodal_params=[{"images": [], "audios": []} for _ in range(5)],
     )
     target_model_output = SimpleNamespace(
-        mtp_collector=SimpleNamespace(spec_hidden=torch.arange(10, dtype=torch.float32, device=device).reshape(5, 2))
+        mtp_output=SimpleNamespace(spec_hidden=torch.arange(10, dtype=torch.float32, device=device).reshape(5, 2))
     )
 
     proposal = proposer.propose_next(

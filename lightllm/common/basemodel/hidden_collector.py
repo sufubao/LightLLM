@@ -13,7 +13,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
-class FinalHiddenOutput(Enum):
+class FinalHiddenPolicy(Enum):
     NONE = auto()
     PRE_NORM = auto()
     POST_NORM = auto()
@@ -32,7 +32,7 @@ class HiddenCollector(ABC):
     state 自然隔离，具体实现无需感知 microbatch 编号。
     """
 
-    final_hidden_output = FinalHiddenOutput.NONE
+    final_hidden_policy = FinalHiddenPolicy.NONE
 
     @abstractmethod
     def new_instance(self) -> "HiddenCollector":
@@ -168,12 +168,12 @@ class MtpHeadOutputCollector(NoopHiddenCollector):
 class FinalHiddenCollector(HiddenCollector):
     """Returns the final decoder hidden state without per-layer bookkeeping."""
 
-    def __init__(self, output: FinalHiddenOutput = FinalHiddenOutput.PRE_NORM) -> None:
-        self.final_hidden_output = output
+    def __init__(self, policy: FinalHiddenPolicy = FinalHiddenPolicy.PRE_NORM) -> None:
+        self.final_hidden_policy = policy
         self.final_hidden: Optional[torch.Tensor] = None
 
     def new_instance(self) -> HiddenCollector:
-        return FinalHiddenCollector(output=self.final_hidden_output)
+        return FinalHiddenCollector(policy=self.final_hidden_policy)
 
     def add_final_hidden(self, final_hidden: Optional[torch.Tensor]) -> None:
         assert final_hidden is not None, "post layer must return the requested final hidden"

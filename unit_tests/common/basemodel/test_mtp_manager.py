@@ -6,7 +6,7 @@ import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
-    FinalHiddenOutput,
+    FinalHiddenPolicy,
     LayerHiddenCollector,
     MtpHeadOutputCollector,
     NoopHiddenCollector,
@@ -135,25 +135,25 @@ def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, 
 @pytest.mark.parametrize(
     "path,mode,expected",
     [
-        ("deepseek2.model:Deepseek2TpPartModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
-        ("deepseek_mtp.model:Deepseek3MTPModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
-        ("glm4_moe_lite.model:Glm4MoeLiteTpPartModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
-        ("glm4_moe_lite_mtp.model:Glm4MoeLiteMTPModel", "vanilla_with_att", FinalHiddenOutput.PRE_NORM),
-        ("glm5_next.model:Glm5NextTpPartModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
-        ("glm5_next_mtp.model:Glm5NextMTPModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
-        ("qwen3_5.model:Qwen3_5TpPartModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
-        ("qwen3_5_mtp.model:Qwen3_5MTPModel", "vanilla_with_att", FinalHiddenOutput.POST_NORM),
-        ("qwen3_5_moe.model:Qwen3_5MOETpPartModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
-        ("qwen3_5_moe_mtp.model:Qwen3_5MoeMTPModel", "eagle_with_att", FinalHiddenOutput.POST_NORM),
-        ("mistral.model:MistralTpPartModel", "vanilla_no_att", FinalHiddenOutput.PRE_NORM),
-        ("mistral_mtp.model:MistralMTPModel", "vanilla_no_att", FinalHiddenOutput.PRE_NORM),
-        ("qwen3_moe.model:Qwen3MOEModel", "eagle_no_att", FinalHiddenOutput.PRE_NORM),
-        ("qwen3_moe_mtp.model:Qwen3MOEMTPModel", "eagle_no_att", FinalHiddenOutput.PRE_NORM),
-        ("qwen3_eagle.model:Qwen3EagleModel", "eagle3", FinalHiddenOutput.PRE_NORM),
-        ("qwen3_dflash.model:Qwen3DFlashModel", "dflash", FinalHiddenOutput.NONE),
-        ("qwen3_5_dflash.model:Qwen3_5DFlashModel", "dflash", FinalHiddenOutput.NONE),
-        ("qwen3_dspark.model:Qwen3DSparkModel", "dspark", FinalHiddenOutput.NONE),
-        ("qwen3_5_dspark.model:Qwen3_5DSparkModel", "dspark", FinalHiddenOutput.NONE),
+        ("deepseek2.model:Deepseek2TpPartModel", "vanilla_with_att", FinalHiddenPolicy.POST_NORM),
+        ("deepseek_mtp.model:Deepseek3MTPModel", "vanilla_with_att", FinalHiddenPolicy.POST_NORM),
+        ("glm4_moe_lite.model:Glm4MoeLiteTpPartModel", "vanilla_with_att", FinalHiddenPolicy.POST_NORM),
+        ("glm4_moe_lite_mtp.model:Glm4MoeLiteMTPModel", "vanilla_with_att", FinalHiddenPolicy.PRE_NORM),
+        ("glm5_next.model:Glm5NextTpPartModel", "eagle_with_att", FinalHiddenPolicy.POST_NORM),
+        ("glm5_next_mtp.model:Glm5NextMTPModel", "eagle_with_att", FinalHiddenPolicy.POST_NORM),
+        ("qwen3_5.model:Qwen3_5TpPartModel", "vanilla_with_att", FinalHiddenPolicy.POST_NORM),
+        ("qwen3_5_mtp.model:Qwen3_5MTPModel", "vanilla_with_att", FinalHiddenPolicy.POST_NORM),
+        ("qwen3_5_moe.model:Qwen3_5MOETpPartModel", "eagle_with_att", FinalHiddenPolicy.POST_NORM),
+        ("qwen3_5_moe_mtp.model:Qwen3_5MoeMTPModel", "eagle_with_att", FinalHiddenPolicy.POST_NORM),
+        ("mistral.model:MistralTpPartModel", "vanilla_no_att", FinalHiddenPolicy.PRE_NORM),
+        ("mistral_mtp.model:MistralMTPModel", "vanilla_no_att", FinalHiddenPolicy.PRE_NORM),
+        ("qwen3_moe.model:Qwen3MOEModel", "eagle_no_att", FinalHiddenPolicy.PRE_NORM),
+        ("qwen3_moe_mtp.model:Qwen3MOEMTPModel", "eagle_no_att", FinalHiddenPolicy.PRE_NORM),
+        ("qwen3_eagle.model:Qwen3EagleModel", "eagle3", FinalHiddenPolicy.PRE_NORM),
+        ("qwen3_dflash.model:Qwen3DFlashModel", "dflash", FinalHiddenPolicy.NONE),
+        ("qwen3_5_dflash.model:Qwen3_5DFlashModel", "dflash", FinalHiddenPolicy.NONE),
+        ("qwen3_dspark.model:Qwen3DSparkModel", "dspark", FinalHiddenPolicy.NONE),
+        ("qwen3_5_dspark.model:Qwen3_5DSparkModel", "dspark", FinalHiddenPolicy.NONE),
     ],
 )
 def test_model_hidden_output(monkeypatch, path, mode, expected, enabled):
@@ -166,7 +166,7 @@ def test_model_hidden_output(monkeypatch, path, mode, expected, enabled):
         mtp_manager_module, "get_env_start_args", lambda: SimpleNamespace(mtp_mode=mode if enabled else None)
     )
     collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
-    assert collector.final_hidden_output is (expected if enabled else FinalHiddenOutput.NONE)
+    assert collector.final_hidden_policy is (expected if enabled else FinalHiddenPolicy.NONE)
 
 
 @pytest.mark.parametrize("mode", ["eagle3", "dflash", "dspark"])
@@ -189,4 +189,4 @@ def test_intermediate_hidden_output(monkeypatch, mode, path):
     model.layers_num = 2
     collector = MtpManager.get_instance().create_hidden_collector(model).new_instance()
     assert isinstance(collector, LayerHiddenCollector)
-    assert collector.final_hidden_output is FinalHiddenOutput.NONE
+    assert collector.final_hidden_policy is FinalHiddenPolicy.NONE

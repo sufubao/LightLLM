@@ -5,7 +5,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import PostLayerOutput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, FinalHiddenOutput, NoopHiddenCollector
+from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, FinalHiddenPolicy, NoopHiddenCollector
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk
 from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
     pack_vocab_parallel_topk,
@@ -326,21 +326,21 @@ def test_overlap_keeps_each_microbatch_mapping() -> None:
 
 
 @pytest.mark.parametrize(
-    "hidden_output,is_prefill,prompt,draft,top_k",
+    "hidden_policy,is_prefill,prompt,draft,top_k",
     [
-        (FinalHiddenOutput.NONE, True, False, False, None),
-        (FinalHiddenOutput.PRE_NORM, True, False, False, None),
-        (FinalHiddenOutput.POST_NORM, True, False, False, None),
-        (FinalHiddenOutput.NONE, True, True, False, None),
-        (FinalHiddenOutput.PRE_NORM, True, True, False, None),
-        (FinalHiddenOutput.POST_NORM, True, True, True, None),
-        (FinalHiddenOutput.NONE, True, True, True, 2),
-        (FinalHiddenOutput.POST_NORM, True, True, False, 2),
-        (FinalHiddenOutput.POST_NORM, False, False, True, None),
-        (FinalHiddenOutput.POST_NORM, False, False, True, 2),
+        (FinalHiddenPolicy.NONE, True, False, False, None),
+        (FinalHiddenPolicy.PRE_NORM, True, False, False, None),
+        (FinalHiddenPolicy.POST_NORM, True, False, False, None),
+        (FinalHiddenPolicy.NONE, True, True, False, None),
+        (FinalHiddenPolicy.PRE_NORM, True, True, False, None),
+        (FinalHiddenPolicy.POST_NORM, True, True, True, None),
+        (FinalHiddenPolicy.NONE, True, True, True, 2),
+        (FinalHiddenPolicy.POST_NORM, True, True, False, 2),
+        (FinalHiddenPolicy.POST_NORM, False, False, True, None),
+        (FinalHiddenPolicy.POST_NORM, False, False, True, 2),
     ],
 )
-def test_norm_and_hidden_output(monkeypatch, hidden_output, is_prefill, prompt, draft, top_k):
+def test_norm_and_hidden_policy(monkeypatch, hidden_policy, is_prefill, prompt, draft, top_k):
     hidden = torch.arange(1, 16, dtype=torch.float32).reshape(5, 3)
     norm_weight = torch.tensor([0.5, 1.5, 2.0])
     projection = torch.arange(1, 13, dtype=torch.float32).reshape(4, 3) / 10
@@ -371,7 +371,7 @@ def test_norm_and_hidden_output(monkeypatch, hidden_output, is_prefill, prompt, 
         lambda logits, top_k, alloc_func: torch.topk(logits.T, top_k, dim=1),
     )
     collector = (
-        NoopHiddenCollector() if hidden_output is FinalHiddenOutput.NONE else FinalHiddenCollector(output=hidden_output)
+        NoopHiddenCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenCollector(policy=hidden_policy)
     )
     state = SimpleNamespace(
         is_prefill=is_prefill,
@@ -402,18 +402,18 @@ def test_norm_and_hidden_output(monkeypatch, hidden_output, is_prefill, prompt, 
         torch.testing.assert_close(state.prompt_logics, all_logits)
     else:
         assert state.prompt_logics is None
-    if hidden_output is FinalHiddenOutput.POST_NORM:
+    if hidden_policy is FinalHiddenPolicy.POST_NORM:
         torch.testing.assert_close(output.final_hidden, normed)
-    elif hidden_output is FinalHiddenOutput.PRE_NORM:
+    elif hidden_policy is FinalHiddenPolicy.PRE_NORM:
         assert output.final_hidden is hidden
     else:
         assert output.final_hidden is None
-    assert norm_rows == [5 if prompt or hidden_output is FinalHiddenOutput.POST_NORM else state.batch_size]
+    assert norm_rows == [5 if prompt or hidden_policy is FinalHiddenPolicy.POST_NORM else state.batch_size]
 
 
 @pytest.mark.parametrize("model_name", ["qwen2", "internlm2"])
-@pytest.mark.parametrize("hidden_output", list(FinalHiddenOutput))
-def test_reward_hidden_output(model_name, hidden_output):
+@pytest.mark.parametrize("hidden_policy", list(FinalHiddenPolicy))
+def test_reward_hidden_policy(model_name, hidden_policy):
     from lightllm.models.qwen2_reward.layer_infer.post_layer_infer import Qwen2RewardPostLayerInfer
     from lightllm.models.internlm2_reward.layer_infer.post_layer_infer import Internlm2RewardPostLayerInfer
 
@@ -436,7 +436,7 @@ def test_reward_hidden_output(model_name, hidden_output):
         score_head_=SimpleNamespace(mm=lambda value: value @ score_weight),
     )
     collector = (
-        NoopHiddenCollector() if hidden_output is FinalHiddenOutput.NONE else FinalHiddenCollector(output=hidden_output)
+        NoopHiddenCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenCollector(policy=hidden_policy)
     )
     state = SimpleNamespace(
         is_prefill=True,
@@ -449,16 +449,16 @@ def test_reward_hidden_output(model_name, hidden_output):
     output = head.token_forward(hidden, state, weight)
     normed = torch.nn.functional.rms_norm(hidden, (3,), norm_weight, eps=1e-6)
     torch.testing.assert_close(output.logits, normed[[1, 4]] @ score_weight)
-    if hidden_output is FinalHiddenOutput.PRE_NORM:
+    if hidden_policy is FinalHiddenPolicy.PRE_NORM:
         assert output.final_hidden is hidden
-    elif hidden_output is FinalHiddenOutput.POST_NORM:
+    elif hidden_policy is FinalHiddenPolicy.POST_NORM:
         torch.testing.assert_close(output.final_hidden, normed)
     else:
         assert output.final_hidden is None
-    assert norm_rows == [5 if hidden_output is FinalHiddenOutput.POST_NORM else 2]
+    assert norm_rows == [5 if hidden_policy is FinalHiddenPolicy.POST_NORM else 2]
     collector.add_final_hidden(output.final_hidden)
     collected = collector.finish_output(state).spec_hidden
-    if hidden_output is FinalHiddenOutput.NONE:
+    if hidden_policy is FinalHiddenPolicy.NONE:
         assert collected is None
     else:
         torch.testing.assert_close(collected, output.final_hidden)
@@ -497,7 +497,7 @@ def test_model_does_not_fallback_to_raw_hidden(monkeypatch, forward):
     def state():
         return SimpleNamespace(
             input_ids=torch.ones(2, dtype=torch.long),
-            hidden_collector=FinalHiddenCollector(output=FinalHiddenOutput.POST_NORM),
+            hidden_collector=FinalHiddenCollector(policy=FinalHiddenPolicy.POST_NORM),
             need_dp_prefill_balance=False,
             call_overlap_hook=lambda: None,
         )

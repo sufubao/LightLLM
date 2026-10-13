@@ -7,7 +7,7 @@ import torch
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
-    FinalHiddenOutput,
+    FinalHiddenPolicy,
     HiddenCollector,
     LayerHiddenCollector,
     MtpHeadOutputCollector,
@@ -42,13 +42,13 @@ def test_hidden_collector_is_base_class_for_implementations():
     assert issubclass(LayerHiddenCollector, HiddenCollector)
 
 
-@pytest.mark.parametrize("output", [FinalHiddenOutput.PRE_NORM, FinalHiddenOutput.POST_NORM])
-def test_final_hidden_collectors_are_independent_instances(output):
-    prototype = FinalHiddenCollector(output=output)
+@pytest.mark.parametrize("policy", [FinalHiddenPolicy.PRE_NORM, FinalHiddenPolicy.POST_NORM])
+def test_final_hidden_collectors_are_independent_instances(policy):
+    prototype = FinalHiddenCollector(policy=policy)
     collector0 = prototype.new_instance()
     collector1 = prototype.new_instance()
-    assert collector0.final_hidden_output is output
-    assert collector1.final_hidden_output is output
+    assert collector0.final_hidden_policy is policy
+    assert collector1.final_hidden_policy is policy
     hidden0 = torch.randn(2, 3)
     hidden1 = torch.randn(2, 3)
     infer_state = SimpleNamespace(need_dp_prefill_balance=False)

@@ -2,7 +2,7 @@ from typing import ClassVar, Optional
 
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
-    FinalHiddenOutput,
+    FinalHiddenPolicy,
     HiddenCollector,
     LayerHiddenCollector,
     MtpHeadOutputCollector,
@@ -91,5 +91,5 @@ class MtpManager:
             collector_type = FinalHiddenCollector
 
         if collector_type is FinalHiddenCollector:
-            collector_kwargs["output"] = getattr(model, "mtp_final_hidden_output", FinalHiddenOutput.PRE_NORM)
+            collector_kwargs["policy"] = getattr(model, "mtp_final_hidden_policy", FinalHiddenPolicy.PRE_NORM)
         return collector_type(**collector_kwargs)

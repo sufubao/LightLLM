@@ -8,7 +8,8 @@ from typing import Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
-from .batch_objs import FinalHiddenPolicy, ModelInput
+from lightllm.common.mtp_config import FinalHiddenPolicy
+from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState

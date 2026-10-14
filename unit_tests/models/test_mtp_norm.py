@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
+from lightllm.common.mtp_config import FinalHiddenPolicy
 from lightllm.common.basemodel.layer_weights.meta_weights import NoTpGEMMANormWeight, RMSNormWeight
 from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
@@ -25,7 +25,7 @@ from lightllm.models.qwen3_5_mtp.layer_infer.pre_layer_infer import Qwen3_5MTPPr
         ),
     ],
 )
-def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) -> None:
+def test_main_to_draft_two_steps(monkeypatch, tmp_path, family, prefill, device, dtype) -> None:
     from importlib import import_module
 
     classes = {
@@ -41,9 +41,15 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
         module, name = path.split(":")
         cls = getattr(import_module("lightllm.models." + module), name)
         producers.append(cls.__new__(cls))
+    import json
+
+    draft_type = {"qwen35": "qwen3_5", "deepseek": "deepseek_v3"}.get(family, family)
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": draft_type}))
+    producers[1].weight_dir_ = str(tmp_path)
     manager = MtpManager.__new__(MtpManager)
     manager.args = SimpleNamespace(
-        mtp_mode="vanilla_no_att" if family in ("mistral", "qwen3_moe") else "vanilla_with_att"
+        mtp_mode="vanilla_no_att" if family in ("mistral", "qwen3_moe") else "vanilla_with_att",
+        mtp_draft_model_dir=[str(tmp_path)],
     )
     norm_class = NoTpGEMMANormWeight if family == "qwen35" else RMSNormWeight
 

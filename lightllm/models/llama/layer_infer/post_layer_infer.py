@@ -1,6 +1,7 @@
 import os
 import torch
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, PostLayerOutput
+from lightllm.common.mtp_config import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np

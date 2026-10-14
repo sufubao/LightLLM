@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, PostLayerOutput
+from lightllm.common.mtp_config import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.mtp_collector import FinalHiddenMtpCollector, NoopMtpCollector
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk

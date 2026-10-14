@@ -35,7 +35,8 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, ModelInput, ModelOutput, PostLayerOutput
+from lightllm.common.mtp_config import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
 from lightllm.common.basemodel.mtp_collector import (
     NoopMtpCollector,
 )

@@ -1,6 +1,5 @@
 import copy
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import List, Optional
 
 import torch
@@ -172,12 +171,6 @@ class ModelMtpOutput:
         if output.spec_hidden is not None:
             output.spec_hidden = output.spec_hidden[:origin_handle_token_num]
         return output
-
-
-class FinalHiddenPolicy(Enum):
-    NONE = auto()
-    PRE_NORM = auto()
-    POST_NORM = auto()
 
 
 @dataclass

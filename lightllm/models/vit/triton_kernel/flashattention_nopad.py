@@ -203,6 +203,8 @@ try:
             pack_gqa=None,
             sm_margin=0,
             sinks=None,
+            sparse_mask_fine=None,
+            only_qv=False,
         )
         return o
 

@@ -42,8 +42,8 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
 
         model_inputs = [copy.copy(model_input) for model_input in target_model_inputs]
         draft_hiddens = [
-            target_model_output0.spec_output.spec_hidden,
-            target_model_output1.spec_output.spec_hidden,
+            target_model_output0.mtp_output.spec_hidden,
+            target_model_output1.mtp_output.spec_hidden,
         ]
         draft_token_ids = list(target_next_token_ids)
 
@@ -52,11 +52,11 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
                 model_inputs[batch_index] = self._prepare_mtp_prefill_inputs(
                     model_input=model_input,
                     b_next_token_ids=draft_token_ids[batch_index],
-                    spec_draft_input_hiddens=draft_hiddens[batch_index],
+                    mtp_draft_input_hiddens=draft_hiddens[batch_index],
                 )
             draft_outputs = draft_model._microbatch_overlap_prefill_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
-                draft_hiddens[batch_index] = draft_output.spec_output.spec_hidden
+                draft_hiddens[batch_index] = draft_output.mtp_output.spec_hidden
                 draft_token_ids[batch_index] = self.backend._gen_argmax_token_ids(draft_output)
 
     def propose_next_overlap(
@@ -99,8 +99,8 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         model_inputs = [copy.copy(target_model_input0), copy.copy(target_model_input1)]
         draft_token_ids = [target_next_token_ids0, target_next_token_ids1]
         draft_hiddens = [
-            target_model_output0.spec_output.spec_hidden,
-            target_model_output1.spec_output.spec_hidden,
+            target_model_output0.mtp_output.spec_hidden,
+            target_model_output1.mtp_output.spec_hidden,
         ]
         proposal_token_ids = target_next_token_ids0.new_empty((sum(req_num_by_batch), draft_step))
         proposal_schedule_scores = (
@@ -117,11 +117,11 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         for step in range(draft_step):
             for batch_index, model_input in enumerate(model_inputs):
                 model_input.input_ids = draft_token_ids[batch_index]
-                model_input.spec_draft_input_hiddens = draft_hiddens[batch_index]
+                model_input.mtp_draft_input_hiddens = draft_hiddens[batch_index]
 
             draft_outputs = self.backend.draft_models[step]._microbatch_overlap_decode_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
-                draft_hiddens[batch_index] = draft_output.spec_output.spec_hidden
+                draft_hiddens[batch_index] = draft_output.mtp_output.spec_hidden
                 if self.enable_dynmaic_mtp:
                     draft_token_ids[batch_index], draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(
                         draft_output
@@ -159,7 +159,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         self,
         model_input: ModelInput,
         b_next_token_ids: torch.Tensor,
-        spec_draft_input_hiddens: torch.Tensor,
+        mtp_draft_input_hiddens: torch.Tensor,
     ) -> ModelInput:
         """构造 Vanilla chained MTP 下一层 draft model 的 prefill 输入。
 
@@ -176,15 +176,15 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
            mixed-prefill 逻辑保留这里显式生成的 token，而不会按 decode
            请求重新收集 token。
         2. 将上一层 model 输出的 hidden states 绑定到
-           ``spec_draft_input_hiddens``，供下一层 MTP model 使用。
+           ``mtp_draft_input_hiddens``，供下一层 MTP model 使用。
 
         参数：
             model_input: 当前层的 prefill 输入。方法会原地更新该对象的
                 ``input_ids``、``b_is_decode_req`` 和
-                ``spec_draft_input_hiddens`` 字段。
+                ``mtp_draft_input_hiddens`` 字段。
             b_next_token_ids: 每个请求需要追加到当前 query 尾部的 token，
                 shape 为 ``[batch_size]``。
-            spec_draft_input_hiddens: 上一层 model 产生、供下一层 draft model
+            mtp_draft_input_hiddens: 上一层 model 产生、供下一层 draft model
                 使用的 hidden states。
 
         返回：
@@ -216,5 +216,5 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
             b_seq_len=model_input.b_seq_len,
             b_ready_cache_len=model_input.b_ready_cache_len,
         )
-        model_input.spec_draft_input_hiddens = spec_draft_input_hiddens
+        model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
         return model_input

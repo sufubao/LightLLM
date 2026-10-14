@@ -80,9 +80,9 @@ class SpecEngine:
         if plan.dynamic_batch_size == plan.origin_batch_size:
             return model_input, None
 
-        from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import prepare_dynamic_spec_model_input
+        from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import prepare_dynamic_mtp_model_input
 
-        model_input, selected_row_mask = prepare_dynamic_spec_model_input(
+        model_input, selected_row_mask = prepare_dynamic_mtp_model_input(
             model_input=model_input,
             req_num=req_num,
             dynamic_batch_size=plan.dynamic_batch_size,

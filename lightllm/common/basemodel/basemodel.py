@@ -35,11 +35,11 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.batch_objs import FinalHiddenOutputPolicy, ModelInput, ModelOutput, PostLayerOutput
-from lightllm.common.basemodel.spec_collector import (
-    NoopSpecCollector,
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, ModelInput, ModelOutput, PostLayerOutput
+from lightllm.common.basemodel.mtp_collector import (
+    NoopMtpCollector,
 )
-from lightllm.common.basemodel.spec_manager import SpecManager
+from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
@@ -57,7 +57,7 @@ torch.backends.cudnn.enabled = True
 
 
 class TpPartBaseModel:
-    is_spec_draft_model = False
+    is_mtp_draft_model = False
 
     # weight class
     pre_and_post_weight_class = None
@@ -87,8 +87,8 @@ class TpPartBaseModel:
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         if self.args.enable_decode_microbatch_overlap:
             self.graph_max_batch_size //= 2
-        self.spec_manager = SpecManager.get_instance()
-        self.graph_max_batch_size *= self.spec_manager.get_decode_tokens_per_request(self.is_spec_draft_model)
+        self.mtp_manager = MtpManager.get_instance()
+        self.graph_max_batch_size *= self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -135,7 +135,7 @@ class TpPartBaseModel:
             logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
-        self._init_spec_collector()
+        self._init_mtp_collector()
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -271,18 +271,18 @@ class TpPartBaseModel:
         return
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
-        alignment = self.spec_manager.get_decode_batch_alignment(self.is_spec_draft_model)
+        alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         if self.args.enable_tpsp_mix_mode:
             alignment = math.lcm(alignment, self.tp_world_size_)
         return triton.cdiv(batch_size, alignment) * alignment
 
     def _init_cudagraph(self):
         # When graph covers the configured request length, it must also cover MTP's internal token margin.
-        if self.args.spec_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
+        if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
             self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
 
-        decode_tokens_per_request = self.spec_manager.get_decode_tokens_per_request(self.is_spec_draft_model)
-        cuda_graph_grow_step_size = self.spec_manager.get_decode_batch_alignment(self.is_spec_draft_model)
+        decode_tokens_per_request = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
+        cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
             None
             if self.disable_cudagraph
@@ -293,7 +293,7 @@ class TpPartBaseModel:
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
-                capture_infer_cost=self.args.spec_dynamic_verify,
+                capture_infer_cost=self.args.mtp_dynamic_verify,
             )
         )
         if self.graph is not None:
@@ -317,8 +317,8 @@ class TpPartBaseModel:
     def _init_custom(self):
         pass
 
-    def _init_spec_collector(self):
-        self.spec_collector_prototype = self.spec_manager.create_spec_collector(model=self)
+    def _init_mtp_collector(self):
+        self.mtp_collector_prototype = self.mtp_manager.create_mtp_collector(model=self)
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
@@ -348,11 +348,11 @@ class TpPartBaseModel:
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
-        infer_state.spec_collector = self.spec_collector_prototype.new_instance()
-        infer_state.final_hidden_output_policy = self.spec_manager.get_final_hidden_output_policy(self)
+        infer_state.mtp_collector = self.mtp_collector_prototype.new_instance()
+        infer_state.final_hidden_policy = self.mtp_manager.get_final_hidden_policy(self)
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
-        infer_state.is_draft_model = self.is_spec_draft_model
+        infer_state.is_draft_model = self.is_mtp_draft_model
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
@@ -383,7 +383,7 @@ class TpPartBaseModel:
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
 
         # 特殊模型，特殊模式的特定变量初始化操作。
-        infer_state.spec_draft_input_hiddens = model_input.spec_draft_input_hiddens
+        infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
         if infer_state.is_prefill:
             infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
@@ -435,9 +435,9 @@ class TpPartBaseModel:
         )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
-        if new_model_input.spec_draft_input_hiddens is not None:
-            new_model_input.spec_draft_input_hiddens = pad2dim_tensor_to_new_batch(
-                input=new_model_input.spec_draft_input_hiddens,
+        if new_model_input.mtp_draft_input_hiddens is not None:
+            new_model_input.mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
+                input=new_model_input.mtp_draft_input_hiddens,
                 new_batch_size=new_batch_size,
             )
 
@@ -477,9 +477,9 @@ class TpPartBaseModel:
         ]
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
-        if new_model_input.spec_draft_input_hiddens is not None:
-            new_model_input.spec_draft_input_hiddens = pad2dim_tensor_to_new_batch(
-                input=new_model_input.spec_draft_input_hiddens,
+        if new_model_input.mtp_draft_input_hiddens is not None:
+            new_model_input.mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
+                input=new_model_input.mtp_draft_input_hiddens,
                 new_batch_size=new_handle_token_num,
             )
 
@@ -487,10 +487,10 @@ class TpPartBaseModel:
         return new_model_input
 
     def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo) -> ModelOutput:
-        infer_state.spec_collector.collect_post_output(post_output)
+        infer_state.mtp_collector.collect_post_output(post_output)
         output = ModelOutput(
             logits=post_output.logits.contiguous(),
-            spec_output=infer_state.spec_collector.finish_output(infer_state=infer_state),
+            mtp_output=infer_state.mtp_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
         )
@@ -504,7 +504,7 @@ class TpPartBaseModel:
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        new_model_output.spec_output = model_output.spec_output.unpad_decode(
+        new_model_output.mtp_output = model_output.mtp_output.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
         )
@@ -518,7 +518,7 @@ class TpPartBaseModel:
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        new_model_output.spec_output = padded_model_output.spec_output.unpad_prefill(
+        new_model_output.mtp_output = padded_model_output.mtp_output.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
         # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
@@ -641,16 +641,16 @@ class TpPartBaseModel:
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_tensors = [input_embs]
         if Autotuner.is_autotune_warmup():
-            infer_state.spec_collector = NoopSpecCollector()
-            infer_state.final_hidden_output_policy = FinalHiddenOutputPolicy.NONE
+            infer_state.mtp_collector = NoopMtpCollector()
+            infer_state.final_hidden_policy = FinalHiddenPolicy.NONE
 
         def prefill_func(input_tensors, _infer_state):
-            spec_collector = _infer_state.spec_collector
+            mtp_collector = _infer_state.mtp_collector
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 _input_embs = layer.context_forward(_input_embs, _infer_state, self.trans_layers_weight[i])
-                spec_collector.add(
+                mtp_collector.add(
                     layer_index=i,
                     hidden=_input_embs,
                 )
@@ -696,7 +696,7 @@ class TpPartBaseModel:
         return model_output
 
     def _token_forward(self, infer_state: InferStateInfo):
-        spec_collector = infer_state.spec_collector
+        mtp_collector = infer_state.mtp_collector
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
@@ -705,7 +705,7 @@ class TpPartBaseModel:
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
-            spec_collector.add(layer_index=i, hidden=input_embs)
+            mtp_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         post_output: PostLayerOutput = self.post_infer.token_forward(
@@ -868,8 +868,8 @@ class TpPartBaseModel:
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
         g_cache_manager.cache_env_in()
-        spec_collector0 = infer_state.spec_collector
-        spec_collector1 = infer_state1.spec_collector
+        mtp_collector0 = infer_state.mtp_collector
+        mtp_collector1 = infer_state1.mtp_collector
 
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
             infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
@@ -890,11 +890,11 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
-            spec_collector0.add(
+            mtp_collector0.add(
                 layer_index=i,
                 hidden=input_embs,
             )
-            spec_collector1.add(
+            mtp_collector1.add(
                 layer_index=i,
                 hidden=input_embs1,
             )
@@ -922,8 +922,8 @@ class TpPartBaseModel:
 
     @final
     def _overlap_tpsp_token_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
-        spec_collector0 = infer_state.spec_collector
-        spec_collector1 = infer_state1.spec_collector
+        mtp_collector0 = infer_state.mtp_collector
+        mtp_collector1 = infer_state1.mtp_collector
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
             infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
         )
@@ -934,11 +934,11 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
-            spec_collector0.add(
+            mtp_collector0.add(
                 layer_index=i,
                 hidden=input_embs,
             )
-            spec_collector1.add(
+            mtp_collector1.add(
                 layer_index=i,
                 hidden=input_embs1,
             )
@@ -1171,11 +1171,11 @@ class TpPartBaseModel:
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
-        if self.is_spec_draft_model:
-            special_model_input["spec_draft_input_hiddens"] = torch.randn(
+        if self.is_mtp_draft_model:
+            special_model_input["mtp_draft_input_hiddens"] = torch.randn(
                 token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
             )
         else:
-            special_model_input["spec_draft_input_hiddens"] = None
+            special_model_input["mtp_draft_input_hiddens"] = None
 
         return special_model_input

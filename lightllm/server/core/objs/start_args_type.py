@@ -190,7 +190,7 @@ class StartArgs:
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
     enable_fused_shared_experts: bool = field(default=False)
-    spec_mode: Optional[str] = field(
+    mtp_mode: Optional[str] = field(
         default=None,
         metadata={
             "choices": [
@@ -205,9 +205,9 @@ class StartArgs:
             ]
         },
     )
-    spec_draft_model_dir: Optional[List[str]] = field(default=None)
-    spec_step: int = field(default=0)
-    spec_dynamic_verify: bool = field(default=False)
+    mtp_draft_model_dir: Optional[List[str]] = field(default=None)
+    mtp_step: int = field(default=0)
+    mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)

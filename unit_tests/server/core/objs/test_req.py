@@ -15,7 +15,7 @@ def setup_module_env():
         set_env_start_args(
             easydict.EasyDict(
                 {
-                    "spec_step": 0,
+                    "mtp_step": 0,
                     "llm_prefill_att_backend": ["None"],
                     "llm_decode_att_backend": ["None"],
                     "cpu_cache_token_page_size": 256,

@@ -14,7 +14,7 @@ class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
     def _mtp_context_forward(
         self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: MistralMTPPreAndPostLayerWeight
     ):
-        tgt_embdings = infer_state.spec_draft_input_hiddens
+        tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert (
             input_embdings.shape[0] == tgt_embdings.shape[0]
         ), f"shape {input_embdings.shape} != shape {tgt_embdings.shape}"
@@ -32,7 +32,7 @@ class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
     def _mtp_token_forward(
         self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: MistralMTPPreAndPostLayerWeight
     ):
-        tgt_embdings = infer_state.spec_draft_input_hiddens
+        tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert input_embdings.shape[0] == tgt_embdings.shape[0]
 
         layer_weight.enorm_weight_(input=input_embdings, eps=self.eps_, out=input_embdings)

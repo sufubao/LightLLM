@@ -63,15 +63,15 @@ class BaseAttBackend:
 
     def uses_dynamic_spec_verify_layout(self) -> bool:
         args = get_env_start_args()
-        draft_step = self.model.spec_manager.get_decode_draft_step(self.model.is_spec_draft_model)
-        is_main_model = not self.model.is_spec_draft_model
+        draft_step = self.model.mtp_manager.get_decode_draft_step(self.model.is_mtp_draft_model)
+        is_main_model = not self.model.is_mtp_draft_model
         has_decode_draft_step = draft_step > 0
-        dynamic_verify_enabled = args.spec_dynamic_verify
+        dynamic_verify_enabled = args.mtp_dynamic_verify
         return is_main_model and has_decode_draft_step and dynamic_verify_enabled
 
     def uses_causal_attention(self) -> bool:
         args = get_env_start_args()
-        is_parallel_block_draft = self.model.is_spec_draft_model and args.spec_mode in ("dspark", "dflash")
+        is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash")
         return not is_parallel_block_draft
 
     def _find_layer_index(

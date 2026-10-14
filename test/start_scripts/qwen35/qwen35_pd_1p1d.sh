@@ -38,9 +38,9 @@ P_COMMON_ARGS=(
   --linear_att_hash_page_size 2048
   --linear_att_page_block_num 8
   --quant_type fp8w8a8-pt-sgl
-  --spec_mode dspark
-  --spec_draft_model_dir "${DSPARK_MODEL_DIR}"
-  --spec_step 5
+  --mtp_mode dspark
+  --mtp_draft_model_dir "${DSPARK_MODEL_DIR}"
+  --mtp_step 5
   "${CHAT_TEMPLATE_ARGS[@]}"
   --pd_trans_mode nccl
   --pd_kv_page_size 4096
@@ -59,9 +59,9 @@ D_COMMON_ARGS=(
   --batch_max_tokens 512
   --linear_att_cache_size 500
   --quant_type fp8w8a8-pt-sgl
-  --spec_mode dspark
-  --spec_draft_model_dir "${DSPARK_MODEL_DIR}"
-  --spec_step 5
+  --mtp_mode dspark
+  --mtp_draft_model_dir "${DSPARK_MODEL_DIR}"
+  --mtp_step 5
   "${CHAT_TEMPLATE_ARGS[@]}"
   --pd_trans_mode nccl
   --pd_kv_page_size 4096

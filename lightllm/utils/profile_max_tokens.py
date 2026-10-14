@@ -65,7 +65,7 @@ def get_mtp_adjusted_mem_fraction(
 def profile_mtp_weight_memory(model):
     """Reserve auto-profiled KV budget for MTP weights allocated after the target model."""
     should_adjust = (
-        model.max_total_token_num is None and not model.is_spec_draft_model and model.args.spec_mode is not None
+        model.max_total_token_num is None and not model.is_mtp_draft_model and model.args.mtp_mode is not None
     )
     if not should_adjust:
         yield

@@ -5,15 +5,15 @@ from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight i
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import FinalHiddenOutputPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.basemodel.basemodel import load_hf_weights
 
 
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
-    spec_final_hidden_output_policy = FinalHiddenOutputPolicy.PRE_NORM
+    mtp_final_hidden_policy = FinalHiddenPolicy.PRE_NORM
 
     # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
-    is_spec_draft_model = True
+    is_mtp_draft_model = True
 
     pre_and_post_weight_class = Glm4MoeLiteMTPPreAndPostLayerWeight
     pre_layer_infer_class = Deepseek3MTPPreLayerInfer

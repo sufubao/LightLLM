@@ -1,6 +1,6 @@
 import os
 import torch
-from lightllm.common.basemodel.batch_objs import FinalHiddenOutputPolicy, PostLayerOutput
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, PostLayerOutput
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
@@ -59,8 +59,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def _prepare_output_hidden(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
-        hidden_policy = infer_state.final_hidden_output_policy
-        norm_all_tokens = hidden_policy is FinalHiddenOutputPolicy.POST_NORM or (
+        hidden_policy = infer_state.final_hidden_policy
+        norm_all_tokens = hidden_policy is FinalHiddenPolicy.POST_NORM or (
             infer_state.is_prefill and infer_state.return_all_prompt_logics
         )
 
@@ -72,9 +72,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             last_input = self._norm(last_input, infer_state, layer_weight)
 
         final_hidden = None
-        if hidden_policy is FinalHiddenOutputPolicy.PRE_NORM:
+        if hidden_policy is FinalHiddenPolicy.PRE_NORM:
             final_hidden = input_embdings
-        elif hidden_policy is FinalHiddenOutputPolicy.POST_NORM:
+        elif hidden_policy is FinalHiddenPolicy.POST_NORM:
             final_hidden = normed
 
         return last_input, token_num, final_hidden

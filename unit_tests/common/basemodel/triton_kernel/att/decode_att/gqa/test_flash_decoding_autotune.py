@@ -125,7 +125,7 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch):
     state = TritonDecodeAttState(
         backend=SimpleNamespace(
             model=SimpleNamespace(
-                is_spec_draft_model=False, spec_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0)
+                is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0)
             )
         ),
         infer_state=SimpleNamespace(max_kv_seq_len=8193),

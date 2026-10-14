@@ -26,7 +26,7 @@ class ReqSamplingParamsManager:
         # mode ["cpu_counter", "pin_mem_counter", "gpu_counter"]
         self.penalty_counter_mode = get_env_start_args().penalty_counter_mode
         self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
-        self.mtp_verify_width = get_env_start_args().spec_step + 1
+        self.mtp_verify_width = get_env_start_args().mtp_step + 1
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
@@ -37,7 +37,7 @@ class ReqSamplingParamsManager:
         )
         self.req_to_next_token_scores = (
             torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32)
-            if get_env_start_args().spec_dynamic_verify
+            if get_env_start_args().mtp_dynamic_verify
             else None
         )
 

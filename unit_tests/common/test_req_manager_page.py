@@ -143,7 +143,7 @@ def test_need_token_num_distinguishes_compute_and_page_allocation():
         args=SimpleNamespace(page_size=4),
         cur_kv_len=3,
         hold_kv_len=4,
-        spec_step=0,
+        mtp_step=0,
         get_chuncked_input_token_len=lambda: 6,
         get_cur_total_len=lambda: 10,
     )
@@ -160,7 +160,7 @@ def test_need_token_num_distinguishes_compute_and_page_allocation():
     assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=True) == (2, 0)
     assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=False) == (6, 4)
 
-    req.spec_step = 2
+    req.mtp_step = 2
     assert InferReq.decode_need_token_num(req) == (6, 4)
     req.hold_kv_len = 12
     assert InferReq.decode_need_token_num(req) == (6, 0)
@@ -257,7 +257,7 @@ def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
     req.args = context.args
     req.cur_kv_len = 4
     req.hold_kv_len = 4
-    req.spec_step = 0
+    req.mtp_step = 0
     req.filter_mark = False
     req.wait_pause = False
     req.paused = False
@@ -319,7 +319,7 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
     req.args = context.args
     req.cur_kv_len = page_size
     req.hold_kv_len = page_size
-    req.spec_step = 0
+    req.mtp_step = 0
     req.filter_mark = False
     req.wait_pause = False
     req.paused = False
@@ -345,7 +345,7 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
     req = _make_req(0)
     req.cur_kv_len = 3
     req.hold_kv_len = 4
-    req.spec_step = 2
+    req.mtp_step = 2
     req.multimodal_params = {"images": [], "audios": []}
     req.shared_kv_node = None
     req.get_cur_total_len = lambda: 4
@@ -374,7 +374,7 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
     req = _make_req(0)
     req.cur_kv_len = 3
     req.hold_kv_len = 3
-    req.spec_step = 2
+    req.mtp_step = 2
     req.multimodal_params = {"images": [], "audios": []}
     req.shared_kv_node = None
     req.get_cur_total_len = lambda: 4

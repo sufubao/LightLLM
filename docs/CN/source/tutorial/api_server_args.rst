@@ -51,7 +51,7 @@ APIServer 参数详解
 .. option:: --run_mode
 
     设置运行模式，可选值：
-
+    
     * ``normal``: 单服务器模式（默认）
     * ``prefill``: 预填充模式（用于 pd 分离运行模式）
     * ``decode``: 解码模式（用于 pd 分离运行模式）
@@ -61,7 +61,7 @@ APIServer 参数详解
 .. option:: --performance_mode, --p_mode
 
     不同场景的性能模式，可选值：
-
+    
     * ``None``: 不应用性能模式（默认）
     * ``personal``: 私有化个人运行模式，自动设置：
         - ``running_max_req_size`` 为 3
@@ -93,10 +93,10 @@ APIServer 参数详解
 .. option:: --zmq_mode
 
     ZMQ 通信模式，可选值：
-
+    
     * ``tcp://``: TCP 模式
     * ``ipc:///tmp/``: IPC 模式（默认）
-
+    
     只能在 ``['tcp://', 'ipc:///tmp/']`` 中选择
 
 PD 分离模式参数
@@ -105,13 +105,13 @@ PD 分离模式参数
 .. option:: --pd_master_ip
 
     PD 主节点 IP 地址，默认为 ``0.0.0.0``
-
+    
     当 run_mode 设置为 prefill 或 decode 时需要设置此参数
 
 .. option:: --pd_master_port
 
     PD 主节点端口，默认为 ``1212``
-
+    
     当 run_mode 设置为 prefill 或 decode 时需要设置此参数
 
 .. option:: --pd_master_mode
@@ -192,7 +192,7 @@ PD 分离模式参数
 .. option:: --model_name
 
     模型名称，用于区分内部模型名称，默认为 ``default_model_name``
-
+    
     可通过 ``host:port/get_model_name`` 获取
 
 .. option:: --model_dir
@@ -202,7 +202,7 @@ PD 分离模式参数
 .. option:: --tokenizer_mode
 
     分词器加载模式，可选值：
-
+    
     * ``slow``: 慢速模式，加载快但运行慢，适合调试和测试
     * ``fast``: 快速模式（默认），获得最佳性能
     * ``auto``: 自动模式，尝试使用快速模式，失败则使用慢速模式
@@ -210,7 +210,7 @@ PD 分离模式参数
 .. option:: --load_way
 
     模型权重加载方式，默认为 ``HF`` (Huggingface 格式)
-
+    
     llama 模型还支持 ``DS`` (Deepspeed) 格式
 
 .. option:: --trust_remote_code
@@ -223,13 +223,13 @@ PD 分离模式参数
 .. option:: --max_total_token_num
 
     GPU 和模型支持的总 token 数量，等于 max_batch * (input_len + output_len)
-
+    
     如果不指定，将根据 mem_fraction 自动计算
 
 .. option:: --mem_fraction
 
     内存使用比例，默认为 ``0.9``
-
+    
     如果运行时出现 OOM，可以指定更小的值
 
 .. option:: --batch_max_tokens
@@ -257,7 +257,7 @@ PD 分离模式参数
 .. option:: --tool_call_parser
 
     openai接口工具调用解析器类型，可选值：
-
+    
     * ``qwen25``
     * ``llama3``
     * ``mistral``
@@ -288,14 +288,14 @@ PD 分离模式参数
 .. option:: --dp
 
     数据并行大小，默认为 ``1``
-
+    
     这是 deepseekv2 的有用参数。使用 deepseekv2 模型时，将 dp 设置为等于 tp 参数。
     其他情况下请不要设置，保持默认值 1。
 
 .. option:: --nccl_host
 
     用于构建 PyTorch 分布式环境的 nccl_host，默认为 ``127.0.0.1``
-
+    
     多节点部署时，应设置为主节点的 IP
 
 .. option:: --nccl_port
@@ -305,7 +305,7 @@ PD 分离模式参数
 .. option:: --use_config_server_to_init_nccl
 
     使用由 config_server 启动的 tcp store 服务器初始化 nccl，默认为 False
-
+    
     设置为 True 时，--nccl_host 必须等于 config_server_host，--nccl_port 对于 config_server 必须是唯一的，
     不要为不同的推理节点使用相同的 nccl_port，这将是严重错误
 
@@ -324,7 +324,7 @@ PD 分离模式参数
 .. option:: --disable_aggressive_schedule
 
     禁用激进调度
-
+    
     激进调度可能导致解码期间频繁的预填充中断。禁用它可以让 router_max_wait_tokens 参数更有效地工作。
 
 .. option:: --enable_prefill_decode_mixed
@@ -364,7 +364,7 @@ PD 分离模式参数
 .. option:: --output_constraint_mode
 
     设置输出约束后端，可选值：
-
+    
     * ``outlines``: 使用 outlines 后端
     * ``xgrammar``: 使用 xgrammar 后端
     * ``none``: 无输出约束（默认）
@@ -458,13 +458,13 @@ PD 分离模式参数
 .. option:: --enable_tpsp_mix_mode
 
     推理后端将使用 TP SP 混合运行模式
-
+    
     目前仅支持 llama 和 deepseek系列 模型
 
 .. option:: --enable_prefill_microbatch_overlap
 
     推理后端将为预填充使用微批次重叠模式
-
+    
     目前仅支持 deepseek系列 模型
 
 .. option:: --enable_decode_microbatch_overlap
@@ -511,7 +511,7 @@ PD 分离模式参数
     * ``triton``: 使用 Triton 后端
 
     示例：``--llm_decode_att_backend flashinfer triton``。
-
+    
 .. option:: --llm_kv_type
 
     推理后端使用什么类型的数据存储kv cache, 可选值为 "None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"
@@ -565,7 +565,7 @@ PD 分离模式参数
 .. option:: --graph_split_batch_size
 
     控制解码期间生成 CUDA graph 的间隔，默认为 ``32``
-
+    
     对于从 1 到指定 graph_split_batch_size 的值，将连续生成 CUDA graph。
     对于从 graph_split_batch_size 到 graph_max_batch_size 的值，
     每增加 graph_grow_step_size 就会生成一个新的 CUDA graph。
@@ -579,7 +579,7 @@ PD 分离模式参数
 .. option:: --graph_max_len_in_batch
 
     解码阶段可以被 cuda graph 捕获的最大序列长度，默认为 ``0``
-
+    
     默认值为 8192。如果遇到更大的值，将转为 eager 模式。
 
 量化参数
@@ -661,7 +661,7 @@ PD 分离模式参数
 .. option:: --quant_cfg
 
     量化配置文件路径。可用于混合量化。
-
+    
     示例可以在 test/advanced_config/mixed_quantization/llamacls-mix-down.yaml 中找到。
 
 .. option:: --expert_dtype
@@ -683,7 +683,7 @@ PD 分离模式参数
 .. option:: --vit_quant_cfg
 
     ViT 量化配置文件路径。可用于混合量化。
-
+    
     示例可以在 lightllm/common/quantization/configs 中找到。
 
 采样和生成参数
@@ -692,7 +692,7 @@ PD 分离模式参数
 .. option:: --sampling_backend
 
     采样使用的实现，可选值：
-
+    
     * ``triton``: 使用 torch 和 triton kernel（默认）
     * ``sglang_kernel``: 使用 sglang_kernel 实现
 
@@ -708,27 +708,32 @@ PD 分离模式参数
 
     使用 tgi 输入和输出格式
 
-投机解码参数
+MTP 多预测参数
 --------------
 
-.. option:: --spec_mode, --mtp_mode
+.. option:: --mtp_mode
 
-    投机解码模式：``vanilla_with_att``、``vanilla_no_att``、``eagle_with_att``、
-    ``eagle_no_att``、``eagle3``、``dspark`` 或 ``dflash``。默认不启用。
-    ``--mtp_mode`` 是兼容旧脚本的别名。
+    支持的 mtp 模式，建议使用 eagle_with_att获得更好的性能体验，可选值：
+    
+    * ``vanilla_with_att``
+    * ``eagle_with_att``
+    * ``vanilla_no_att``
+    * ``eagle_no_att``
+    * ``None``: 不启用 mtp（默认）
 
-.. option:: --spec_draft_model_dir, --mtp_draft_model_dir
+.. option:: --mtp_draft_model_dir
 
-    草稿模型路径，可指定一个或多个路径。旧参数名仍可使用。
+    MTP 多预测功能的草稿模型路径
+    
+    用于加载 MTP 多输出 token 模型。
 
-.. option:: --spec_step, --mtp_step
+.. option:: --mtp_step
 
-    每轮每请求额外草拟的 token 数，默认为 ``0``；主模型通常验证 ``spec_step + 1`` 个位置。
-    DSpark 和 DFlash 使用草稿模型 checkpoint 的 ``block_size``。旧参数名仍可使用。
-
-.. option:: --spec_dynamic_verify, --mtp_dynamic_verify
-
-    启用动态投机解码调度。旧参数名仍可使用。
+    指定使用草稿模型预测的额外 token 数量，默认为 ``0``
+    
+    目前此功能仅支持 DeepSeekV3/R1 模型。
+    增加此值允许更多预测，但确保模型与指定的步数兼容。
+    目前 deepseekv3/r1 模型仅支持 1 步
 
 DeepSeek 冗余专家参数
 ---------------------

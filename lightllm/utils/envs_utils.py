@@ -228,9 +228,9 @@ def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
 def enable_triton_mtp_kernel() -> bool:
     """
     启用 Triton MTP 解码专用 kernel
-    通过启动参数 --spec_step > 0 和 --llm_decode_att_backend=triton 控制
+    通过启动参数 --mtp_step > 0 和 --llm_decode_att_backend=triton 控制
     """
-    return (get_env_start_args().spec_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
+    return (get_env_start_args().mtp_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
 
 
 @lru_cache(maxsize=None)
@@ -265,38 +265,38 @@ def enable_cpu_cache_numa_interleave() -> bool:
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
     args = get_env_start_args()
-    spec_mode = args.spec_mode
+    mtp_mode = args.mtp_mode
 
-    if spec_mode is None:
+    if mtp_mode is None:
         return 0
-    if spec_mode == "vanilla_no_att":
+    if mtp_mode == "vanilla_no_att":
         return 0
-    if spec_mode == "eagle_no_att":
+    if mtp_mode == "eagle_no_att":
         return 0
-    if spec_mode == "vanilla_with_att":
-        return args.spec_step
-    if spec_mode == "eagle_with_att":
+    if mtp_mode == "vanilla_with_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_with_att":
         return 1
-    if spec_mode == "eagle3":
-        return _get_mtp_draft_backbone_layer_num(args.spec_draft_model_dir[0])
-    if spec_mode == "dspark":
-        return _get_mtp_draft_backbone_layer_num(args.spec_draft_model_dir[0])
-    if spec_mode == "dflash":
-        return _get_mtp_draft_backbone_layer_num(args.spec_draft_model_dir[0])
+    if mtp_mode == "eagle3":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dspark":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
 
-    raise ValueError(f"unsupported spec_mode: {spec_mode}")
+    raise ValueError(f"unsupported mtp_mode: {mtp_mode}")
 
 
 @lru_cache(maxsize=None)
 def get_mtp_weight_layer_num() -> int:
     args = get_env_start_args()
-    spec_mode = args.spec_mode
+    mtp_mode = args.mtp_mode
 
-    if spec_mode is None:
+    if mtp_mode is None:
         return 0
-    if spec_mode == "vanilla_no_att":
-        return args.spec_step
-    if spec_mode == "eagle_no_att":
+    if mtp_mode == "vanilla_no_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_no_att":
         return 1
     return get_added_mtp_kv_layer_num()
 

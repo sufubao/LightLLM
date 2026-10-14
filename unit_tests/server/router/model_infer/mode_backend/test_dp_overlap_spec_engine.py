@@ -32,7 +32,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
 
 
 def test_dp_backend_reuses_common_engine_outside_overlap():
-    args = SimpleNamespace(spec_mode="eagle3", spec_dynamic_verify=False, dp=1)
+    args = SimpleNamespace(mtp_mode="eagle3", mtp_dynamic_verify=False, dp=1)
     backend = ChunkedPrefillBackend.__new__(ChunkedPrefillBackend)
     backend.args = args
     backend.max_draft_step = 2
@@ -103,7 +103,7 @@ def test_dp_backend_builds_dedicated_global_nccl_group(monkeypatch):
     monkeypatch.setattr(lightspec_planner_impl.torch.cuda, "Stream", lambda: created_stream)
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
-    backend.args = SimpleNamespace(spec_mode="eagle3", spec_dynamic_verify=True, dp=2)
+    backend.args = SimpleNamespace(mtp_mode="eagle3", mtp_dynamic_verify=True, dp=2)
     backend.max_draft_step = 3
     backend.dp_size = 2
     backend.model = SimpleNamespace(graph=None)
@@ -127,7 +127,7 @@ def test_dp_backend_does_not_build_group_for_single_draft_step_mode(monkeypatch)
     )
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
-    backend.args = SimpleNamespace(spec_mode="vanilla_with_att", spec_dynamic_verify=True, dp=2)
+    backend.args = SimpleNamespace(mtp_mode="vanilla_with_att", mtp_dynamic_verify=True, dp=2)
     backend.max_draft_step = 3
     backend.dp_size = 2
     backend.model = SimpleNamespace(graph=None)
@@ -150,7 +150,7 @@ def test_dp_backend_does_not_build_group_for_fixed_planner(monkeypatch):
     )
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
-    backend.args = SimpleNamespace(spec_mode="eagle3", spec_dynamic_verify=False, dp=2)
+    backend.args = SimpleNamespace(mtp_mode="eagle3", mtp_dynamic_verify=False, dp=2)
     backend.max_draft_step = 3
     backend.dp_size = 2
     backend.enable_prefill_microbatch_overlap = False
@@ -178,7 +178,7 @@ def test_dp_backend_overlap_decode_reuses_common_lightspec_group(monkeypatch):
     monkeypatch.setattr(lightspec_planner_impl.torch.cuda, "Stream", lambda: created_stream)
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
-    backend.args = SimpleNamespace(spec_mode="eagle3", spec_dynamic_verify=True, dp=2)
+    backend.args = SimpleNamespace(mtp_mode="eagle3", mtp_dynamic_verify=True, dp=2)
     backend.max_draft_step = 3
     backend.dp_size = 2
     backend.model = SimpleNamespace(graph=None)
@@ -196,7 +196,7 @@ def test_dp_backend_overlap_decode_reuses_common_lightspec_group(monkeypatch):
 
 def test_dp_backend_keeps_dynamic_planning_before_global_reduction():
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
-    backend.args = SimpleNamespace(spec_mode="eagle3", spec_dynamic_verify=True, dp=1)
+    backend.args = SimpleNamespace(mtp_mode="eagle3", mtp_dynamic_verify=True, dp=1)
     backend.max_draft_step = 3
     backend.dp_size = 1
     backend.model = SimpleNamespace(graph=None)
@@ -212,7 +212,7 @@ def test_dp_backend_keeps_dynamic_planning_before_global_reduction():
 
 
 def test_dp_prefill_and_decode_select_overlap_engine_independently():
-    args = SimpleNamespace(spec_mode="eagle3", spec_dynamic_verify=False, dp=1)
+    args = SimpleNamespace(mtp_mode="eagle3", mtp_dynamic_verify=False, dp=1)
 
     for prefill_overlap in (False, True):
         for decode_overlap in (False, True):

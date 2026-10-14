@@ -46,7 +46,7 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=4,
             all_layer_num=layers,
-            draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num() if args.spec_mode is not None else 0,
+            draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num() if args.mtp_mode is not None else 0,
             index_kpool=config["index_kpool"],
             index_head_dim=config["index_head_dim"],
         )

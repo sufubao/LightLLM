@@ -18,7 +18,7 @@ class Qwen3_5MTPPreLayerInfer(Qwen3VLMultimodalPreLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Qwen3_5MTPPreAndPostLayerWeight,
     ) -> torch.Tensor:
-        tgt_embdings = infer_state.spec_draft_input_hiddens
+        tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert (
             input_embdings.shape[0] == tgt_embdings.shape[0]
         ), f"shape {input_embdings.shape} != shape {tgt_embdings.shape}"

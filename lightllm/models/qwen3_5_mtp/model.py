@@ -15,8 +15,8 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
     # MTP draft model: reuses the main model's req/mem managers and rope caches, and is
-    # marked so the decode CUDA-graph / padding paths detect it (is_spec_draft_model).
-    is_spec_draft_model = True
+    # marked so the decode CUDA-graph / padding paths detect it (is_mtp_draft_model).
+    is_mtp_draft_model = True
 
     def __init__(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")

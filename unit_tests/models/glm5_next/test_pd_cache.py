@@ -19,13 +19,13 @@ def make_mems(monkeypatch, request):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
-    spec_step = request.param
+    mtp_step = request.param
     args = StartArgs(
         data_type="bfloat16",
         linear_att_hash_page_size=4,
         linear_att_page_block_num=2,
-        spec_step=spec_step,
-        spec_mode="eagle_with_att" if spec_step else None,
+        mtp_step=mtp_step,
+        mtp_mode="eagle_with_att" if mtp_step else None,
     )
     set_unique_server_name(args)
     get_env_start_args.cache_clear()
@@ -58,11 +58,11 @@ def make_mems(monkeypatch, request):
             ssm_state_dtype=torch.float32,
             full_attention_interval=4,
             all_layer_num=8,
-            draft_full_att_kv_layer_num=int(spec_step > 0),
+            draft_full_att_kv_layer_num=int(mtp_step > 0),
         )
         mems = []
         for _ in range(tp):
-            mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(spec_step > 0), config)
+            mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0), config)
             req = Glm5NextReqManager(3, 32, mem, config)
             mem.write_to_shm(req)
             assert mem.big_page_buffers is not None
@@ -77,7 +77,7 @@ def make_mems(monkeypatch, request):
 @pytest.mark.parametrize("remainder", range(4))
 def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, remainder):
     source, dest = make_mems(prefill_tp), make_mems(decode_tp)
-    mtp_size = get_env_start_args().spec_step + 1
+    mtp_size = get_env_start_args().mtp_step + 1
     layers = source[0].layer_num
     src_req, dst_req = 0, 2
     length = 8 + remainder

@@ -150,14 +150,14 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
             "max_req_num": get_running_max_req_size_per_dp(self.args),
-            # MTP length stopping is asynchronous, so up to spec_step accepted
+            # MTP length stopping is asynchronous, so up to mtp_step accepted
             # positions may already be committed when FINISHED_LENGTH is observed.
-            # The overlapped iteration then needs spec_step positions for target
-            # verification and another spec_step for the DSpark/DFlash draft block.
-            # Thus the page table needs 3 * spec_step positions of MTP headroom.
+            # The overlapped iteration then needs mtp_step positions for target
+            # verification and another mtp_step for the DSpark/DFlash draft block.
+            # Thus the page table needs 3 * mtp_step positions of MTP headroom.
             # Keep 16 additional positions: eight preserve the historical safety
             # margin and eight cover the small-page decode preallocation window.
-            "max_seq_length": self.args.max_req_total_len + 3 * self.args.spec_step + 16,
+            "max_seq_length": self.args.max_req_total_len + 3 * self.args.mtp_step + 16,
             "nccl_host": self.args.nccl_host,
             "nccl_port": get_shm_port_args().nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,

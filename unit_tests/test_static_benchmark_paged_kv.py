@@ -41,7 +41,7 @@ def make_executor(page_size: int = 4):
         req_to_token_indexs=torch.full((4, 32), -1, dtype=torch.int32),
     )
     model = SimpleNamespace(mem_manager=mem_manager, req_manager=req_manager)
-    args = SimpleNamespace(spec_mode=None, spec_step=0)
+    args = SimpleNamespace(mtp_mode=None, mtp_step=0)
     executor = StaticBenchmarkExecutor(args=args, model=model, draft_models=[], token_source=None)
     return executor, mem_manager, req_manager
 
@@ -96,8 +96,8 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
 
 def test_mtp_expanded_rows_allocate_once_per_request():
     executor, mem_manager, req_manager = make_executor(page_size=4)
-    executor.args.spec_mode = "eagle_with_att"
-    executor.args.spec_step = 3
+    executor.args.mtp_mode = "eagle_with_att"
+    executor.args.mtp_step = 3
 
     model_input = executor._make_decode_input(
         batch_size=4,
@@ -118,8 +118,8 @@ def test_mtp_expanded_rows_allocate_once_per_request():
 
 def test_profile_capacity_uses_page_aligned_per_request_cost():
     args = SimpleNamespace(
-        spec_mode=None,
-        spec_step=0,
+        mtp_mode=None,
+        mtp_step=0,
         page_size=4,
         max_batch_size=0,
         batch_max_tokens=64,
@@ -148,6 +148,6 @@ def test_profile_capacity_uses_page_aligned_per_request_cost():
     )
     assert decode_profile_batch_divisor(args, decode_case) == 20
 
-    args.spec_mode = "eagle_with_att"
-    args.spec_step = 3
+    args.mtp_mode = "eagle_with_att"
+    args.mtp_step = 3
     assert decode_profile_batch_divisor(args, decode_case) == 24

@@ -7,8 +7,8 @@
 #     null_block_id) are dropped; LightLLM uses contiguous per-request slots.
 #   - Upstream non-MTP paths were removed; this kernel now exclusively serves
 #     the MTP decode varlen path (with num_accepted_tokens,
-#     query_start_loc and spec_step all required).
-#   - One widened conv_state slot per request holds K-1+spec_step positions.
+#     query_start_loc and mtp_step all required).
+#   - One widened conv_state slot per request holds K-1+mtp_step positions.
 #     The read offset is num_accepted_tokens-1; writes go back to the same slot.
 #
 # Upstream copyright notice:
@@ -38,7 +38,7 @@ def _causal_conv1d_update_kernel(
     # Matrix dimensions
     batch: int,
     dim: tl.constexpr,
-    state_len: tl.constexpr,  # width - 1 + spec_step
+    state_len: tl.constexpr,  # width - 1 + mtp_step
     # Strides
     stride_x_dim: tl.constexpr,
     stride_x_token: tl.constexpr,
@@ -307,7 +307,7 @@ def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
-    spec_step: int,
+    mtp_step: int,
     bias: Optional[torch.Tensor] = None,
     activation: Optional[str] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
@@ -317,21 +317,21 @@ def causal_conv1d_update(
 ):
     """MTP decode causal depthwise conv1d update.
 
-    Processes ``spec_step + 1`` tokens per request in varlen layout.
+    Processes ``mtp_step + 1`` tokens per request in varlen layout.
     Uses a single widened conv_state slot per request that holds
-    ``width - 1 + spec_step`` positions.  The read offset for each request
+    ``width - 1 + mtp_step`` positions.  The read offset for each request
     is ``num_accepted_tokens[b] - 1``; after the forward pass the updated
     state is written back to the same slot, ready for the next decode step.
 
     Args:
         x: ``(num_tokens, dim)`` float — flattened varlen input grouped by
-            ``query_start_loc``.  Each request contributes ``spec_step + 1``
+            ``query_start_loc``.  Each request contributes ``mtp_step + 1``
             tokens.
         conv_state: ``(num_slots, dim, state_len)`` float with
-            ``state_len == width - 1 + spec_step``.
+            ``state_len == width - 1 + mtp_step``.
         weight: depthwise filter of shape ``(dim, width)``.
-        spec_step: number of extra MTP tokens per request
-            (``seqlen == spec_step + 1``).
+        mtp_step: number of extra MTP tokens per request
+            (``seqlen == mtp_step + 1``).
         bias: optional ``(dim,)`` float bias.
         activation: ``None``, ``"silu"`` or ``"swish"``.
         conv_state_indices: ``(batch,)`` int32 — maps each request to a
@@ -356,10 +356,10 @@ def causal_conv1d_update(
     batch = conv_state_indices.size(0)  # number of requests
     dim = x.size(1)
     _, width = weight.shape
-    # conv_state: (num_slots, dim, state_len) with state_len == width - 1 + spec_step
+    # conv_state: (num_slots, dim, state_len) with state_len == width - 1 + mtp_step
     _, _, state_len = conv_state.size()
 
-    assert state_len == width - 1 + spec_step
+    assert state_len == width - 1 + mtp_step
 
     # adopt the strategy in vLLM that overwrites 'x' directly, rather than creating a new tensor 'o'
     out = x

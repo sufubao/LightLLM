@@ -113,7 +113,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         logger.error(f"not support mem manager: {mem_manager_class} for cpu kv cache")
         raise Exception(f"not support mem manager: {mem_manager_class} for cpu kv cache")
 
-    if args.spec_mode is not None:
+    if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
         if not is_hybrid_model:
             # 对于非 hybrid 模型，需要额外增加 mtp 的 kv 层数，

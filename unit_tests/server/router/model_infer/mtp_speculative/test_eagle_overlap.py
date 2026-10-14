@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelSpecOutput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelMtpOutput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers import eagle_with_att
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.utils import (
     get_dp_overlap_req_start_rows,
@@ -35,7 +35,7 @@ class _DraftModel:
         return tuple(
             ModelOutput(
                 logits=torch.arange(model_input.batch_size, dtype=torch.float32).view(-1, 1),
-                spec_output=ModelSpecOutput(spec_hidden=torch.ones((model_input.batch_size, 2))),
+                mtp_output=ModelMtpOutput(spec_hidden=torch.ones((model_input.batch_size, 2))),
             )
             for model_input in (input0, input1)
         )
@@ -50,7 +50,7 @@ class _DraftModel:
                     dtype=torch.float32,
                     device=model_input.input_ids.device,
                 ).view(-1, 1),
-                spec_output=ModelSpecOutput(
+                mtp_output=ModelMtpOutput(
                     spec_hidden=torch.ones(
                         (model_input.batch_size, 2),
                         device=model_input.input_ids.device,
@@ -122,14 +122,14 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
         target_model_input0=model_input0,
         target_model_output0=ModelOutput(
             logits=torch.empty((3, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((3, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((3, 2))),
         ),
         target_next_token_ids0=torch.arange(3, dtype=torch.int64),
         accept_len0=torch.tensor([2], dtype=torch.int32),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((6, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((6, 2))),
         ),
         target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
         accept_len1=torch.tensor([1, 3], dtype=torch.int32),
@@ -160,14 +160,14 @@ def test_overlap_eagle_supports_empty_verify_rows():
         target_model_input0=_target_input(batch_size=0),
         target_model_output0=ModelOutput(
             logits=torch.empty((0, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((0, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((0, 2))),
         ),
         target_next_token_ids0=torch.empty((0,), dtype=torch.int64),
         accept_len0=torch.empty((0,), dtype=torch.int32),
         target_model_input1=_target_input(batch_size=0),
         target_model_output1=ModelOutput(
             logits=torch.empty((0, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((0, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((0, 2))),
         ),
         target_next_token_ids1=torch.empty((0,), dtype=torch.int64),
         accept_len1=torch.empty((0,), dtype=torch.int32),
@@ -203,7 +203,7 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
         ),
         target_model_output0=ModelOutput(
             logits=torch.empty((2, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((2, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((2, 2))),
         ),
         target_next_token_ids0=torch.arange(2, dtype=torch.int64),
         accept_len0=torch.tensor([2], dtype=torch.int32),
@@ -213,7 +213,7 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
         ),
         target_model_output1=ModelOutput(
             logits=torch.empty((3, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((3, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((3, 2))),
         ),
         target_next_token_ids1=torch.arange(2, 5, dtype=torch.int64),
         accept_len1=torch.tensor([1, 1], dtype=torch.int32),
@@ -255,14 +255,14 @@ def test_overlap_eagle_no_att_supports_dynamic_draft_step():
         target_model_input0=model_input0,
         target_model_output0=ModelOutput(
             logits=torch.empty((2, 1), device=device),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((2, 2), device=device)),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((2, 2), device=device)),
         ),
         target_next_token_ids0=torch.arange(2, dtype=torch.int64, device=device),
         accept_len0=torch.tensor([2], dtype=torch.int32, device=device),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((3, 1), device=device),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((3, 2), device=device)),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((3, 2), device=device)),
         ),
         target_next_token_ids1=torch.arange(2, 5, dtype=torch.int64, device=device),
         accept_len1=torch.tensor([1, 1], dtype=torch.int32, device=device),
@@ -301,14 +301,14 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
         target_model_input0=model_input0,
         target_model_output0=ModelOutput(
             logits=torch.empty((3, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((3, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((3, 2))),
         ),
         target_next_token_ids0=torch.arange(3, dtype=torch.int64),
         accept_len0=torch.tensor([2], dtype=torch.int32),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)),
-            spec_output=ModelSpecOutput(spec_hidden=torch.ones((6, 2))),
+            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((6, 2))),
         ),
         target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
         accept_len1=torch.tensor([1, 3], dtype=torch.int32),

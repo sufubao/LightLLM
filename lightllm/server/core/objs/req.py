@@ -136,8 +136,8 @@ class Req(ctypes.Structure):
         ("mtp_accepted_token_num", ctypes.c_int),
         ("mtp_verify_token_num", ctypes.c_int),
         ("mtp_verify_step_num", ctypes.c_int),
-        # spec_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
-        ("_spec_step", ctypes.c_int),
+        # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
+        ("_mtp_step", ctypes.c_int),
         # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
         # 然后router发停止命令给推理进程，推理进程停止输出
         ("stop_str_matched", ctypes.c_bool),
@@ -208,7 +208,7 @@ class Req(ctypes.Structure):
         self.mtp_accepted_token_num = 0
         self.mtp_verify_token_num = 0
         self.mtp_verify_step_num = 0
-        self._spec_step = get_env_start_args().spec_step
+        self._mtp_step = get_env_start_args().mtp_step
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
 
@@ -482,12 +482,12 @@ class ChunkedPrefillReq(Req):
         # b_len 用于调度时估算请求后续需要的 token 容量，各项含义如下：
         # 1. 预计生成总量减去已输出的 has_out_len，以及 a_len 已预留的 1 个 token；用 max(0, ...) 避免负数。
         # 2. page_size：KV cache 按页分配，预留一页以覆盖逻辑 token 长度与实际分配容量之间的对齐开销。
-        # 3. 2 * (spec_step + 1)：按每轮最多推进 spec_step + 1 个 token，预留两轮推理的容量，
-        #    为 MTP 和 overlap 执行留出空间；spec_step 为 0 时仍保留两个普通 decode token 的余量。
+        # 3. 2 * (mtp_step + 1)：按每轮最多推进 mtp_step + 1 个 token，预留两轮推理的容量，
+        #    为 MTP 和 overlap 执行留出空间；mtp_step 为 0 时仍保留两个普通 decode token 的余量。
         # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。例如 stop_str 需要先由 detokenization
         #    进程匹配，再由 router 通知推理端停止请求；在状态传播、停止处理及 KV 释放完成之前，
         #    请求仍可能继续推进推理或占用 KV。这 16 个 token 是吸收此类延迟的保守余量，
         #    避免调度时过早将这部分容量分配给其他请求；它不表示固定的等待时间或异步延迟上限。
-        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.spec_step + 1) + 16
+        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
 
         return (a_len, b_len)

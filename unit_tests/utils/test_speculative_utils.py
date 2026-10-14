@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import lightllm.common.basemodel.attention.base_att as base_att_module
-import lightllm.common.basemodel.spec_collector as spec_collector_module
+import lightllm.common.basemodel.mtp_collector as mtp_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
@@ -34,7 +34,7 @@ from lightllm.utils import envs_utils
 )
 def test_spec_draft_model_class_is_marked(module_name, class_name):
     model_class = getattr(import_module(module_name), class_name)
-    assert model_class.is_spec_draft_model is True
+    assert model_class.is_mtp_draft_model is True
 
 
 def test_qwen3_eagle_uses_layers_checkpoint_prefix():
@@ -48,7 +48,7 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
 
 
 @pytest.mark.parametrize(
-    "spec_mode, is_draft_model, draft_step, dynamic_spec, expected",
+    "mtp_mode, is_draft_model, draft_step, dynamic_spec, expected",
     [
         ("dspark", False, 7, True, True),
         ("dspark", True, 7, True, False),
@@ -63,7 +63,7 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
 )
 def test_attention_backend_selects_dynamic_spec_layout(
     monkeypatch,
-    spec_mode,
+    mtp_mode,
     is_draft_model,
     draft_step,
     dynamic_spec,
@@ -72,12 +72,12 @@ def test_attention_backend_selects_dynamic_spec_layout(
     monkeypatch.setattr(
         base_att_module,
         "get_env_start_args",
-        lambda: SimpleNamespace(spec_mode=spec_mode, spec_dynamic_verify=dynamic_spec),
+        lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
     )
     backend = SimpleNamespace(
         model=SimpleNamespace(
-            is_spec_draft_model=is_draft_model,
-            spec_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
+            is_mtp_draft_model=is_draft_model,
+            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
         )
     )
 
@@ -85,7 +85,7 @@ def test_attention_backend_selects_dynamic_spec_layout(
 
 
 @pytest.mark.parametrize(
-    "spec_mode, is_draft_model, expected",
+    "mtp_mode, is_draft_model, expected",
     [
         (None, False, True),
         ("dflash", False, True),
@@ -95,13 +95,13 @@ def test_attention_backend_selects_dynamic_spec_layout(
         ("vanilla_with_att", True, True),
     ],
 )
-def test_attention_backend_selects_causality(monkeypatch, spec_mode, is_draft_model, expected):
+def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected):
     monkeypatch.setattr(
         base_att_module,
         "get_env_start_args",
-        lambda: SimpleNamespace(spec_mode=spec_mode),
+        lambda: SimpleNamespace(mtp_mode=mtp_mode),
     )
-    backend = SimpleNamespace(model=SimpleNamespace(is_spec_draft_model=is_draft_model))
+    backend = SimpleNamespace(model=SimpleNamespace(is_mtp_draft_model=is_draft_model))
 
     assert BaseAttBackend.uses_causal_attention(backend) is expected
 
@@ -137,8 +137,8 @@ def test_fa3_decode_state_owns_causality(state_class):
         b_seq_len=torch.tensor([3, 4], dtype=torch.int32),
     )
     model = SimpleNamespace(
-        is_spec_draft_model=False,
-        spec_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
     )
     state = state_class(
         backend=SimpleNamespace(
@@ -158,8 +158,8 @@ def test_fa3_decode_state_owns_causality(state_class):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_triton_mtp_decode_state_builds_group_markers():
     model = SimpleNamespace(
-        is_spec_draft_model=False,
-        spec_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     state = TritonDecodeAttState(
@@ -261,7 +261,7 @@ def test_draft_model_registry_rejects_unsupported_mode(model_type, spec_mode):
         )
 
 
-def test_spec_collector_reads_target_layer_ids(monkeypatch):
+def test_mtp_collector_reads_target_layer_ids(monkeypatch):
     config_reads = []
 
     def get_config_dict(path):
@@ -269,18 +269,18 @@ def test_spec_collector_reads_target_layer_ids(monkeypatch):
         return {"target_layer_ids": [1, 20, 36]}, {}
 
     monkeypatch.setattr(
-        spec_collector_module.PretrainedConfig,
+        mtp_collector_module.PretrainedConfig,
         "get_config_dict",
         get_config_dict,
     )
     monkeypatch.setattr(
-        spec_collector_module,
+        mtp_collector_module,
         "get_env_start_args",
-        lambda: SimpleNamespace(spec_draft_model_dir=["/models/dspark"]),
+        lambda: SimpleNamespace(mtp_draft_model_dir=["/models/dspark"]),
     )
-    model = SimpleNamespace(is_spec_draft_model=False, layers_num=40)
+    model = SimpleNamespace(is_mtp_draft_model=False, layers_num=40)
 
-    collector = spec_collector_module.LayerHiddenSpecCollector(model=model)
+    collector = mtp_collector_module.LayerHiddenMtpCollector(model=model)
     new_collector = collector.new_instance()
 
     assert collector.layer_ids == frozenset((1, 20, 36))
@@ -289,7 +289,7 @@ def test_spec_collector_reads_target_layer_ids(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "spec_mode, spec_step, expected_layer_num",
+    "mtp_mode, mtp_step, expected_layer_num",
     [
         (None, 0, 0),
         ("vanilla_no_att", 7, 0),
@@ -298,11 +298,11 @@ def test_spec_collector_reads_target_layer_ids(monkeypatch):
         ("eagle_with_att", 7, 1),
     ],
 )
-def test_fixed_added_mtp_kv_layer_num_by_mode(monkeypatch, spec_mode, spec_step, expected_layer_num):
+def test_fixed_added_mtp_kv_layer_num_by_mode(monkeypatch, mtp_mode, mtp_step, expected_layer_num):
     monkeypatch.setattr(
         envs_utils,
         "get_env_start_args",
-        lambda: SimpleNamespace(spec_mode=spec_mode, spec_step=spec_step),
+        lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_step=mtp_step),
     )
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
 
@@ -317,10 +317,10 @@ def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
-            "spec_mode": "dflash",
-            "spec_step": 7,
-            "spec_dynamic_verify": False,
-            "spec_draft_model_dir": [str(tmp_path)],
+            "mtp_mode": "dflash",
+            "mtp_step": 7,
+            "mtp_dynamic_verify": False,
+            "mtp_draft_model_dir": [str(tmp_path)],
         }
     )
 
@@ -342,10 +342,10 @@ def test_qwen35_dflash_added_kv_layers_come_from_nested_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
-            "spec_mode": "dflash",
-            "spec_step": 7,
-            "spec_dynamic_verify": False,
-            "spec_draft_model_dir": [str(tmp_path)],
+            "mtp_mode": "dflash",
+            "mtp_step": 7,
+            "mtp_dynamic_verify": False,
+            "mtp_draft_model_dir": [str(tmp_path)],
         }
     )
 
@@ -360,10 +360,10 @@ def test_dspark_added_kv_layers_come_from_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
-            "spec_mode": "dspark",
-            "spec_step": 7,
-            "spec_dynamic_verify": True,
-            "spec_draft_model_dir": [str(tmp_path)],
+            "mtp_mode": "dspark",
+            "mtp_step": 7,
+            "mtp_dynamic_verify": True,
+            "mtp_draft_model_dir": [str(tmp_path)],
         }
     )
 
@@ -378,10 +378,10 @@ def test_eagle3_added_kv_layers_come_from_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
-            "spec_mode": "eagle3",
-            "spec_step": 7,
-            "spec_dynamic_verify": False,
-            "spec_draft_model_dir": [str(tmp_path)],
+            "mtp_mode": "eagle3",
+            "mtp_step": 7,
+            "mtp_dynamic_verify": False,
+            "mtp_draft_model_dir": [str(tmp_path)],
         }
     )
 

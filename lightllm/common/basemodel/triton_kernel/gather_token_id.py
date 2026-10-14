@@ -57,7 +57,7 @@ def scatter_token(
     This function is used to scatter the token_info(GPU tensor) to the req_to_token_info(CPU tensor).
     Args:
         next_token_ids: (batch_size,)
-        req_to_next_token_ids: (max_req_num, max_spec_step)
+        req_to_next_token_ids: (max_req_num, max_mtp_step)
         b_req_idx: (batch_size,)
         b_mtp_index: (batch_size,)
     """
@@ -115,7 +115,7 @@ def gather_token(req_to_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b
     """
     This function is used to gather the token_info(CPU tensor) to the token_info(GPU tensor).
     Args:
-        req_to_token_info: (max_req_num, max_spec_step)
+        req_to_token_info: (max_req_num, max_mtp_step)
         b_req_idx: (batch_size,)
         b_mtp_index: (batch_size,)
     Returns:
@@ -181,7 +181,7 @@ def gather_token_prefill_decode_mixed(
     This function is used to gather the token_info(CPU tensor) to the token_info(GPU tensor).
     Args:
         input_ids: (batch_size,)
-        req_to_next_token_ids: (max_req_num, max_spec_step)
+        req_to_next_token_ids: (max_req_num, max_mtp_step)
         b_req_idx: (batch_size,)
         b_mtp_index: (batch_size,)
         b_is_decode_req: (batch_size,)

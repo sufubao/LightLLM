@@ -8,7 +8,7 @@ from typing import Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
-from .batch_objs import FinalHiddenOutputPolicy, ModelInput
+from .batch_objs import FinalHiddenPolicy, ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
@@ -67,8 +67,8 @@ class InferStateInfo:
 
         # 当前 forward 独占的 hidden state 收集器。普通推理使用短生命周期实例；
         # Prefill CUDA Graph 使用随 graph infer state 长期保存的实例。
-        self.spec_collector = None
-        self.final_hidden_output_policy = FinalHiddenOutputPolicy.NONE
+        self.mtp_collector = None
+        self.final_hidden_policy = FinalHiddenPolicy.NONE
 
         # 衍生使用的管理变量，为了方便扩展接入其他的高性能attention推理算子，在
         # inferstate 基类上添加下面的标记变量，用于扩展。
@@ -92,9 +92,9 @@ class InferStateInfo:
         # 进行管理。注意这些成员变量只会在特定的模型和模式下才会生效。
 
         # mtp draft model 使用的额外输入参数,
-        # 在开启 spec_mode 时，mtp draft model
+        # 在开启 mtp_mode 时，mtp draft model
         # 的输入会用到，其他模型和场景都不会用到
-        self.spec_draft_input_hiddens: Optional[torch.Tensor] = None
+        self.mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
         # 在单节点多dp的运行模式下，在进行prefill的阶段，如果出现了dp之间数据不平衡的现象，
         # 可以将推理的数据，进行重新分配到各个dp，在做 att 之前，重新 all to all 到各自的

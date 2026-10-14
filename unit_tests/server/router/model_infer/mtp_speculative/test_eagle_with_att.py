@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelSpecOutput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelMtpOutput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
@@ -15,10 +15,10 @@ def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
 
     def forward(model_input):
         assert model_input.input_ids is target_input_ids
-        assert model_input.spec_draft_input_hiddens is target_hidden
+        assert model_input.mtp_draft_input_hiddens is target_hidden
         return ModelOutput(
             logits=torch.tensor([[1.0], [2.0]]),
-            spec_output=ModelSpecOutput(spec_hidden=target_hidden + 10),
+            mtp_output=ModelMtpOutput(spec_hidden=target_hidden + 10),
         )
 
     draft_model = SimpleNamespace(
@@ -37,12 +37,12 @@ def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
         batch_size=2,
         input_ids=None,
         b_position_delta=torch.zeros(2, dtype=torch.int32),
-        spec_draft_input_hiddens=None,
+        mtp_draft_input_hiddens=None,
     )
 
     proposal = proposer.propose_next(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=target_input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         draft_step=1,
@@ -53,7 +53,7 @@ def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
     torch.testing.assert_close(proposal.token_ids, torch.tensor([[101], [102]]))
     assert proposal.schedule_scores is None
     assert target_input.input_ids is None
-    assert target_input.spec_draft_input_hiddens is None
+    assert target_input.mtp_draft_input_hiddens is None
 
 
 def test_eagle_with_att_rejects_zero_draft_steps():
@@ -86,7 +86,7 @@ def test_eagle_with_att_prefill_builds_draft_kv_without_mutating_target():
         b_ready_cache_len=torch.zeros(2, dtype=torch.int32, device=device),
         b_position_delta=None,
         b_is_decode_req=None,
-        spec_draft_input_hiddens=None,
+        mtp_draft_input_hiddens=None,
     )
     forwarded = []
 
@@ -95,7 +95,7 @@ def test_eagle_with_att_prefill_builds_draft_kv_without_mutating_target():
             (
                 model_input,
                 model_input.input_ids.clone(),
-                model_input.spec_draft_input_hiddens,
+                model_input.mtp_draft_input_hiddens,
                 model_input.b_is_decode_req,
             )
         )
@@ -107,7 +107,7 @@ def test_eagle_with_att_prefill_builds_draft_kv_without_mutating_target():
     )
     proposer.fill_draft_model_kv_state(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=torch.tensor([13, 23], dtype=torch.int64, device=device),
     )
 
@@ -121,7 +121,7 @@ def test_eagle_with_att_prefill_builds_draft_kv_without_mutating_target():
     assert not forwarded[0][3].any()
     assert target_input.input_ids is original_input_ids
     assert target_input.b_is_decode_req is None
-    assert target_input.spec_draft_input_hiddens is None
+    assert target_input.mtp_draft_input_hiddens is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -139,7 +139,7 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
                 "model_input": model_input,
                 "batch_size": model_input.batch_size,
                 "input_ids": model_input.input_ids.clone(),
-                "draft_hidden": model_input.spec_draft_input_hiddens.clone(),
+                "draft_hidden": model_input.mtp_draft_input_hiddens.clone(),
                 "b_req_idx": model_input.b_req_idx.clone(),
                 "b_mtp_index": model_input.b_mtp_index.clone(),
                 "b_seq_len": model_input.b_seq_len.clone(),
@@ -150,11 +150,11 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
         if len(draft_calls) == 1:
             return ModelOutput(
                 logits=torch.arange(30, 36, dtype=torch.float32, device=device).unsqueeze(1),
-                spec_output=ModelSpecOutput(spec_hidden=extend_hidden),
+                mtp_output=ModelMtpOutput(spec_hidden=extend_hidden),
             )
         return ModelOutput(
             logits=torch.tensor([[40.0], [41.0]], device=device),
-            spec_output=ModelSpecOutput(spec_hidden=decode_hidden),
+            mtp_output=ModelMtpOutput(spec_hidden=decode_hidden),
         )
 
     backend = SimpleNamespace(
@@ -179,11 +179,11 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
         b_shared_seq_len=torch.tensor([8, 8, 8, 6, 6, 6], dtype=torch.int32, device=device),
         b_shared_radix_node_id=torch.tensor([70, 70, 70, 90, 90, 90], dtype=torch.int64, device=device),
         multimodal_params=[{"images": [], "audios": []} for _ in range(6)],
-        spec_draft_input_hiddens=None,
+        mtp_draft_input_hiddens=None,
     )
     proposal = proposer.propose_next(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=original_input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32, device=device),
         draft_step=2,
@@ -210,4 +210,4 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
     assert draft_calls[1]["max_kv_seq_len"] == 23
     assert draft_calls[1]["total_token_num"] == 46
     assert target_input.input_ids is original_input_ids
-    assert target_input.spec_draft_input_hiddens is None
+    assert target_input.mtp_draft_input_hiddens is None

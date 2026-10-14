@@ -25,7 +25,7 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     qkv = torch.zeros((1, 3), dtype=cache_dtype)
     q = torch.zeros((1, 1, 1, 1), dtype=cache_dtype)
     backend = SimpleNamespace(
-        spec_step=0,
+        mtp_step=0,
         activation="silu",
         ssm_state_dtype=cache_dtype,
         _rearrange_mixed_qkv=lambda mixed: (q, q, q),
@@ -62,8 +62,8 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
 
 def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
     model = SimpleNamespace(
-        is_spec_draft_model=False,
-        spec_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
     )
     infer_state = SimpleNamespace(
         batch_size=b_req_idx.shape[0],

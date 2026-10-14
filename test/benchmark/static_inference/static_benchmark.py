@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelSpecOutput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.api_cli import make_argument_parser
@@ -126,7 +126,7 @@ def align_up(value: int, alignment: int) -> int:
 
 
 def mtp_decode_kv_reserve(args: SimpleNamespace) -> int:
-    return 2 * (int(args.spec_step) + 1) if args.spec_mode in MTP_MODES else 1
+    return 2 * (int(args.mtp_step) + 1) if args.mtp_mode in MTP_MODES else 1
 
 
 def empty_multimodal_params(batch_size: int) -> List[Dict]:
@@ -300,13 +300,13 @@ class StaticBenchmarkExecutor:
             draft_input = self._prepare_mtp_prefill_input(
                 model_input=draft_input,
                 b_next_token_ids=current_next_ids,
-                spec_draft_input_hiddens=draft_output.spec_output.spec_hidden,
+                mtp_draft_input_hiddens=draft_output.mtp_output.spec_hidden,
             )
             draft_output = self.draft_models[draft_index].forward(draft_input)
             current_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
             mtp_candidates.append(current_next_ids.detach().cpu())
 
-        step_width = self._spec_step_width()
+        step_width = self._mtp_step_width()
         while len(mtp_candidates) < step_width:
             mtp_candidates.append(mtp_candidates[-1])
         next_ids = torch.stack(mtp_candidates[:step_width], dim=1)
@@ -316,7 +316,7 @@ class StaticBenchmarkExecutor:
         self,
         model_input: ModelInput,
         b_next_token_ids: torch.Tensor,
-        spec_draft_input_hiddens: torch.Tensor,
+        mtp_draft_input_hiddens: torch.Tensor,
     ) -> ModelInput:
         """构造下一层 MTP draft model 使用的 prefill 输入。"""
         new_model_input = copy.copy(model_input)
@@ -332,7 +332,7 @@ class StaticBenchmarkExecutor:
             b_seq_len=model_input.b_seq_len,
             b_ready_cache_len=model_input.b_ready_cache_len,
         )
-        new_model_input.spec_draft_input_hiddens = spec_draft_input_hiddens
+        new_model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
         return new_model_input
 
     def _run_plain_decode_steps(
@@ -373,7 +373,7 @@ class StaticBenchmarkExecutor:
         elapsed = 0.0
         accepted_token_count = 0
         generated_len = 0
-        step_width = self._spec_step_width()
+        step_width = self._mtp_step_width()
         base_req_idx, b_mtp_index = self._build_mtp_decode_index_tensors(req_idx, step_width)
         current_candidates = next_ids
 
@@ -383,7 +383,7 @@ class StaticBenchmarkExecutor:
                 current_candidates = current_candidates[:, None].repeat(1, step_width)
 
             b_seq_len = self._build_mtp_seq_len(seq_len, step_width)
-            eagle_draft_extra_kv_len = self.args.spec_step - 1 if self.args.spec_mode.startswith("eagle") else 0
+            eagle_draft_extra_kv_len = self.args.mtp_step - 1 if self.args.mtp_mode.startswith("eagle") else 0
             model_input = self._make_decode_input(
                 batch_size=case.batch_size * step_width,
                 req_idx=base_req_idx,
@@ -433,15 +433,15 @@ class StaticBenchmarkExecutor:
         draft_next_ids = self._argmax_ids(model_output.logits).cuda(non_blocking=True)
         generated = [draft_next_ids.detach()]
 
-        for step in range(self.args.spec_step):
+        for step in range(self.args.mtp_step):
             draft_input.input_ids = draft_next_ids
-            draft_input.spec_draft_input_hiddens = draft_output.spec_output.spec_hidden
+            draft_input.mtp_draft_input_hiddens = draft_output.mtp_output.spec_hidden
             draft_model = self.draft_models[step % self._num_mtp_modules()]
             draft_output = draft_model.forward(draft_input)
             draft_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
             generated.append(draft_next_ids.detach())
 
-            if self.args.spec_mode.startswith("eagle") and step + 1 < self.args.spec_step:
+            if self.args.mtp_mode.startswith("eagle") and step + 1 < self.args.mtp_step:
                 draft_input.b_seq_len += 1
                 draft_input.max_kv_seq_len += 1
 
@@ -642,10 +642,8 @@ class StaticBenchmarkExecutor:
             b_prefill_has_output_cpu=has_output[batch_start:batch_end],
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
         )
-        if model_input.spec_draft_input_hiddens is not None:
-            kwargs["spec_draft_input_hiddens"] = model_input.spec_draft_input_hiddens[
-                token_start:token_end
-            ].contiguous()
+        if model_input.mtp_draft_input_hiddens is not None:
+            kwargs["mtp_draft_input_hiddens"] = model_input.mtp_draft_input_hiddens[token_start:token_end].contiguous()
         return ModelInput(**kwargs)
 
     def _split_decode_input(self, model_input: ModelInput):
@@ -677,10 +675,8 @@ class StaticBenchmarkExecutor:
             is_prefill=False,
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
         )
-        if model_input.spec_draft_input_hiddens is not None:
-            kwargs["spec_draft_input_hiddens"] = model_input.spec_draft_input_hiddens[
-                batch_start:batch_end
-            ].contiguous()
+        if model_input.mtp_draft_input_hiddens is not None:
+            kwargs["mtp_draft_input_hiddens"] = model_input.mtp_draft_input_hiddens[batch_start:batch_end].contiguous()
         return ModelInput(**kwargs)
 
     @staticmethod
@@ -693,18 +689,18 @@ class StaticBenchmarkExecutor:
 
         return ModelOutput(
             logits=torch.cat((output0.logits, output1.logits), dim=0),
-            spec_output=ModelSpecOutput(
+            mtp_output=ModelMtpOutput(
                 spec_hidden=concat_optional(
-                    output0.spec_output.spec_hidden,
-                    output1.spec_output.spec_hidden,
+                    output0.mtp_output.spec_hidden,
+                    output1.mtp_output.spec_hidden,
                 ),
                 draft_token_ids=concat_optional(
-                    output0.spec_output.draft_token_ids,
-                    output1.spec_output.draft_token_ids,
+                    output0.mtp_output.draft_token_ids,
+                    output1.mtp_output.draft_token_ids,
                 ),
                 confidence_logits=concat_optional(
-                    output0.spec_output.confidence_logits,
-                    output1.spec_output.confidence_logits,
+                    output0.mtp_output.confidence_logits,
+                    output1.mtp_output.confidence_logits,
                 ),
             ),
             prefill_mem_indexes_ready_event=(
@@ -796,17 +792,17 @@ class StaticBenchmarkExecutor:
         )
 
     def _mtp_enabled(self) -> bool:
-        return self.args.spec_mode in MTP_MODES and self.args.spec_step > 0
+        return self.args.mtp_mode in MTP_MODES and self.args.mtp_step > 0
 
-    def _spec_step_width(self) -> int:
-        return int(self.args.spec_step) + 1
+    def _mtp_step_width(self) -> int:
+        return int(self.args.mtp_step) + 1
 
     def _num_mtp_modules(self) -> int:
         if not self._mtp_enabled():
             return 0
-        if self.args.spec_mode.startswith("eagle"):
+        if self.args.mtp_mode.startswith("eagle"):
             return 1
-        return int(self.args.spec_step)
+        return int(self.args.mtp_step)
 
 
 def parse_typed_list(value: Optional[str], fallback: Sequence, cast) -> List:
@@ -1077,7 +1073,7 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
     max_batch = max(case.batch_size for case in cases)
     max_context = max(case.context_len for case in cases)
     max_output = max(case.output_len for case in cases)
-    mtp_width = (args.spec_step + 1) if args.spec_mode in MTP_MODES else 1
+    mtp_width = (args.mtp_step + 1) if args.mtp_mode in MTP_MODES else 1
     max_runtime_len = max_context + max_output + mtp_decode_kv_reserve(args) + 2
 
     if args.max_req_total_len is None:
@@ -1125,29 +1121,29 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
     if args.nccl_port is None:
         args.nccl_port = 28765
 
-    if args.spec_mode in MTP_MODES:
-        if args.spec_step <= 0:
-            raise ValueError("--spec_mode requires --spec_step > 0")
-        if not args.spec_draft_model_dir:
-            raise ValueError("--spec_mode requires --spec_draft_model_dir")
-        args.spec_draft_model_dir = normalize_mtp_draft_dirs(args.spec_mode, args.spec_step, args.spec_draft_model_dir)
+    if args.mtp_mode in MTP_MODES:
+        if args.mtp_step <= 0:
+            raise ValueError("--mtp_mode requires --mtp_step > 0")
+        if not args.mtp_draft_model_dir:
+            raise ValueError("--mtp_mode requires --mtp_draft_model_dir")
+        args.mtp_draft_model_dir = normalize_mtp_draft_dirs(args.mtp_mode, args.mtp_step, args.mtp_draft_model_dir)
     else:
-        args.spec_mode = None
-        args.spec_step = 0
-        args.spec_draft_model_dir = None
+        args.mtp_mode = None
+        args.mtp_step = 0
+        args.mtp_draft_model_dir = None
 
     return SimpleNamespace(**vars(args))
 
 
-def normalize_mtp_draft_dirs(spec_mode: str, spec_step: int, draft_dirs: Sequence[str]) -> List[str]:
-    expected = 1 if spec_mode.startswith("eagle") else spec_step
+def normalize_mtp_draft_dirs(mtp_mode: str, mtp_step: int, draft_dirs: Sequence[str]) -> List[str]:
+    expected = 1 if mtp_mode.startswith("eagle") else mtp_step
     if isinstance(draft_dirs, str):
         draft_dirs = [draft_dirs]
     draft_dirs = list(draft_dirs)
     if len(draft_dirs) == 1 and expected > 1:
         return draft_dirs * expected
     if len(draft_dirs) != expected:
-        raise ValueError(f"{spec_mode} expects {expected} draft model dir(s), got {len(draft_dirs)}")
+        raise ValueError(f"{mtp_mode} expects {expected} draft model dir(s), got {len(draft_dirs)}")
     return draft_dirs
 
 
@@ -1183,12 +1179,12 @@ def build_model_kvargs(args: SimpleNamespace, rank_id: int) -> Dict:
 
 
 def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) -> List:
-    if args.spec_mode not in MTP_MODES:
+    if args.mtp_mode not in MTP_MODES:
         return []
 
     os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
     draft_models = []
-    for draft_dir in args.spec_draft_model_dir:
+    for draft_dir in args.mtp_draft_model_dir:
         mtp_cfg, _ = PretrainedConfig.get_config_dict(draft_dir)
         mtp_kvargs = {
             "weight_dir": draft_dir,
@@ -1211,7 +1207,7 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
             "main_model": main_model,
             "mtp_previous_draft_models": draft_models.copy(),
         }
-        draft_model_class = get_draft_model_class(model_cfg=mtp_cfg, spec_mode=args.spec_mode)
+        draft_model_class = get_draft_model_class(model_cfg=mtp_cfg, spec_mode=args.mtp_mode)
         draft_models.append(draft_model_class(mtp_kvargs))
     return draft_models
 
@@ -1220,7 +1216,7 @@ def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase
     """Capture profile-mode graphs after the real decode batch is known."""
     profile_batch_size = max_decode_batch_size(cases)
     graph_batch_size = profile_batch_size
-    if args.spec_mode in MTP_MODES:
+    if args.mtp_mode in MTP_MODES:
         graph_batch_size = min(graph_batch_size, args.graph_max_batch_size)
     args.graph_max_batch_size = graph_batch_size
     model_kvargs["graph_max_batch_size"] = graph_batch_size
@@ -1228,7 +1224,7 @@ def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase
 
     if args.enable_decode_microbatch_overlap:
         graph_batch_size //= 2
-    model.graph_max_batch_size = graph_batch_size * (int(args.spec_step) + 1)
+    model.graph_max_batch_size = graph_batch_size * (int(args.mtp_step) + 1)
     if torch.distributed.get_rank() == 0:
         print(
             f"Profile decode batch size: {profile_batch_size}; "

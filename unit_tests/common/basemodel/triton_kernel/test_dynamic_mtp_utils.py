@@ -6,7 +6,7 @@ import triton
 import numpy as np
 
 from lightllm.common.basemodel.batch_objs import ModelInput
-from lightllm.common.basemodel.spec_manager import SpecManager
+from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.common.basemodel.triton_kernel import dynamic_mtp_utils
 from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import (
     _fwd_kernel_cumprod_scores,
@@ -16,22 +16,22 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 
 @pytest.fixture(autouse=True)
-def _reset_spec_manager():
-    SpecManager._instance = None
+def _reset_mtp_manager():
+    MtpManager._instance = None
     yield
-    SpecManager._instance = None
+    MtpManager._instance = None
 
 
-def test_compact_dynamic_spec_model_input(monkeypatch):
+def test_compact_dynamic_mtp_model_input(monkeypatch):
     monkeypatch.setenv(
         "LIGHTLLM_START_ARGS",
         json.dumps(
             {
                 "diverse_mode": False,
                 "llm_kv_type": "fp16",
-                "spec_mode": "eagle3",
-                "spec_dynamic_verify": True,
-                "spec_step": 3,
+                "mtp_mode": "eagle3",
+                "mtp_dynamic_verify": True,
+                "mtp_step": 3,
                 "llm_decode_att_backend": "triton",
             }
         ),
@@ -55,7 +55,7 @@ def test_compact_dynamic_spec_model_input(monkeypatch):
         ),
         is_prefill=False,
         multimodal_params=[{"row": i, "images": [], "audios": []} for i in range(12)],
-        spec_draft_input_hiddens=(torch.arange(12 * 5, dtype=torch.float32, device="cuda").reshape(12, 5) + 0.5),
+        mtp_draft_input_hiddens=(torch.arange(12 * 5, dtype=torch.float32, device="cuda").reshape(12, 5) + 0.5),
     )
     req_to_next_token_scores = torch.tensor(
         [
@@ -67,7 +67,7 @@ def test_compact_dynamic_spec_model_input(monkeypatch):
         device="cuda",
     )
 
-    compacted_input, selected_row_mask = dynamic_mtp_utils.prepare_dynamic_spec_model_input(
+    compacted_input, selected_row_mask = dynamic_mtp_utils.prepare_dynamic_mtp_model_input(
         model_input=model_input,
         req_num=3,
         dynamic_batch_size=8,
@@ -101,7 +101,7 @@ def test_compact_dynamic_spec_model_input(monkeypatch):
         torch.tensor([10, 10, 10, 11, 12, 12, 12, 12], dtype=torch.int64),
     )
     expected_hiddens = (torch.arange(12 * 5, dtype=torch.float32).reshape(12, 5) + 0.5)[expected_selected_rows]
-    assert torch.equal(compacted_input.spec_draft_input_hiddens.cpu(), expected_hiddens)
+    assert torch.equal(compacted_input.mtp_draft_input_hiddens.cpu(), expected_hiddens)
 
 
 def test_compaction_preserves_shared_radix_metadata():

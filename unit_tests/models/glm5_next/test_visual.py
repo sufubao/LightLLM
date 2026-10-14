@@ -181,7 +181,7 @@ def test_target_and_mtp_prefill_embed_images_before_hidden_fusion(monkeypatch):
     from lightllm.models.glm5_next_mtp.layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
     from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-    set_env_start_args(dataclasses.asdict(StartArgs(spec_mode="eagle_with_att", spec_step=2)))
+    set_env_start_args(dataclasses.asdict(StartArgs(mtp_mode="eagle_with_att", mtp_step=2)))
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
     monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
     hidden = 128
@@ -201,9 +201,9 @@ def test_target_and_mtp_prefill_embed_images_before_hidden_fusion(monkeypatch):
         out.copy_(input * torch.rsqrt(input.square().mean(-1, keepdim=True) + eps))
         return out
 
-    state.spec_draft_input_hiddens = torch.randn(4, hidden, device="cuda")
+    state.mtp_draft_input_hiddens = torch.randn(4, hidden, device="cuda")
     main_norm_weight = torch.randn(hidden, device="cuda")
-    old_hidden = state.spec_draft_input_hiddens.clone()
+    old_hidden = state.mtp_draft_input_hiddens.clone()
     projection = torch.randn(2 * hidden, hidden, device="cuda") * 0.1
     weight.enorm_weight_ = weight.hnorm_weight_ = norm
     weight.main_norm_weight_ = lambda input, eps, out: out.copy_(

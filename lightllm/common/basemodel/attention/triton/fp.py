@@ -100,7 +100,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
     def init_state(self):
         # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于 GQA decode 配置查找。
         self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
-        draft_step = self.backend.model.spec_manager.get_decode_draft_step(self.backend.model.is_spec_draft_model)
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
             self.b_mark_mtp_shared_group = build_mtp_shared_group_markers(
                 self.infer_state.b_req_idx,
@@ -123,7 +123,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             assert att_control.tp_alibi is not None
             return self._alibi_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
-            draft_step = self.backend.model.spec_manager.get_decode_draft_step(self.backend.model.is_spec_draft_model)
+            draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
 
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]

@@ -264,7 +264,7 @@ class Qwen3NextLinearAttPageHelper:
         return
 
     def _get_req_state_indexes(self, req_idx: int):
-        mtp_size = get_env_start_args().spec_step + 1
+        mtp_size = get_env_start_args().mtp_step + 1
         # Conv is one widened slot per request; SSM keeps the historical S+1 block layout.
         return req_idx, req_idx * mtp_size
 

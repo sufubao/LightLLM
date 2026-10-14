@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import FinalHiddenOutputPolicy, ModelInput
+from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, ModelInput
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.spec_manager import SpecManager
+from lightllm.common.basemodel.mtp_manager import MtpManager
 
 
 def _create_model_input(*, is_prefill=False):
@@ -156,7 +156,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
         is_prefill=True,
         b_prefill_has_output_cpu=[],
         multimodal_params=[],
-        spec_draft_input_hiddens=torch.empty((0, 4), dtype=torch.float32),
+        mtp_draft_input_hiddens=torch.empty((0, 4), dtype=torch.float32),
     )
     model = SimpleNamespace(
         mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1),
@@ -175,7 +175,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
     assert padded_input.b_req_idx.tolist() == [88]
     assert padded_input.b_seq_len.tolist() == [1]
     assert padded_input.b_prefill_has_output_cpu == [False]
-    assert torch.equal(padded_input.spec_draft_input_hiddens, torch.zeros((1, 4)))
+    assert torch.equal(padded_input.mtp_draft_input_hiddens, torch.zeros((1, 4)))
 
 
 def test_padded_decode_builds_internal_request_from_empty_token_tensor():
@@ -215,20 +215,20 @@ def test_padded_decode_builds_internal_request_from_empty_token_tensor():
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])
-@pytest.mark.parametrize("policy", [FinalHiddenOutputPolicy.PRE_NORM, FinalHiddenOutputPolicy.POST_NORM])
+@pytest.mark.parametrize("policy", [FinalHiddenPolicy.PRE_NORM, FinalHiddenPolicy.POST_NORM])
 @pytest.mark.parametrize(
     "mode,draft", [(None, False), ("vanilla_with_att", False), ("vanilla_with_att", True), ("dspark", True)]
 )
-def test_infer_state_carries_effective_final_hidden_output_policy(monkeypatch, is_prefill, policy, mode, draft):
+def test_infer_state_carries_effective_final_hidden_policy(monkeypatch, is_prefill, policy, mode, draft):
     from lightllm.common.basemodel import basemodel
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.infer_state_class = InferStateInfo
-    model.is_spec_draft_model = draft
-    model.spec_final_hidden_output_policy = policy
-    model.spec_manager = SpecManager.__new__(SpecManager)
-    model.spec_manager.args = SimpleNamespace(spec_mode=mode)
-    model._init_spec_collector()
+    model.is_mtp_draft_model = draft
+    model.mtp_final_hidden_policy = policy
+    model.mtp_manager = MtpManager.__new__(MtpManager)
+    model.mtp_manager.args = SimpleNamespace(mtp_mode=mode)
+    model._init_mtp_collector()
     model.return_all_prompt_logics = False
     model.mem_manager = model.req_manager = None
     model._select_mem_indexes = lambda model_input: None
@@ -239,6 +239,6 @@ def test_infer_state_carries_effective_final_hidden_output_policy(monkeypatch, i
 
     state = model._create_inferstate(_create_model_input(is_prefill=is_prefill))
 
-    expected = policy if mode == "vanilla_with_att" else FinalHiddenOutputPolicy.NONE
-    assert state.final_hidden_output_policy is expected
-    assert not hasattr(state.spec_collector, "final_hidden_output_policy")
+    expected = policy if mode == "vanilla_with_att" else FinalHiddenPolicy.NONE
+    assert state.final_hidden_policy is expected
+    assert not hasattr(state.mtp_collector, "final_hidden_policy")

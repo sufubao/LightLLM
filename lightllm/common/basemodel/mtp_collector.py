@@ -7,13 +7,13 @@ from typing import List, Optional
 import torch
 from transformers.configuration_utils import PretrainedConfig
 
-from lightllm.common.basemodel.batch_objs import ModelSpecOutput, PostLayerOutput
+from lightllm.common.basemodel.batch_objs import ModelMtpOutput, PostLayerOutput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
-class SpecCollector(ABC):
-    """投机解码输出收集器的抽象基类。
+class MtpCollector(ABC):
+    """MTP 输出收集器的抽象基类。
 
     推理过程中，模型会在每一层计算完成后调用 :meth:`add`，并在一次 forward
     结束时调用 :meth:`finish_output` 生成统一的辅助输出。不同投机解码模式可以
@@ -26,7 +26,7 @@ class SpecCollector(ABC):
     """
 
     @abstractmethod
-    def new_instance(self) -> "SpecCollector":
+    def new_instance(self) -> "MtpCollector":
         """基于当前 prototype 创建一个不包含运行时 tensor 的新实例。
 
         新实例可以复用 model、目标层编号等只读配置，但不得共享 ``layer_hiddens``
@@ -38,7 +38,7 @@ class SpecCollector(ABC):
         """
         raise NotImplementedError
 
-    def restore_graph_state(self, graph_collector: "SpecCollector") -> None:
+    def restore_graph_state(self, graph_collector: "MtpCollector") -> None:
         """从 Prefill CUDA Graph 的 capture collector 恢复本次 replay 所需状态。
 
         基类默认不恢复任何数据。需要中间层 hidden 的子类应只复制保存 tensor
@@ -80,48 +80,48 @@ class SpecCollector(ABC):
             raise RuntimeError(f"{self.__class__.__name__} does not collect MTP head outputs")
 
     @abstractmethod
-    def finish_output(self, infer_state) -> ModelSpecOutput:
-        """结束当前 microbatch 的收集并生成统一的投机解码输出。
+    def finish_output(self, infer_state) -> ModelMtpOutput:
+        """结束当前 microbatch 的收集并生成统一的 MTP 输出。
 
         子类应在此完成必要的拼接、TP/SP all-gather、DP unbalance 和 contiguous
-        转换，将结果封装为 :class:`ModelSpecOutput`，并在返回前清理当前
-        实例的临时状态。不需要提供额外投机解码输出的实现应返回一个空输出对象。
+        转换，将结果封装为 :class:`ModelMtpOutput`，并在返回前清理当前
+        实例的临时状态。不需要提供额外 MTP 输出的实现应返回一个空输出对象。
 
         Args:
             infer_state: 当前 forward 的推理状态，包含通信拓扑、DP balance 等信息。
 
         Returns:
-            本次 forward 的 投机解码辅助输出；未启用投机解码 时返回内容为空的输出对象。
+            本次 forward 的 MTP 辅助输出；未启用 MTP 时返回内容为空的输出对象。
         """
         raise NotImplementedError
 
 
-class NoopSpecCollector(SpecCollector):
+class NoopMtpCollector(MtpCollector):
     """Null object used by models that do not expose speculative features."""
 
-    def new_instance(self) -> SpecCollector:
-        return NoopSpecCollector()
+    def new_instance(self) -> MtpCollector:
+        return NoopMtpCollector()
 
-    def finish_output(self, infer_state) -> ModelSpecOutput:
-        return ModelSpecOutput()
+    def finish_output(self, infer_state) -> ModelMtpOutput:
+        return ModelMtpOutput()
 
 
-class MtpHeadCollector(NoopSpecCollector):
+class MtpHeadCollector(NoopMtpCollector):
     """Collect outputs from an MTP draft head that does not expose hidden state."""
 
     def __init__(self) -> None:
         self.draft_token_ids: Optional[torch.Tensor] = None
         self.confidence_logits: Optional[torch.Tensor] = None
 
-    def new_instance(self) -> SpecCollector:
+    def new_instance(self) -> MtpCollector:
         return MtpHeadCollector()
 
     def collect_post_output(self, post_output: PostLayerOutput) -> None:
         self.draft_token_ids = post_output.draft_token_ids
         self.confidence_logits = post_output.confidence_logits
 
-    def finish_output(self, infer_state) -> ModelSpecOutput:
-        output = ModelSpecOutput(
+    def finish_output(self, infer_state) -> ModelMtpOutput:
+        output = ModelMtpOutput(
             draft_token_ids=self.draft_token_ids,
             confidence_logits=self.confidence_logits,
         )
@@ -130,28 +130,28 @@ class MtpHeadCollector(NoopSpecCollector):
         return output
 
 
-class FinalHiddenSpecCollector(SpecCollector):
+class FinalHiddenMtpCollector(MtpCollector):
     """Returns the final decoder hidden state without per-layer bookkeeping."""
 
     def __init__(self) -> None:
         self.final_hidden: Optional[torch.Tensor] = None
 
-    def new_instance(self) -> SpecCollector:
-        return FinalHiddenSpecCollector()
+    def new_instance(self) -> MtpCollector:
+        return FinalHiddenMtpCollector()
 
     def collect_post_output(self, post_output: PostLayerOutput) -> None:
         super().collect_post_output(post_output)
         assert post_output.final_hidden is not None, "post layer must return the requested final hidden"
         self.final_hidden = post_output.final_hidden
 
-    def finish_output(self, infer_state) -> ModelSpecOutput:
+    def finish_output(self, infer_state) -> ModelMtpOutput:
         assert self.final_hidden is not None
         final_hidden = self.final_hidden
         self.final_hidden = None
-        return ModelSpecOutput(spec_hidden=final_hidden.contiguous())
+        return ModelMtpOutput(spec_hidden=final_hidden.contiguous())
 
 
-class LayerHiddenSpecCollector(SpecCollector):
+class LayerHiddenMtpCollector(MtpCollector):
     """Collects selected decoder-layer outputs for an intermediate-hidden draft."""
 
     def __init__(self, model) -> None:
@@ -160,13 +160,13 @@ class LayerHiddenSpecCollector(SpecCollector):
         self.layer_ids = self._load_layer_ids()
         self.layer_hiddens: List[torch.Tensor] = []
 
-    def new_instance(self) -> SpecCollector:
+    def new_instance(self) -> MtpCollector:
         collector = copy.copy(self)
         collector.layer_hiddens = []
         return collector
 
-    def restore_graph_state(self, graph_collector: SpecCollector) -> None:
-        assert isinstance(graph_collector, LayerHiddenSpecCollector)
+    def restore_graph_state(self, graph_collector: MtpCollector) -> None:
+        assert isinstance(graph_collector, LayerHiddenMtpCollector)
         self.layer_hiddens = graph_collector.layer_hiddens.copy()
 
     def release_graph_tensor_ownership(self) -> tuple[int, int]:
@@ -176,7 +176,7 @@ class LayerHiddenSpecCollector(SpecCollector):
         return tensor_count, total_nbytes
 
     def _load_layer_ids(self) -> frozenset[int]:
-        draft_model_dirs = get_env_start_args().spec_draft_model_dir
+        draft_model_dirs = get_env_start_args().mtp_draft_model_dir
         assert draft_model_dirs
         draft_config, _ = PretrainedConfig.get_config_dict(draft_model_dirs[0])
         layer_ids = draft_config.get("target_layer_ids")
@@ -205,10 +205,10 @@ class LayerHiddenSpecCollector(SpecCollector):
             return self.layer_hiddens[0]
         return torch.cat(self.layer_hiddens, dim=-1)
 
-    def finish_output(self, infer_state) -> ModelSpecOutput:
+    def finish_output(self, infer_state) -> ModelMtpOutput:
         local_hidden = self._local_hidden()
         self.layer_hiddens.clear()
         hidden = self.model.pre_infer._tpsp_allgather(input=local_hidden, infer_state=infer_state)
         if infer_state.need_dp_prefill_balance:
             hidden = infer_state._all_to_all_unbalance_get(data=hidden)
-        return ModelSpecOutput(spec_hidden=hidden.contiguous())
+        return ModelMtpOutput(spec_hidden=hidden.contiguous())

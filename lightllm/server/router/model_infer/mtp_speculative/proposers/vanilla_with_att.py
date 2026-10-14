@@ -28,16 +28,16 @@ class VanillaWithAttProposer(BaseSpecProposer):
         # 在局部副本上逐级左移 token 并传递 hidden，避免修改 target
         # prefill 输入。Chunked prefill 边界继续用当前级预测 token 补齐。
         draft_input = copy.copy(target_model_input)
-        draft_hidden = target_model_output.spec_output.spec_hidden
+        draft_hidden = target_model_output.mtp_output.spec_hidden
         draft_token_ids = target_next_token_ids
         for draft_model in self.backend.draft_models:
             draft_input = self._prepare_mtp_prefill_inputs(
                 model_input=draft_input,
                 b_next_token_ids=draft_token_ids,
-                spec_draft_input_hiddens=draft_hidden,
+                mtp_draft_input_hiddens=draft_hidden,
             )
             draft_output = draft_model.forward(draft_input)
-            draft_hidden = draft_output.spec_output.spec_hidden
+            draft_hidden = draft_output.mtp_output.spec_hidden
             draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
 
     def propose_next(
@@ -65,7 +65,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
         assert accept_len is not None
         assert accept_len.shape == (req_num,)
         assert target_next_token_ids.shape[0] == target_model_input.batch_size
-        assert target_model_output.spec_output.spec_hidden.shape[0] == target_model_input.batch_size
+        assert target_model_output.mtp_output.spec_hidden.shape[0] == target_model_input.batch_size
         assert draft_step == self.backend.max_draft_step, (
             "vanilla_with_att requires the full chained draft depth: "
             f"draft_step={draft_step}, max_draft_step={self.backend.max_draft_step}"
@@ -81,14 +81,14 @@ class VanillaWithAttProposer(BaseSpecProposer):
         # 但 input_ids 与 hidden 会逐级更新。使用浅副本避免覆盖 target 输入
         # 中这两个字段；布局 tensor 仍然共享，不引入额外拷贝。
         draft_token_ids = target_next_token_ids
-        draft_hidden = target_model_output.spec_output.spec_hidden
+        draft_hidden = target_model_output.mtp_output.spec_hidden
         draft_input = copy.copy(target_model_input)
 
         for step in range(draft_step):
             draft_input.input_ids = draft_token_ids
-            draft_input.spec_draft_input_hiddens = draft_hidden
+            draft_input.mtp_draft_input_hiddens = draft_hidden
             draft_output = self.backend.draft_models[step].forward(draft_input)
-            draft_hidden = draft_output.spec_output.spec_hidden
+            draft_hidden = draft_output.mtp_output.spec_hidden
 
             if self.enable_dynmaic_mtp:
                 # Vanilla With-Att 没有独立的 confidence head；动态调度使用
@@ -123,7 +123,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
         self,
         model_input: ModelInput,
         b_next_token_ids: torch.Tensor,
-        spec_draft_input_hiddens: torch.Tensor,
+        mtp_draft_input_hiddens: torch.Tensor,
     ) -> ModelInput:
         """构造 Vanilla chained MTP 下一层 draft model 的 prefill 输入。
 
@@ -140,15 +140,15 @@ class VanillaWithAttProposer(BaseSpecProposer):
            mixed-prefill 逻辑保留这里显式生成的 token，而不会按 decode
            请求重新收集 token。
         2. 将上一层 model 输出的 hidden states 绑定到
-           ``spec_draft_input_hiddens``，供下一层 MTP model 使用。
+           ``mtp_draft_input_hiddens``，供下一层 MTP model 使用。
 
         参数：
             model_input: 当前层的 prefill 输入。方法会原地更新该对象的
                 ``input_ids``、``b_is_decode_req`` 和
-                ``spec_draft_input_hiddens`` 字段。
+                ``mtp_draft_input_hiddens`` 字段。
             b_next_token_ids: 每个请求需要追加到当前 query 尾部的 token，
                 shape 为 ``[batch_size]``。
-            spec_draft_input_hiddens: 上一层 model 产生、供下一层 draft model
+            mtp_draft_input_hiddens: 上一层 model 产生、供下一层 draft model
                 使用的 hidden states。
 
         返回：
@@ -180,5 +180,5 @@ class VanillaWithAttProposer(BaseSpecProposer):
             b_seq_len=model_input.b_seq_len,
             b_ready_cache_len=model_input.b_ready_cache_len,
         )
-        model_input.spec_draft_input_hiddens = spec_draft_input_hiddens
+        model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
         return model_input

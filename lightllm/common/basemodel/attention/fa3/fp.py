@@ -39,7 +39,7 @@ class Fa3AttBackend(BaseAttBackend):
         # Dynamic verification may keep the target row and all MTP draft rows for
         # every running request. TPSP and CUDA Graph may pad that physical batch
         # further, so the fixed buffer must cover both execution paths.
-        running_max_batch_size = args.running_max_req_size * (args.spec_step + 1)
+        running_max_batch_size = args.running_max_req_size * (args.mtp_step + 1)
         if args.enable_tpsp_mix_mode:
             tp_size = model.tp_world_size_
             running_max_batch_size = (running_max_batch_size + tp_size - 1) // tp_size * tp_size
@@ -178,7 +178,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     def init_state(self):
         self.backend: Fa3AttBackend = self.backend
         self.causal = self.backend.uses_causal_attention()
-        draft_step = self.backend.model.spec_manager.get_decode_draft_step(self.backend.model.is_spec_draft_model)
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if self.backend.uses_dynamic_spec_verify_layout():
             b_att_req_idx = self._init_dynamic_spec_verify_state(draft_step)
         elif draft_step > 0:

@@ -248,7 +248,7 @@ class ModeBackend:
         # 只会在 pd pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
-        if self.args.spec_mode is not None:
+        if self.args.mtp_mode is not None:
             self.init_mtp_draft_model(model_kvargs)
             self.init_spec_engine()
 
@@ -304,15 +304,15 @@ class ModeBackend:
         raise NotImplementedError()
 
     def init_mtp_draft_model(self, main_kvargs: dict):
-        self.max_draft_step = self.args.spec_step
+        self.max_draft_step = self.args.mtp_step
         self.draft_models = []
-        spec_mode = self.args.spec_mode
+        spec_mode = self.args.mtp_mode
         is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att")
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
         draft_model_count = self.max_draft_step if is_chained_draft else 1
-        draft_model_dirs = self.args.spec_draft_model_dir
+        draft_model_dirs = self.args.mtp_draft_model_dir
         assert draft_model_dirs is not None
         assert len(draft_model_dirs) >= draft_model_count
 

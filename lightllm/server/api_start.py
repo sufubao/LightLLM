@@ -46,10 +46,10 @@ def _launch_subprocesses(args: StartArgs):
             "Disable --target_vocab_topk_sampling when using output constraints."
         )
 
-    if args.spec_mode is not None:
+    if args.mtp_mode is not None:
         assert (
             not args.disable_cudagraph or args.run_mode == "prefill"
-        ), "--disable_cudagraph is only supported on Prefill nodes when --spec_mode is enabled"
+        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -188,18 +188,18 @@ def _launch_subprocesses(args: StartArgs):
                 "--linear_att_hash_page_size must be divisible by --page_size when paged KV cache is enabled"
             )
     # mtp params check
-    if args.spec_mode is not None:
-        if args.spec_draft_model_dir is None:
-            assert args.spec_mode not in (
+    if args.mtp_mode is not None:
+        if args.mtp_draft_model_dir is None:
+            assert args.mtp_mode not in (
                 "eagle3",
                 "dspark",
                 "dflash",
-            ), f"--spec_draft_model_dir is required for {args.spec_mode} mode"
-            args.spec_draft_model_dir = [args.model_dir] * args.spec_step
-        assert args.spec_step > 0
+            ), f"--mtp_draft_model_dir is required for {args.mtp_mode} mode"
+            args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
+        assert args.mtp_step > 0
     else:
-        assert args.spec_draft_model_dir is None
-        assert args.spec_step == 0
+        assert args.mtp_draft_model_dir is None
+        assert args.mtp_step == 0
 
     # automatically set visual_dp based on visual_tp and the per-node world size.
     # In visual proxy mode keep the caller-provided visual_dp / visual_tp.

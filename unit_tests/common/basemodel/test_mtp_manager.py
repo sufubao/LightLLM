@@ -43,6 +43,7 @@ def _decode_tokens_per_request(monkeypatch, spec_mode, *, is_draft_model, mtp_st
         ("eagle_no_att", True, 1),
         ("dspark", True, 7),
         ("dflash", True, 7),
+        ("dflash2", True, 8),
     ],
 )
 def test_decode_tokens_per_request(monkeypatch, spec_mode, is_draft_model, expected):
@@ -80,6 +81,7 @@ def test_decode_batch_alignment(monkeypatch, spec_mode, dynamic_verify, is_draft
         ("vanilla_with_att", True, 0),
         ("dspark", True, 6),
         ("dflash", True, 6),
+        ("dflash2", True, 7),
     ],
 )
 def test_decode_draft_step(monkeypatch, spec_mode, is_draft_model, expected):
@@ -105,6 +107,7 @@ def test_get_instance_returns_singleton(monkeypatch):
         ("dspark", False, LayerHiddenCollector),
         ("eagle3", True, FinalHiddenCollector),
         ("dspark", True, MtpHeadOutputCollector),
+        ("dflash2", True, MtpHeadOutputCollector),
     ],
 )
 def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, is_draft_model, expected_type):
@@ -143,6 +146,7 @@ def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, 
         (("qwen3_5_moe", "qwen3_5_moe_text"), ("vanilla_with_att", "eagle_with_att"), "POST_NORM", "POST_NORM"),
         (("mistral", "qwen3_moe"), ("vanilla_no_att", "eagle_no_att"), "PRE_NORM", "PRE_NORM"),
         (("qwen3",), ("eagle3",), "NONE", "PRE_NORM"),
+        (("qwen3",), ("dflash2",), "NONE", "NONE"),
         (("qwen3", "qwen3_5", "qwen3_5_text"), ("dflash", "dspark"), "NONE", "NONE"),
     ],
 )

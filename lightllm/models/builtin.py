@@ -207,6 +207,13 @@ DraftModelRegistry.register(
 )
 DraftModelRegistry.register(
     "qwen3",
+    "dflash2",
+    "lightllm.models.qwen3_dflash2.model:Qwen3DFlash2Model",
+    main_final_hidden_policy=FinalHiddenPolicy.NONE,
+    draft_final_hidden_policy=FinalHiddenPolicy.NONE,
+)
+DraftModelRegistry.register(
+    "qwen3",
     "dflash",
     "lightllm.models.qwen3_dflash.model:Qwen3DFlashModel",
     main_final_hidden_policy=FinalHiddenPolicy.NONE,

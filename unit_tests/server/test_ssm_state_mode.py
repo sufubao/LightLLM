@@ -83,3 +83,30 @@ def test_replay_projection_mode_requires_replay(monkeypatch):
     args.ssm_state_mode = "compact"
     with pytest.raises(AssertionError, match="requires ssm_state_mode=replay"):
         _validate_ssm_state_mode(args)
+
+
+@pytest.mark.parametrize("fold", ["raw", "derived"])
+def test_parallel_replay_configuration(monkeypatch, fold):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "qwen3_5")
+    args = StartArgs(
+        ssm_state_mode="replay",
+        replayssm_projection_mode="parallel",
+        replayssm_fold_method=fold,
+        mtp_step=4,
+        mtp_mode="eagle_with_att",
+        linear_att_ssm_data_type="bfloat16",
+    )
+    _validate_ssm_state_mode(args)
+    args.mtp_step = 0
+    with pytest.raises(AssertionError, match="requires MTP"):
+        _validate_ssm_state_mode(args)
+
+
+def test_derived_replay_requires_parallel_configuration():
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args = StartArgs(ssm_state_mode="replay", replayssm_fold_method="derived")
+    with pytest.raises(AssertionError, match="requires parallel"):
+        _validate_ssm_state_mode(args)

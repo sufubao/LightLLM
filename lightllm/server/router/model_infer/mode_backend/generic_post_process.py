@@ -3,6 +3,7 @@ from typing import List, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
+from lightllm.common.basemodel.triton_kernel.post_process.greedy import greedy_sample
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
@@ -23,6 +24,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
+        skip_token_penalties,
     ) = _get_post_sample_tensors(reqs)
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
@@ -66,6 +68,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
             b_mask_eos_reqs=b_mask_eos_reqs,
             eos_ids=eos_ids,
             sampling_params_manager=sampling_params_manager,
+            skip_token_penalties=skip_token_penalties,
         )
 
     if has_invalid_token_ids:
@@ -74,6 +77,9 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
             invalid_token_ids=invalid_token_ids,
             cu_invalid_token_num=cu_invalid_token_num,
         )
+
+    if is_all_greedy and logits.is_cuda and logits.dtype == torch.float32 and logits.stride(1) == 1:
+        return greedy_sample(logits, b_temperatures)
 
     logits.div_(b_temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
@@ -165,6 +171,7 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     skip_top_k = True
     skip_top_p = True
     exist_req_use_random_seed = False
+    skip_token_penalties = True
 
     # invalid token ids
     invalid_token_ids: List[int] = []
@@ -175,6 +182,11 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     for i, req_obj in enumerate(reqs):
         sample_param = req_obj.sampling_param
         shm_param = sample_param.shm_param
+        skip_token_penalties = skip_token_penalties and (
+            shm_param.presence_penalty == 0.0
+            and shm_param.frequency_penalty == 0.0
+            and shm_param.repetition_penalty == 1.0
+        )
         exponential_decay_length_penalty = shm_param.exponential_decay_length_penalty.to_tuple()
         out_token_len = req_obj.get_cur_total_len() - req_obj.shm_req.input_len
         length_penalty_param.append(max(out_token_len - exponential_decay_length_penalty[0], 0))
@@ -230,4 +242,5 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
+        skip_token_penalties,
     )

@@ -350,6 +350,7 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
             hidden_collector=SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector()),
             prompt_logics=None,
             ssm_run_config=config,
+            logits_row_stride=1,
         )
         output = TpPartBaseModel._create_model_output(
             None, PostLayerOutput(logits=outputs[0].view(count * 4, -1)), state

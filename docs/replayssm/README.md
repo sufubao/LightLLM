@@ -27,9 +27,36 @@ capacities are 4, 8, 16, 32 and 64.
 
 Non-native modes support Qwen3-Next/Qwen3.5 GDN and GLM-5.3-FLASH KDA with FP32 or BF16
 state. Other models retain their native path. `--replayssm_projection_mode`
-selects `inline` (default) or `precompute`; the latter is only valid with replay.
+selects `inline` (default), `precompute`, or `parallel`; the latter two require replay.
+`parallel` uses a Tensor Core triangular solve for BF16 GDN MTP with 128x128
+heads. It currently uses the measured BV128 / 2-warp configuration.
 Choose the projection mode and capacity using the target workload.
 Without MTP, replay adds history storage to the single native checkpoint.
+
+### Qwen3.5 H200 experimental optimization
+
+For the measured Qwen3.5-27B / TP1 / BF16 / MTP4 configuration:
+
+```bash
+--ssm_state_mode replay --replayssm_cache_len 16 \
+--replayssm_projection_mode parallel --replayssm_fold_method derived
+```
+
+`--replayssm_fold_method raw` remains the default. `derived` requires `parallel`
+and folds cached FP32 keys/deltas with FP32 matrix accumulation. It changes
+checkpoint rounding relative to raw-input replay and is not bitwise equivalent.
+Neither mode changes the configured request, KV, or history capacity.
+
+For Qwen3.5 dense TP1 with fixed EAGLE-with-attention MTP, `parallel` also
+captures first-draft graphs above the logical request capacity and projects only
+accepted-tail hidden rows. All draft KV writes and collected hidden rows remain
+present. Dynamic MTP, decode overlap, and other models retain the existing draft
+layout. Expanded graphs consume additional graph memory; capacity settings are
+unchanged, but this is not a claim of identical total GPU memory usage.
+
+See [H200 measurements](h200_optimizations.md) for paired
+throughput, full GSM8K results, and the numerical tradeoff. Performance depends on
+batch size and input/output length; the main-scene gain is not a universal bound.
 
 ## State lifecycle and precision
 
@@ -67,6 +94,9 @@ Accepted-state exports retain GLM's indexer tail for PD; CPU prefix restore
 clears the tail at aligned pool boundaries.
 
 ## Memory and performance
+
+See [H200 / Qwen3.5-27B optimization measurements](h200_optimizations.md)
+for workload coverage, numerical tradeoffs and benchmark commands.
 
 For a TP4 model with 48 GDN layers, 12 local value heads and 128x128 BF16 state,
 one full-model checkpoint occupies 18 MiB per GPU. Native MTP3 uses 72 MiB per

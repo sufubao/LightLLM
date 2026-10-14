@@ -276,6 +276,21 @@ class TpPartBaseModel:
             alignment = math.lcm(alignment, self.tp_world_size_)
         return triton.cdiv(batch_size, alignment) * alignment
 
+    def use_replayssm_draft_tail(self):
+        """Keep first-draft graph shapes distinct from single-row draft decode."""
+        return (
+            self.is_mtp_draft_model
+            and self.args.ssm_state_mode == "replay"
+            and self.args.replayssm_projection_mode == "parallel"
+            and self.args.mtp_mode == "eagle_with_att"
+            and self.args.mtp_step > 0
+            and not self.args.mtp_dynamic_verify
+            and not self.args.enable_decode_microbatch_overlap
+            and not self.args.enable_tpsp_mix_mode
+            and self.tp_world_size_ == 1
+            and self.config.get("model_type") in ("qwen3_5", "qwen3_5_text")
+        )
+
     def _init_cudagraph(self):
         # When graph covers the configured request length, it must also cover MTP's internal token margin.
         if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
@@ -297,6 +312,11 @@ class TpPartBaseModel:
             )
         )
         if self.graph is not None:
+            if self.use_replayssm_draft_tail():
+                width = self.args.mtp_step + 1
+                sizes = self.graph.cuda_graph_batch_sizes
+                self.graph.cuda_graph_batch_sizes = sorted(set(sizes + [width * n for n in sizes]))
+                self.graph.max_batch_size = self.graph.cuda_graph_batch_sizes[-1]
             if get_env_start_args().enable_decode_microbatch_overlap:
                 self.graph.warmup_overlap(self)
             else:
@@ -354,6 +374,24 @@ class TpPartBaseModel:
         infer_state.is_draft_model = self.is_mtp_draft_model
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
+        # Above the logical request capacity, this can only be the first draft
+        # pass. Warmup and replay must use the same compact projection layout.
+        if (
+            self.use_replayssm_draft_tail()
+            and not model_input.is_prefill
+            and model_input.batch_size > self.args.running_max_req_size
+        ):
+            width = self.args.mtp_step + 1
+            assert model_input.batch_size % width == 0
+            count = model_input.batch_size // width
+            rows = model_input.b_logits_rows
+            if rows is None:
+                rows = torch.arange(count, device=model_input.input_ids.device, dtype=torch.int64) * width + width - 1
+            else:
+                assert rows.ndim == 1 and rows.numel() <= count
+                rows = F.pad(rows, (0, count - rows.numel()))
+            infer_state.b_logits_rows = rows
+            infer_state.logits_row_stride = width
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
@@ -492,17 +530,21 @@ class TpPartBaseModel:
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
             ssm_run_config=infer_state.ssm_run_config,
+            logits_row_stride=infer_state.logits_row_stride,
         )
         return output
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
-        padded_batch_size = model_output.logits.shape[0]
+        stride = model_output.logits_row_stride
+        padded_batch_size = model_output.logits.shape[0] * stride
+        assert origin_batch_size % stride == 0
+        logits_size = origin_batch_size // stride
         if padded_batch_size == origin_batch_size:
             return model_output
         new_model_output = copy.copy(model_output)
-        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        new_model_output.logits = new_model_output.logits[0:logits_size]
         if new_model_output.logits_token_ids is not None:
-            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:logits_size]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -631,7 +673,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"

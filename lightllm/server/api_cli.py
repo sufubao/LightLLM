@@ -955,9 +955,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--replayssm_projection_mode",
-        choices=["inline", "precompute"],
+        choices=["inline", "precompute", "parallel"],
         default="inline",
-        help="ReplaySSM checkpoint projection; benchmark inline/precompute with the target MTP width and workload.",
+        help="ReplaySSM projection; parallel uses a Tensor Core GDN MTP solver (BF16, 128x128 heads).",
+    )
+    parser.add_argument(
+        "--replayssm_fold_method",
+        choices=["raw", "derived"],
+        default="raw",
+        help="ReplaySSM fold: raw replays accepted inputs; derived reuses parallel-solver updates and changes "
+        "checkpoint rounding. Derived requires parallel projection; state precision and capacity are unchanged.",
     )
     parser.add_argument(
         "--linear_att_ssm_data_type",

@@ -52,8 +52,13 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # Optional accepted-tail rows for the first EAGLE draft projection.
+    b_logits_rows: Optional[torch.Tensor] = None
+
     def to_cuda(self):
         self.check_input()
+        if self.b_logits_rows is not None:
+            self.b_logits_rows = self.b_logits_rows.cuda(non_blocking=True)
 
         # Prefill 和 decode 都必须提供的公共张量。
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
@@ -204,6 +209,8 @@ class ModelOutput:
 
     # Layout selected by this verify graph; preserved when logits are unpadded.
     ssm_run_config: Optional[dict] = None
+    # Number of physical decode rows represented by each selected logits row.
+    logits_row_stride: int = 1
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:

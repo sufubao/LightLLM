@@ -48,6 +48,7 @@ def _prepare_fold(
     VARLEN: tl.constexpr,
     BLOCK: tl.constexpr,
     WIDTH: tl.constexpr,
+    SEPARATE_FOLD: tl.constexpr,
 ):
     seq = tl.arange(0, BLOCK)
     req = tl.load(Reqs + seq, seq < N, HOLD)
@@ -71,6 +72,8 @@ def _prepare_fold(
     if N >= 256 and L == 8 and WIDTH == 4:
         short = tl.sum((valid & (length > 0) & (length < WIDTH)).to(tl.int32), axis=0)
         split = split & ((live < 256) | (short > 0))
+    if SEPARATE_FOLD:
+        split = count > 0
     tl.store(ForwardCursors + req, tl.where(overflow & split, (cursor & (2 * L)) ^ (2 * L), cursor), valid)
     tl.store(Active + N, tl.where(split, count, 0))
 
@@ -115,6 +118,9 @@ def _fold_history(
     GS: tl.constexpr,
     BS: tl.constexpr,
     KDA: tl.constexpr,
+    Keys,
+    Deltas,
+    DERIVED: tl.constexpr,
 ):
     count = tl.load(Active + N)
     work = tl.program_id(0)
@@ -136,15 +142,36 @@ def _fold_history(
         key_slot = req * KH + hv // (HV // KH)
         sp = State + layer * SS + slot * K * V + kk[:, None] * V + vv[None, :]
         state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
-        for j in range(n):
-            raw_k = tl.load(RawKeys + layer * RS + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
-            raw_v = tl.load(RawValues + layer * VS + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
-            if KDA:
-                g = tl.load(Gates + layer * GS + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
-            else:
-                g = tl.load(Gates + layer * GS + slot * (2 * L) + base + j).to(tl.float32)
-            beta = tl.load(Betas + layer * BS + slot * (2 * L) + base + j).to(tl.float32)
-            state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
+        if DERIVED:
+            tl.static_assert(not KDA)
+            ll = tl.arange(0, max(16, L))
+            g = tl.load(Gates + layer * GS + slot * (2 * L) + base + ll, ll < n, 0).to(tl.float32)
+            prefix = tl.cumsum(g, 0)
+            total_g = tl.sum(g, 0)
+            keys = tl.load(
+                Keys + layer * RS + (key_slot * (2 * L) + base + ll[None, :]) * K + kk[:, None],
+                (kk[:, None] < K) & (ll[None, :] < n),
+                0,
+            ).to(tl.float32)
+            delta = tl.load(
+                Deltas + layer * VS + (slot * (2 * L) + base + ll[:, None]) * V + vv[None, :],
+                (ll[:, None] < n) & (vv[None, :] < V),
+                0,
+            ).to(tl.float32)
+            keys *= tl.exp(total_g - prefix)[None, :]
+            state = state * tl.exp(total_g) + tl.dot(keys, delta, input_precision="tf32x3")
+        else:
+            for j in range(n):
+                raw_k = tl.load(RawKeys + layer * RS + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(
+                    tl.float32
+                )
+                raw_v = tl.load(RawValues + layer * VS + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
+                if KDA:
+                    g = tl.load(Gates + layer * GS + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
+                else:
+                    g = tl.load(Gates + layer * GS + slot * (2 * L) + base + j).to(tl.float32)
+                beta = tl.load(Betas + layer * BS + slot * (2 * L) + base + j).to(tl.float32)
+                state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
         # Start the new history from the same rounded checkpoint future calls load.
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
@@ -191,6 +218,7 @@ def _replay(
     FUSED_FOLD: tl.constexpr,
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
+    PARALLEL_SOLVE: tl.constexpr,
 ):
     """Output reconstruction with an exact raw-input recurrence at checkpoint folds."""
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -252,8 +280,11 @@ def _replay(
             0,
         ).to(tl.float32)
         qk = q_rows + k_rows
-        qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
-        qk *= tl.where(tt < BW, K ** -0.5, 1.0)[:, None]
+        if PARALLEL_SOLVE:
+            qk /= tl.sqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
+        else:
+            qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
+        qk *= tl.where(tt < BW, K**-0.5, 1.0)[:, None]
         if KDA:
             history = ll < n
             gates = tl.load(
@@ -331,14 +362,44 @@ def _replay(
             0,
         ).to(tl.float32)
         betas = tl.sigmoid(tl.load(B + fresh_tokens * SB + hv, fresh, 0).to(tl.float32))
-        for t in range(end - start):
-            checkpoint_sk = tl.sum(tl.where((tt == BW + t)[:, None], projections, 0), 0)
-            weights = tl.sum(tl.where((tt == BW + t)[:, None], coefficients, 0), 0)
-            sk = checkpoint_sk + tl.sum(deltas * weights[:, None], 0)
-            value = tl.sum(tl.where((jj == L + t)[:, None], values, 0), 0)
-            beta = tl.sum(tl.where(jj == L + t, betas, 0))
-            delta = beta * (value - sk)
-            deltas = tl.where((jj == L + t)[:, None], delta[None, :], deltas)
+        if PARALLEL_SOLVE:
+            projected_history = projections + tl.dot(
+                coefficients.to(projection_dtype), deltas.to(projection_dtype), input_precision=projection_precision
+            )
+            wi = tl.arange(0, max(16, 2 * BW))
+            active = (wi < BW) & (start + wi < end)
+            key_rows = tl.gather(
+                projected_history, tl.broadcast_to((BW + wi % BW)[:, None], projected_history.shape), 0
+            )
+            fresh_values = tl.gather(values, tl.broadcast_to((L + wi % BW)[:, None], (max(16, 2 * BW), BV)), 0)
+            beta_rows = tl.sigmoid(tl.load(B + (start + wi) * SB + hv, active, 0).to(tl.float32))
+            rhs = tl.where(active[:, None], beta_rows[:, None] * (fresh_values - key_rows), 0.0)
+            cross = tl.gather(coefficients, tl.broadcast_to((BW + wi % BW)[:, None], coefficients.shape), 0)
+            cross = tl.gather(cross, tl.broadcast_to((L + wi % BW)[None, :], (max(16, 2 * BW), max(16, 2 * BW))), 1)
+            lower = active[:, None] & active[None, :] & (wi[:, None] > wi[None, :])
+            power = tl.where(lower, -beta_rows[:, None] * cross, 0.0)
+            inverse = (wi[:, None] == wi[None, :]).to(tl.float32)
+            # The strictly lower-triangular coupling is nilpotent. Repeated
+            # squaring builds (I - power)^-1 in log2(BW) matrix steps; capacity
+            # is at most 64, so six steps cover every supported verify width.
+            for solve in tl.static_range(6):
+                if (1 << solve) < BW:
+                    inverse += tl.dot(power, inverse, input_precision="tf32x3")
+                    power = tl.dot(power, power, input_precision="tf32x3")
+            solved = tl.dot(
+                inverse.to(projection_dtype), rhs.to(projection_dtype), input_precision=projection_precision
+            )
+            mapped = tl.gather(solved, tl.broadcast_to(((jj - L) % BW)[:, None], deltas.shape), 0)
+            deltas = tl.where(fresh[:, None], mapped, deltas)
+        else:
+            for t in range(end - start):
+                checkpoint_sk = tl.sum(tl.where((tt == BW + t)[:, None], projections, 0), 0)
+                weights = tl.sum(tl.where((tt == BW + t)[:, None], coefficients, 0), 0)
+                sk = checkpoint_sk + tl.sum(deltas * weights[:, None], 0)
+                value = tl.sum(tl.where((jj == L + t)[:, None], values, 0), 0)
+                beta = tl.sum(tl.where(jj == L + t, betas, 0))
+                delta = beta * (value - sk)
+                deltas = tl.where((jj == L + t)[:, None], delta[None, :], deltas)
         outputs = projections + tl.dot(
             coefficients.to(projection_dtype), deltas.to(projection_dtype), input_precision=projection_precision
         )
@@ -406,7 +467,7 @@ def _replay(
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
             raw_k = tl.load(Kp + t * SK + h * K + kk, kk < K, 0).to(tl.float32)
             v = tl.load(Vp + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
-            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
+            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K**-0.5)
             k = raw_k / tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
             if KDA:
                 x = tl.load(A + t * SA + hv * K + kk, kk < K, 0).to(tl.float32) + bias
@@ -532,10 +593,19 @@ class ReplaySSMCache:
         lower_bound=-5.0,
         projection_mode="inline",
         run_config=None,
+        fold_method="raw",
     ):
         assert state.dtype in (torch.float32, torch.bfloat16), "ReplaySSM requires FP32 or BF16 SSM state"
         assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
-        assert projection_mode in ("inline", "precompute")
+        assert projection_mode in ("inline", "precompute", "parallel")
+        assert fold_method in ("raw", "derived")
+        assert fold_method == "raw" or projection_mode == "parallel"
+        if projection_mode == "parallel":
+            assert not kda and verify_width > 1, "Parallel ReplaySSM requires GDN MTP"
+            assert state.shape[-2:] == (128, 128), "Parallel ReplaySSM requires 128x128 heads"
+            assert activation_dtype == torch.bfloat16, "Parallel ReplaySSM requires BF16 activations"
+            assert state.dtype == torch.bfloat16, "Parallel ReplaySSM currently supports BF16 state"
+        self.fold_method = fold_method
         self.state = state
         self.kda = kda
         self.lower_bound = lower_bound
@@ -600,6 +670,7 @@ class ReplaySSMCache:
             cu_seqlens is not None,
             triton.next_power_of_2(reqs.numel()),
             self.verify_width,
+            self.projection_mode == "parallel",
             num_warps=4,
         )
         programs = min(self.fold_programs, triton.cdiv(vd, 32) * reqs.numel() * layers * hv)
@@ -627,6 +698,9 @@ class ReplaySSMCache:
             self.gates.stride(0),
             self.betas.stride(0),
             self.kda,
+            self.keys,
+            self.deltas,
+            self.fold_method == "derived",
             num_warps=2,
             num_stages=1,
         )
@@ -688,6 +762,8 @@ class ReplaySSMCache:
         return output
 
     def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None):
+        if self.projection_mode == "parallel":
+            return self.run_config or {"BV": 128, "num_warps": 2, "num_stages": 1}
         return configure_cache(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
 
     def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
@@ -697,7 +773,9 @@ class ReplaySSMCache:
         axis = 1 if cu_seqlens is not None else 0
         out = torch.empty_like(v)
         bv = config["BV"]
-        precompute_state = self.verify_width > 1 and bv >= 16 and self.projection_mode == "precompute"
+        precompute_state = self.verify_width > 1 and bv >= 16 and self.projection_mode in ("precompute", "parallel")
+        if self.projection_mode == "parallel":
+            assert precompute_state, "Parallel ReplaySSM requires BV >= 16"
         _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
             q,
             k,
@@ -734,9 +812,10 @@ class ReplaySSMCache:
             cu_seqlens is not None,
             precompute_state,
             triton.next_power_of_2(self.verify_width),
-            reqs.numel() > 12,
+            reqs.numel() > 12 and self.projection_mode != "parallel",
             self.kda,
             self.lower_bound,
+            self.projection_mode == "parallel",
             num_warps=config["num_warps"],
             num_stages=config.get("num_stages", 3),
         )

@@ -36,10 +36,17 @@ def _set_envs_and_config(args: StartArgs):
 
 def _validate_ssm_state_mode(args: StartArgs):
     assert args.ssm_state_mode in ("native", "compact", "replay"), "Invalid ssm_state_mode"
-    assert args.replayssm_projection_mode in ("inline", "precompute"), "Invalid replayssm_projection_mode"
+    assert args.replayssm_projection_mode in ("inline", "precompute", "parallel"), "Invalid replayssm_projection_mode"
+    assert args.replayssm_fold_method in ("raw", "derived"), "Invalid replayssm_fold_method"
+    assert (
+        args.replayssm_fold_method == "raw" or args.replayssm_projection_mode == "parallel"
+    ), "derived fold requires parallel ReplaySSM projection"
     assert (
         args.replayssm_projection_mode == "inline" or args.ssm_state_mode == "replay"
-    ), "replayssm_projection_mode=precompute requires ssm_state_mode=replay"
+    ), "Non-inline ReplaySSM projection requires ssm_state_mode=replay"
+    if args.replayssm_projection_mode == "parallel":
+        assert args.mtp_step > 0, "Parallel ReplaySSM requires MTP"
+        assert args.linear_att_ssm_data_type == "bfloat16", "Parallel ReplaySSM requires BF16 state"
     if args.ssm_state_mode == "native":
         return
     assert args.linear_att_ssm_data_type in (

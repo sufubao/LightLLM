@@ -37,6 +37,10 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
         key["lower"] = cache.lower_bound
     if mode == "replay":
         key["history_dtype"] = str(cache.keys.dtype)
+        if cache.projection_mode == "parallel":
+            key["projection"] = "parallel"
+            key["fold"] = cache.fold_method
+            return key
         key["projection"] = (
             ("kda_mma" if cache.kda else "block_mma_activation_precision")
             if cache.projection_mode == "precompute" and cache.verify_width > 1
@@ -65,6 +69,7 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
             kda=cache.kda,
             lower_bound=cache.lower_bound,
             projection_mode=cache.projection_mode,
+            fold_method=cache.fold_method,
         )
     else:
         scratch = type(cache)(

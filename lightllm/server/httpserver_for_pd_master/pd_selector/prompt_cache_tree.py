@@ -232,14 +232,19 @@ class PromptCacheTree:
             )
 
     def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:
-        while depth < len(key):
+        key_len = len(key)
+        while depth < key_len:
             child = node.children.get(key[depth])
             if child is None:
                 break
-            matched = self._common_prefix_length(key, depth, child.key)
             node = child
+            edge = child.key
+            if len(edge) == 1:
+                depth += 1
+                continue
+            matched = self._common_prefix_length(key, depth, edge)
             depth += matched
-            if matched < len(child.key):
+            if matched < len(edge):
                 break
         return node, depth
 

@@ -1,6 +1,10 @@
+from functools import lru_cache
 from typing import ClassVar, Optional
 
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
+from transformers.configuration_utils import PretrainedConfig
+
+from lightllm.common.mtp_config import FinalHiddenPolicy, MtpPairConfig
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
     HiddenCollector,
@@ -67,13 +71,17 @@ class MtpManager:
 
         return self.get_decode_tokens_per_request(is_draft_model) - 1
 
+    @lru_cache(maxsize=None)
+    def _get_pair_config(self, draft_model_dir: str) -> MtpPairConfig:
+        draft_config, _ = PretrainedConfig.get_config_dict(draft_model_dir)
+        return DraftModelRegistry.get_pair_config(draft_config, self.args.mtp_mode)
+
     def get_final_hidden_policy(self, model) -> FinalHiddenPolicy:
-        spec_mode = self.args.mtp_mode
-        if spec_mode is None or spec_mode in self._BLOCK_DRAFT_MODES:
+        if self.args.mtp_mode is None:
             return FinalHiddenPolicy.NONE
-        if spec_mode == "eagle3" and not model.is_mtp_draft_model:
-            return FinalHiddenPolicy.NONE
-        return getattr(model, "mtp_final_hidden_policy", FinalHiddenPolicy.PRE_NORM)
+        draft_model_dir = model.weight_dir_ if model.is_mtp_draft_model else self.args.mtp_draft_model_dir[0]
+        config = self._get_pair_config(draft_model_dir)
+        return config.draft_final_hidden_policy if model.is_mtp_draft_model else config.main_final_hidden_policy
 
     def create_hidden_collector(
         self,

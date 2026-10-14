@@ -1,7 +1,6 @@
 from copy import deepcopy
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -11,7 +10,6 @@ from .layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerW
 
 
 class Glm5NextMTPModel(TpPartBaseModel):
-    mtp_final_hidden_policy = FinalHiddenPolicy.POST_NORM
     is_mtp_draft_model = True
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight

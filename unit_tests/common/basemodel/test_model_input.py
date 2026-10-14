@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, ModelInput
+from lightllm.common.mtp_config import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.mtp_manager import MtpManager
 
@@ -225,9 +226,13 @@ def test_infer_state_carries_effective_final_hidden_policy(monkeypatch, is_prefi
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.infer_state_class = InferStateInfo
     model.is_mtp_draft_model = draft
-    model.mtp_final_hidden_policy = policy
+    model.weight_dir_ = "/models/draft"
     model.mtp_manager = MtpManager.__new__(MtpManager)
-    model.mtp_manager.args = SimpleNamespace(mtp_mode=mode)
+    model.mtp_manager.args = SimpleNamespace(mtp_mode=mode, mtp_draft_model_dir=["/models/draft"])
+    effective_policy = policy if mode == "vanilla_with_att" else FinalHiddenPolicy.NONE
+    model.mtp_manager._get_pair_config = lambda _: SimpleNamespace(
+        main_final_hidden_policy=effective_policy, draft_final_hidden_policy=effective_policy
+    )
     model._init_hidden_collector()
     model.return_all_prompt_logics = False
     model.mem_manager = model.req_manager = None

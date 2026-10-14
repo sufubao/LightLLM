@@ -15,7 +15,6 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
     Qwen35TransformerLayerInfer,
 )
 from lightllm.models.qwen3_5.infer_struct import Qwen35InferStateInfo
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
 
@@ -54,7 +53,6 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     pre_and_post_weight_class = Qwen35PreAndPostLayerWeight
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
-    mtp_final_hidden_policy = FinalHiddenPolicy.POST_NORM
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
     infer_state_class = Qwen35InferStateInfo

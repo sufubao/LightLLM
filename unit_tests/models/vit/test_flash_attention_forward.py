@@ -3,6 +3,16 @@ import math
 import time
 import pytest
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
+from lightllm.models.vit.triton_kernel import flashattention_nopad
+from lightllm.common.basemodel.attention_vit.fa3.fp import Fa3VitAttBackend
+
+
+_fa3_mark = pytest.mark.skipif(
+    not flashattention_nopad._flash_attn_v3_available
+    or not torch.cuda.is_available()
+    or torch.cuda.get_device_capability()[0] < 9,
+    reason="FA3 requires sgl_kernel and a Hopper GPU",
+)
 
 
 def reference_attention_varlen(q, k, v, cu):
@@ -32,7 +42,21 @@ def reference_attention_varlen(q, k, v, cu):
 
 
 @pytest.mark.parametrize("dtype,atol", [(torch.float16, 1e-2), (torch.bfloat16, 2e-2)])
-def test_varlen(dtype, atol, batch=4, heads=8, d=80, device="cuda:0"):
+@pytest.mark.parametrize(
+    "attention_fn",
+    [
+        flash_attention_fwd,
+        pytest.param(
+            getattr(flashattention_nopad, "flash_attention_v3_fwd", None),
+            marks=_fa3_mark,
+        ),
+        pytest.param(
+            Fa3VitAttBackend._vit_att_fwd,
+            marks=_fa3_mark,
+        ),
+    ],
+)
+def test_varlen(dtype, atol, attention_fn, batch=4, heads=8, d=80, device="cuda:0"):
     torch.manual_seed(0)
     lengths = torch.randint(1, 257, (batch,))
     max_len = int(lengths.max().item())
@@ -45,10 +69,10 @@ def test_varlen(dtype, atol, batch=4, heads=8, d=80, device="cuda:0"):
     k = torch.randn_like(q)
     v = torch.randn_like(q)
     out_tri = torch.randn_like(q)
-    flash_attention_fwd(q, k, v, out_tri, cu, max_len)
+    attention_fn(q, k, v, out_tri, cu, max_len)
     a = time.time()
     for _ in range(100):
-        flash_attention_fwd(q, k, v, out_tri, cu, max_len)
+        attention_fn(q, k, v, out_tri, cu, max_len)
     b = time.time()
     print(f"flash_attention_fwd time: {(b - a) / 100 * 1000:.2f} ms")
     out_ref = reference_attention_varlen(q, k, v, cu)

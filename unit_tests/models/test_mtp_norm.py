@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenOutputPolicy
 from lightllm.common.basemodel.layer_weights.meta_weights import NoTpGEMMANormWeight, RMSNormWeight
-from lightllm.common.basemodel.mtp_manager import MtpManager
+from lightllm.common.basemodel.spec_manager import SpecManager
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm5_next_mtp.layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
 from lightllm.models.mistral_mtp.layer_infer.pre_layer_infer import MistralMTPPreLayerInfer
@@ -41,9 +41,9 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
         module, name = path.split(":")
         cls = getattr(import_module("lightllm.models." + module), name)
         producers.append(cls.__new__(cls))
-    manager = MtpManager.__new__(MtpManager)
+    manager = SpecManager.__new__(SpecManager)
     manager.args = SimpleNamespace(
-        mtp_mode="vanilla_no_att" if family in ("mistral", "qwen3_moe") else "vanilla_with_att"
+        spec_mode="vanilla_no_att" if family in ("mistral", "qwen3_moe") else "vanilla_with_att"
     )
     norm_class = NoTpGEMMANormWeight if family == "qwen35" else RMSNormWeight
 
@@ -99,8 +99,8 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
     post._tpsp_allgather = lambda input, infer_state: input
 
     def forward(hidden, weight, producer):
-        state.mtp_collector = manager.create_mtp_collector(producer)
-        state.final_hidden_policy = manager.get_final_hidden_policy(producer)
+        state.spec_collector = manager.create_spec_collector(producer)
+        state.final_hidden_output_policy = manager.get_final_hidden_output_policy(producer)
         model.pre_post_weight = weight
         model.pre_infer = SimpleNamespace(
             token_forward=lambda *args: hidden,
@@ -131,21 +131,21 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
         draft_weight.final_norm_weight_ = main_norm
 
     def collected(hidden, weight, producer):
-        if manager.get_final_hidden_policy(producer) is FinalHiddenPolicy.POST_NORM:
+        if manager.get_final_hidden_output_policy(producer) is FinalHiddenOutputPolicy.POST_NORM:
             return reference_norm(hidden, weight.final_norm_weight_)
         return hidden.clone()
 
     hidden = torch.tensor([[1.0, 2.0, -3.0], [4.0, -2.0, 1.0]], device=device, dtype=dtype)
     expected = collected(hidden, main_weight, producers[0])
     output = forward(hidden, main_weight, producers[0])
-    torch.testing.assert_close(output.mtp_output.spec_hidden, expected)
+    torch.testing.assert_close(output.spec_output.spec_hidden, expected)
     torch.testing.assert_close(output.logits, (reference_norm(hidden, main_norm) @ projection.T).float())
-    assert state.mtp_collector.final_hidden is None
+    assert state.spec_collector.final_hidden is None
 
     state.is_draft_model = True
     for step in range(2):
         embedding = torch.tensor([[2.0, -1.0, 3.0], [-3.0, 2.0, 1.0]], device=device, dtype=dtype) + step
-        state.mtp_draft_input_hiddens = output.mtp_output.spec_hidden
+        state.spec_draft_input_hiddens = output.spec_output.spec_hidden
         fusion_hidden = reference_norm(expected, main_norm) if family == "mistral" else expected
         expected_fused = (
             torch.cat(
@@ -164,14 +164,14 @@ def test_main_to_draft_two_steps(monkeypatch, family, prefill, device, dtype) ->
         torch.testing.assert_close(fused, expected_fused)
         expected = collected(expected_fused, draft_weight, producers[1])
         output = forward(fused, draft_weight, producers[1])
-        torch.testing.assert_close(output.mtp_output.spec_hidden, expected)
+        torch.testing.assert_close(output.spec_output.spec_hidden, expected)
         torch.testing.assert_close(
             output.logits,
             (reference_norm(expected_fused, draft_weight.final_norm_weight_) @ projection.T).float(),
             atol=0.02 if device == "cuda" else 1e-5,
             rtol=0.02 if device == "cuda" else 1e-5,
         )
-        assert state.mtp_collector.final_hidden is None
+        assert state.spec_collector.final_hidden is None
         if family not in ("mistral", "qwen3_moe"):
             assert not torch.allclose(
                 reference_norm(expected_fused, draft_norm), reference_norm(expected_fused, main_norm)

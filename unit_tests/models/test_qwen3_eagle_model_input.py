@@ -47,7 +47,7 @@ def test_qwen3_eagle_projects_concatenated_target_hiddens_before_inferstate(monk
     target_hiddens = torch.empty((3, 12))
     model_input = SimpleNamespace(
         input_ids=torch.arange(3),
-        mtp_draft_input_hiddens=target_hiddens,
+        spec_draft_input_hiddens=target_hiddens,
     )
 
     infer_state = model._create_inferstate(model_input=model_input, microbatch_index=1)
@@ -56,8 +56,8 @@ def test_qwen3_eagle_projects_concatenated_target_hiddens_before_inferstate(monk
     assert len(parent_calls) == 1
     normalized_input, microbatch_index = parent_calls[0]
     assert normalized_input is not model_input
-    assert normalized_input.mtp_draft_input_hiddens is projected_hiddens
-    assert model_input.mtp_draft_input_hiddens is target_hiddens
+    assert normalized_input.spec_draft_input_hiddens is projected_hiddens
+    assert model_input.spec_draft_input_hiddens is target_hiddens
     assert microbatch_index == 1
     assert infer_state.model_input is normalized_input
 
@@ -77,7 +77,7 @@ def test_qwen3_eagle_keeps_recursive_draft_hiddens_without_projection(monkeypatc
     )
     model_input = SimpleNamespace(
         input_ids=torch.arange(3),
-        mtp_draft_input_hiddens=torch.empty((3, 4)),
+        spec_draft_input_hiddens=torch.empty((3, 4)),
     )
 
     normalized_input = model._create_inferstate(model_input=model_input)
@@ -88,13 +88,13 @@ def test_qwen3_eagle_keeps_recursive_draft_hiddens_without_projection(monkeypatc
 def test_qwen3_eagle_pre_layer_rejects_non_normalized_hidden_width():
     pre_layer = Qwen3EaglePreLayerInfer.__new__(Qwen3EaglePreLayerInfer)
     pre_layer.hidden_size_ = 4
-    infer_state = SimpleNamespace(mtp_draft_input_hiddens=torch.empty((2, 12)))
+    infer_state = SimpleNamespace(spec_draft_input_hiddens=torch.empty((2, 12)))
 
     with pytest.raises(AssertionError):
         pre_layer.prepare_spec_draft_hiddens(infer_state)
 
     normalized_hiddens = torch.empty((2, 4))
-    infer_state.mtp_draft_input_hiddens = normalized_hiddens
+    infer_state.spec_draft_input_hiddens = normalized_hiddens
     pre_layer.prepare_spec_draft_hiddens(infer_state)
 
     assert infer_state.eagle_draft_hidden_states is normalized_hiddens

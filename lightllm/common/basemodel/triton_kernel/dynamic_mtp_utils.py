@@ -7,7 +7,7 @@ import triton.language as tl
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
-from lightllm.common.basemodel.mtp_manager import MtpManager
+from lightllm.common.basemodel.spec_manager import SpecManager
 
 
 # 动态 verify 行选择。
@@ -85,7 +85,7 @@ def sample_dynamic_mtp_row_mask(
 
 # 动态 ModelInput 行压缩。
 @triton.jit
-def _fwd_kernel_compact_dynamic_mtp_model_input(
+def _fwd_kernel_compact_dynamic_spec_model_input(
     input_ids,
     out_input_ids,
     b_req_idx,
@@ -257,7 +257,7 @@ def _compact_decode_model_input(
     dummy_1d = model_input.b_req_idx
     BLOCK_SIZE = triton.next_power_of_2(old_batch_size)
     grid = (1,)
-    _fwd_kernel_compact_dynamic_mtp_model_input[grid](
+    _fwd_kernel_compact_dynamic_spec_model_input[grid](
         input_ids=model_input.input_ids if model_input.input_ids is not None else dummy_1d,
         out_input_ids=out_input_ids if out_input_ids is not None else dummy_1d,
         b_req_idx=model_input.b_req_idx,
@@ -290,10 +290,10 @@ def _compact_decode_model_input(
     model_input.b_shared_seq_len = out_b_shared_seq_len
     model_input.b_shared_radix_node_id = out_b_shared_radix_node_id
 
-    if model_input.mtp_draft_input_hiddens is not None:
-        assert model_input.mtp_draft_input_hiddens.is_cuda
-        model_input.mtp_draft_input_hiddens = _pack_selected_hidden(
-            model_input.mtp_draft_input_hiddens,
+    if model_input.spec_draft_input_hiddens is not None:
+        assert model_input.spec_draft_input_hiddens.is_cuda
+        model_input.spec_draft_input_hiddens = _pack_selected_hidden(
+            model_input.spec_draft_input_hiddens,
             selected_row_mask,
             selected_dst_pos,
             dynamic_batch_size,
@@ -303,7 +303,7 @@ def _compact_decode_model_input(
     return model_input
 
 
-def prepare_dynamic_mtp_model_input(
+def prepare_dynamic_spec_model_input(
     model_input: ModelInput,
     req_num: int,
     dynamic_batch_size: int,
@@ -312,11 +312,11 @@ def prepare_dynamic_mtp_model_input(
 ):
     req_num = int(req_num)
     dynamic_batch_size = int(dynamic_batch_size)
-    assert not model_input.is_prefill, "prepare_dynamic_mtp_model_input only supports decode inputs"
+    assert not model_input.is_prefill, "prepare_dynamic_spec_model_input only supports decode inputs"
     assert req_to_next_token_scores is not None
     assert dynamic_batch_size >= req_num
     assert dynamic_batch_size <= model_input.batch_size
-    max_draft_step = MtpManager.get_instance().get_decode_draft_step(is_draft_model=False)
+    max_draft_step = SpecManager.get_instance().get_decode_draft_step(is_draft_model=False)
     pre_draft_step = max_draft_step if pre_draft_step is None else int(pre_draft_step)
     assert 0 <= pre_draft_step <= max_draft_step
     assert model_input.batch_size == req_num * (max_draft_step + 1)

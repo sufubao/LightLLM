@@ -49,9 +49,9 @@ class ModelInput:
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输入变量。只在特殊的模型模式下才会具体使用和生效。
 
-    # mtp_draft_input_hiddens 用于模型 mtp 模式下
+    # spec_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
-    mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    spec_draft_input_hiddens: Optional[torch.Tensor] = None
 
     def to_cuda(self):
         self.check_input()
@@ -119,30 +119,30 @@ class ModelInput:
 
 
 @dataclass
-class ModelMtpOutput:
-    """保存一次模型 forward 为 MTP 推理产生的可选输出。"""
+class ModelSpecOutput:
+    """保存一次模型 forward 为投机解码产生的可选输出。"""
 
-    # MTP drafter 使用的 hidden 特征。
+    # 投机解码 drafter 使用的 hidden 特征。
     # - Vanilla MTP、EAGLE 主模型收集最终层 hidden；对应 draft 模型也会返回最终层 hidden，
     #   供串行的下一层 MTP 模块或下一步自回归 draft 使用。
     # - EAGLE3、DFlash、DSpark 主模型收集 checkpoint 配置指定的若干 target layer hidden，
     #   拼接后交给 draft 模型；EAGLE3 draft 模型还会返回最终层 hidden。
     # - DFlash、DSpark 的 block draft 模型不需要返回 hidden，因此该字段为 None。
-    # - 未启用 MTP 时不收集投机特征，该字段同样为 None。
+    # - 未启用投机解码 时不收集投机特征，该字段同样为 None。
     spec_hidden: Optional[torch.Tensor] = None
 
     # DSpark block draft 模型直接生成的 token id，形状通常为
     # [request_count * block_size]。
     # - 仅 DSpark 启用 Markov head（markov_rank > 0）时由 head 直接生成并返回。
     # - DSpark 未启用 Markov head 时为 None，调用方从普通 logits 执行 argmax。
-    # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
+    # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用投机解码 的模型均不使用该字段。
     draft_token_ids: Optional[torch.Tensor] = None
 
     # DSpark confidence head 输出的原始置信度 logits，形状通常为
-    # [request_count, block_size]，供动态 MTP verify 计算各 draft 位置的调度分数。
+    # [request_count, block_size]，供动态投机解码 verify 计算各 draft 位置的调度分数。
     # - 仅 DSpark checkpoint 启用 confidence head 时返回；动态 verify 模式要求该字段存在。
     # - 固定 verify 且未启用 confidence head 的 DSpark 模型可以返回 None。
-    # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
+    # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用投机解码 的模型均不使用该字段。
     confidence_logits: Optional[torch.Tensor] = None
 
     def to_no_ref_tensor(self) -> None:
@@ -153,7 +153,7 @@ class ModelMtpOutput:
         if self.confidence_logits is not None:
             self.confidence_logits = tensor_to_no_ref_tensor(self.confidence_logits)
 
-    def unpad_decode(self, padded_batch_size: int, origin_batch_size: int) -> "ModelMtpOutput":
+    def unpad_decode(self, padded_batch_size: int, origin_batch_size: int) -> "ModelSpecOutput":
         output = copy.copy(self)
         if output.spec_hidden is not None:
             output.spec_hidden = output.spec_hidden[:origin_batch_size]
@@ -167,14 +167,14 @@ class ModelMtpOutput:
             output.confidence_logits = output.confidence_logits[: origin_batch_size // rows_per_confidence]
         return output
 
-    def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutput":
+    def unpad_prefill(self, origin_handle_token_num: int) -> "ModelSpecOutput":
         output = copy.copy(self)
         if output.spec_hidden is not None:
             output.spec_hidden = output.spec_hidden[:origin_handle_token_num]
         return output
 
 
-class FinalHiddenPolicy(Enum):
+class FinalHiddenOutputPolicy(Enum):
     NONE = auto()
     PRE_NORM = auto()
     POST_NORM = auto()
@@ -195,10 +195,10 @@ class PostLayerOutput:
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
-    # MTP output is finalized by MtpCollector.finish_output before being
+    # Speculative output is finalized by SpecCollector.finish_output before being
     # attached here. ModelOutput therefore owns a stable output view instead
     # of the mutable collector used while the forward is still running.
-    mtp_output: Optional[ModelMtpOutput] = None
+    spec_output: Optional[ModelSpecOutput] = None
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
 
@@ -213,11 +213,11 @@ class ModelOutput:
     logits_token_ids: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
-        if self.mtp_output is None:
-            self.mtp_output = ModelMtpOutput()
+        if self.spec_output is None:
+            self.spec_output = ModelSpecOutput()
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
         if self.logits_token_ids is not None:
             self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
-        self.mtp_output.to_no_ref_tensor()
+        self.spec_output.to_no_ref_tensor()

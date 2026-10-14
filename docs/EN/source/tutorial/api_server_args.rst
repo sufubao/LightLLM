@@ -55,7 +55,7 @@ Basic Configuration Parameters
 .. option:: --run_mode
 
     Set the running mode, optional values:
-    
+
     * ``normal``: Single server mode (default)
     * ``prefill``: Prefill mode (for pd disaggregation running mode)
     * ``decode``: Decode mode (for pd disaggregation running mode)
@@ -65,7 +65,7 @@ Basic Configuration Parameters
 .. option:: --performance_mode, --p_mode
 
     Performance mode for different scenarios, optional values:
-    
+
     * ``None``: No performance mode applied (default)
     * ``personal``: Private personal running mode, automatically sets:
         - ``running_max_req_size`` to 3
@@ -99,10 +99,10 @@ Basic Configuration Parameters
 .. option:: --zmq_mode
 
     ZMQ communication mode, optional values:
-    
+
     * ``tcp://``: TCP mode
     * ``ipc:///tmp/``: IPC mode (default)
-    
+
     Can only choose from ``['tcp://', 'ipc:///tmp/']``
 
 PD disaggregation Mode Parameters
@@ -111,13 +111,13 @@ PD disaggregation Mode Parameters
 .. option:: --pd_master_ip
 
     PD master node IP address, default is ``0.0.0.0``
-    
+
     This parameter needs to be set when run_mode is set to prefill or decode
 
 .. option:: --pd_master_port
 
     PD master node port, default is ``1212``
-    
+
     This parameter needs to be set when run_mode is set to prefill or decode
 
 .. option:: --pd_master_mode
@@ -207,7 +207,7 @@ Model Configuration Parameters
 .. option:: --model_name
 
     Model name, used to distinguish internal model names, default is ``default_model_name``
-    
+
     Can be obtained via ``host:port/get_model_name``
 
 .. option:: --model_dir
@@ -217,7 +217,7 @@ Model Configuration Parameters
 .. option:: --tokenizer_mode
 
     Tokenizer loading mode, optional values:
-    
+
     * ``slow``: Slow mode, loads fast but runs slow, suitable for debugging and testing
     * ``fast``: Fast mode (default), achieves best performance
     * ``auto``: Auto mode, tries to use fast mode, falls back to slow mode if it fails
@@ -225,7 +225,7 @@ Model Configuration Parameters
 .. option:: --load_way
 
     Model weight loading method, default is ``HF`` (Huggingface format)
-    
+
     Llama models also support ``DS`` (Deepspeed) format
 
 .. option:: --trust_remote_code
@@ -237,14 +237,14 @@ Memory and Batch Processing Parameters
 
 .. option:: --max_total_token_num
 
-    Total token number of kv cache. 
-    
+    Total token number of kv cache.
+
     If not specified, will be automatically calculated based on mem_fraction
 
 .. option:: --mem_fraction
 
     Memory usage ratio, default is ``0.9``
-    
+
     If OOM occurs during runtime, you can specify a smaller value
 
 .. option:: --batch_max_tokens
@@ -272,7 +272,7 @@ Memory and Batch Processing Parameters
 .. option:: --tool_call_parser
 
     OpenAI interface tool call parser type, optional values:
-    
+
     * ``qwen25``
     * ``llama3``
     * ``mistral``
@@ -303,14 +303,14 @@ Different Parallel Mode Setting Parameters
 .. option:: --dp
 
     Data parallelism size, default is ``1``
-    
+
     This is a useful parameter for deepseekv2. When using deepseekv2 model, set dp equal to the tp parameter.
     In other cases, please do not set it, keep the default value of 1.
 
 .. option:: --nccl_host
 
     nccl_host used to build PyTorch distributed environment, default is ``127.0.0.1``
-    
+
     For multi-node deployment, should be set to the master node's IP
 
 .. option:: --nccl_port
@@ -320,7 +320,7 @@ Different Parallel Mode Setting Parameters
 .. option:: --use_config_server_to_init_nccl
 
     Use tcp store server started by config_server to initialize nccl, default is False
-    
+
     When set to True, --nccl_host must equal config_server_host, --nccl_port must be unique for config_server,
     do not use the same nccl_port for different inference nodes, this will be a serious error
 
@@ -338,7 +338,7 @@ Scheduling Parameters
 .. option:: --disable_aggressive_schedule
 
     Disable aggressive scheduling
-    
+
     Aggressive scheduling may cause frequent prefill interruptions during decoding. Disabling it can make the router_max_wait_tokens parameter work more effectively.
 
 .. option:: --enable_prefill_decode_mixed
@@ -378,7 +378,7 @@ Output Constraint Parameters
 .. option:: --output_constraint_mode
 
     Set the output constraint backend, optional values:
-    
+
     * ``outlines``: Use outlines backend
     * ``xgrammar``: Use xgrammar backend
     * ``none``: No output constraint (default)
@@ -472,13 +472,13 @@ Performance Optimization Parameters
 .. option:: --enable_tpsp_mix_mode
 
     The inference backend will use TP SP mixed running mode
-    
+
     Currently only supports llama and deepseek series models
 
 .. option:: --enable_prefill_microbatch_overlap
 
     The inference backend will use microbatch overlap mode for prefill
-    
+
     Currently only supports deepseek series.
 
 .. option:: --enable_decode_microbatch_overlap
@@ -583,7 +583,7 @@ Performance Optimization Parameters
 .. option:: --graph_split_batch_size
 
     Controls the interval for generating CUDA graphs during decoding, default is ``32``
-    
+
     For values from 1 to the specified graph_split_batch_size, CUDA graphs will be generated continuously.
     For values from graph_split_batch_size to graph_max_batch_size,
     a new CUDA graph will be generated for every increase of graph_grow_step_size.
@@ -677,7 +677,7 @@ Quantization Parameters
 .. option:: --quant_cfg
 
     Path to quantization configuration file. Can be used for mixed quantization.
-    
+
     Examples can be found in test/advanced_config/mixed_quantization/llamacls-mix-down.yaml.
 
 .. option:: --expert_dtype
@@ -699,7 +699,7 @@ Quantization Parameters
 .. option:: --vit_quant_cfg
 
     Path to ViT quantization configuration file. Can be used for mixed quantization.
-    
+
     Examples can be found in lightllm/common/quantization/configs.
 
 Sampling and Generation Parameters
@@ -708,7 +708,7 @@ Sampling and Generation Parameters
 .. option:: --sampling_backend
 
     Implementation used for sampling, optional values:
-    
+
     * ``triton``: Use torch and triton kernel (default)
     * ``sglang_kernel``: Use sglang_kernel implementation
 
@@ -727,29 +727,25 @@ Sampling and Generation Parameters
 MTP Multi-Prediction Parameters
 -------------------------------
 
-.. option:: --mtp_mode
+.. option:: --spec_mode, --mtp_mode
 
-    Supported mtp modes, it is recommended to use eagle_with_att for better performance, optional values:
-    
-    * ``vanilla_with_att``
-    * ``eagle_with_att``
-    * ``vanilla_no_att``
-    * ``eagle_no_att``
-    * ``None``: Do not enable mtp (default)
+    Speculative decoding mode: ``vanilla_with_att``, ``vanilla_no_att``, ``eagle_with_att``,
+    ``eagle_no_att``, ``eagle3``, ``dspark`` or ``dflash``. Disabled by default.
+    ``--mtp_mode`` remains an alias for existing scripts.
 
-.. option:: --mtp_draft_model_dir
+.. option:: --spec_draft_model_dir, --mtp_draft_model_dir
 
-    Path to the draft model for MTP multi-prediction functionality
-    
-    Used to load the MTP multi-output token model.
+    One or more draft model paths. The old option name remains an alias.
 
-.. option:: --mtp_step
+.. option:: --spec_step, --mtp_step
 
-    Specify the number of additional tokens predicted by the draft model, default is ``0``
-    
-    Currently this feature only supports DeepSeekV3/R1 models.
-    Increasing this value allows more predictions, but ensure the model is compatible with the specified number of steps.
-    Currently deepseekv3/r1 models only support 1 step
+    Additional draft tokens per request per iteration, default ``0``. The target model normally
+    verifies ``spec_step + 1`` positions. DSpark and DFlash use the draft checkpoint's ``block_size``.
+    The old option name remains an alias.
+
+.. option:: --spec_dynamic_verify, --mtp_dynamic_verify
+
+    Enable dynamic speculative scheduling. The old option name remains an alias.
 
 DeepSeek Redundant Expert Parameters
 ------------------------------------
@@ -787,4 +783,4 @@ Monitoring and Logging Parameters
 
 .. option:: --enable_monitor_auth
 
-    Whether to enable authentication for push_gateway 
+    Whether to enable authentication for push_gateway

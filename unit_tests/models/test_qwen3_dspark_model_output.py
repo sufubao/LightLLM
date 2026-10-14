@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel import batch_objs
-from lightllm.common.basemodel.batch_objs import ModelMtpOutput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelSpecOutput, ModelOutput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.mtp_collector import MtpHeadCollector
+from lightllm.common.basemodel.spec_collector import MtpHeadCollector
 from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
 from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
 from lightllm.models.qwen3_dflash.layer_infer import transformer_layer_infer as qwen3_dflash_layer_infer
@@ -18,23 +18,23 @@ from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
 from lightllm.models.llama.model import LlamaTpPartModel
 
 
-@pytest.mark.parametrize("mtp_step", [1, 5, 7])
-def test_parallel_block_runtime_width_follows_mtp_step(monkeypatch, mtp_step):
+@pytest.mark.parametrize("spec_step", [1, 5, 7])
+def test_parallel_block_runtime_width_follows_spec_step(monkeypatch, spec_step):
     monkeypatch.setattr(LlamaTpPartModel, "_verify_params", lambda self: None)
     model = Qwen3DFlashModel.__new__(Qwen3DFlashModel)
-    model.args = SimpleNamespace(mtp_mode="dspark", mtp_step=mtp_step)
+    model.args = SimpleNamespace(spec_mode="dspark", spec_step=spec_step)
     model.config = {"block_size": 7}
     model.enable_tpsp_mix_mode = False
 
     model._verify_params()
 
-    assert model.config["block_size"] == mtp_step
+    assert model.config["block_size"] == spec_step
 
 
-def test_parallel_block_rejects_mtp_step_above_checkpoint_capacity(monkeypatch):
+def test_parallel_block_rejects_spec_step_above_checkpoint_capacity(monkeypatch):
     monkeypatch.setattr(LlamaTpPartModel, "_verify_params", lambda self: None)
     model = Qwen3DFlashModel.__new__(Qwen3DFlashModel)
-    model.args = SimpleNamespace(mtp_mode="dflash", mtp_step=8)
+    model.args = SimpleNamespace(spec_mode="dflash", spec_step=8)
     model.config = {"block_size": 7}
     model.enable_tpsp_mix_mode = False
 
@@ -62,7 +62,7 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
         def context_forward(self, input_ids, infer_state, layer_weight):
             assert input_ids is None
             assert layer_weight is model.pre_post_weight
-            assert infer_state.mtp_draft_input_hiddens is target_hiddens
+            assert infer_state.spec_draft_input_hiddens is target_hiddens
             observed_states.append(infer_state)
             return target_hiddens + 1
 
@@ -81,7 +81,7 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model_input = SimpleNamespace(
         batch_size=2,
         b_seq_len=torch.tensor([3, 5]),
-        mtp_draft_input_hiddens=target_hiddens,
+        spec_draft_input_hiddens=target_hiddens,
     )
 
     output = model._decode(model_input)
@@ -100,7 +100,7 @@ def test_dspark_decode_unpad_uses_common_output_and_slices_mtp_fields(model_clas
     model = model_class.__new__(model_class)
     output = ModelOutput(
         logits=torch.arange(48).view(12, 4),
-        mtp_output=ModelMtpOutput(
+        spec_output=ModelSpecOutput(
             spec_hidden=torch.arange(36).view(12, 3),
             confidence_logits=torch.arange(12).view(3, 4),
             draft_token_ids=torch.arange(12),
@@ -111,19 +111,19 @@ def test_dspark_decode_unpad_uses_common_output_and_slices_mtp_fields(model_clas
 
     assert isinstance(unpadded, ModelOutput)
     assert unpadded.logits.shape == (8, 4)
-    assert unpadded.mtp_output.spec_hidden.shape == (8, 3)
-    assert unpadded.mtp_output.confidence_logits.shape == (2, 4)
-    assert unpadded.mtp_output.draft_token_ids.shape == (8,)
+    assert unpadded.spec_output.spec_hidden.shape == (8, 3)
+    assert unpadded.spec_output.confidence_logits.shape == (2, 4)
+    assert unpadded.spec_output.draft_token_ids.shape == (8,)
     assert output.logits.shape == (12, 4)
-    assert output.mtp_output.confidence_logits.shape == (3, 4)
-    assert output.mtp_output.draft_token_ids.shape == (12,)
+    assert output.spec_output.confidence_logits.shape == (3, 4)
+    assert output.spec_output.draft_token_ids.shape == (12,)
 
 
 def test_common_output_no_ref_conversion_includes_dspark_fields(monkeypatch):
     monkeypatch.setattr(batch_objs, "tensor_to_no_ref_tensor", torch.clone)
     output = ModelOutput(
         logits=torch.ones((2, 4)),
-        mtp_output=ModelMtpOutput(
+        spec_output=ModelSpecOutput(
             spec_hidden=torch.ones((2, 3)),
             confidence_logits=torch.ones((1, 2)),
             draft_token_ids=torch.ones((2,), dtype=torch.int64),
@@ -131,18 +131,18 @@ def test_common_output_no_ref_conversion_includes_dspark_fields(monkeypatch):
     )
     original_ptrs = (
         output.logits.data_ptr(),
-        output.mtp_output.spec_hidden.data_ptr(),
-        output.mtp_output.confidence_logits.data_ptr(),
-        output.mtp_output.draft_token_ids.data_ptr(),
+        output.spec_output.spec_hidden.data_ptr(),
+        output.spec_output.confidence_logits.data_ptr(),
+        output.spec_output.draft_token_ids.data_ptr(),
     )
 
     output.to_no_ref_tensor()
 
     converted_ptrs = (
         output.logits.data_ptr(),
-        output.mtp_output.spec_hidden.data_ptr(),
-        output.mtp_output.confidence_logits.data_ptr(),
-        output.mtp_output.draft_token_ids.data_ptr(),
+        output.spec_output.spec_hidden.data_ptr(),
+        output.spec_output.confidence_logits.data_ptr(),
+        output.spec_output.draft_token_ids.data_ptr(),
     )
     assert all(converted != original for converted, original in zip(converted_ptrs, original_ptrs))
 
@@ -182,11 +182,11 @@ def test_dspark_post_layer_returns_head_results():
     assert output.confidence_logits is confidence_logits
 
     collector = MtpHeadCollector()
-    state = SimpleNamespace(mtp_collector=collector, prompt_logics=None)
+    state = SimpleNamespace(spec_collector=collector, prompt_logics=None)
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model_output = model._create_model_output(output, state)
-    assert model_output.mtp_output.draft_token_ids is output.draft_token_ids
-    assert model_output.mtp_output.confidence_logits is confidence_logits
+    assert model_output.spec_output.draft_token_ids is output.draft_token_ids
+    assert model_output.spec_output.confidence_logits is confidence_logits
     assert collector.draft_token_ids is None
     assert collector.confidence_logits is None
 
@@ -231,12 +231,12 @@ def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids(co
     assert output.draft_token_ids is None
     assert output.confidence_logits is confidence_logits
 
-    state = SimpleNamespace(mtp_collector=MtpHeadCollector(), prompt_logics=None)
+    state = SimpleNamespace(spec_collector=MtpHeadCollector(), prompt_logics=None)
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model_output = model._create_model_output(output, state)
     assert model_output.logits_token_ids is candidate_output.logits_token_ids
-    assert model_output.mtp_output.draft_token_ids is None
-    assert model_output.mtp_output.confidence_logits is confidence_logits
+    assert model_output.spec_output.draft_token_ids is None
+    assert model_output.spec_output.confidence_logits is confidence_logits
 
 
 @pytest.mark.parametrize(

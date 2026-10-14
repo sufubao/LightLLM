@@ -6,7 +6,7 @@ import triton
 
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy
+from lightllm.common.basemodel.batch_objs import FinalHiddenOutputPolicy
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
@@ -21,7 +21,7 @@ from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeig
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
-    mtp_final_hidden_policy = FinalHiddenPolicy.POST_NORM
+    spec_final_hidden_output_policy = FinalHiddenOutputPolicy.POST_NORM
 
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight

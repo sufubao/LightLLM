@@ -51,7 +51,7 @@ class VanillaNoAttProposer(BaseSpecProposer):
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             accept_len=accept_len,
             input_ids=target_next_token_ids,
-            hidden=target_model_output.mtp_output.spec_hidden,
+            hidden=target_model_output.spec_output.spec_hidden,
             b_req_idx=target_model_input.b_req_idx,
             b_mtp_index=target_model_input.b_mtp_index,
             b_seq_len=target_model_input.b_seq_len,
@@ -74,9 +74,9 @@ class VanillaNoAttProposer(BaseSpecProposer):
 
         for step in range(draft_step):
             draft_input.input_ids = draft_token_ids
-            draft_input.mtp_draft_input_hiddens = draft_hidden
+            draft_input.spec_draft_input_hiddens = draft_hidden
             draft_output = self.backend.draft_models[step].forward(draft_input)
-            draft_hidden = draft_output.mtp_output.spec_hidden
+            draft_hidden = draft_output.spec_output.spec_hidden
 
             if self.enable_dynmaic_mtp:
                 # Vanilla No-Att 没有独立的 confidence head；动态调度使用

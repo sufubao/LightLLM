@@ -10,7 +10,7 @@ def causal_conv1d_ref(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
-    mtp_step: int,
+    spec_step: int,
     bias: Optional[torch.Tensor] = None,
     activation: Optional[str] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
@@ -36,7 +36,7 @@ def causal_conv1d_ref(
     seqlen = x.size(0) // batch
     _, width = weight.shape
     _, _, state_len = conv_state.size()
-    assert state_len == width - 1 + mtp_step
+    assert state_len == width - 1 + spec_step
 
     out = x.clone()
     conv_state = conv_state.clone()
@@ -111,7 +111,7 @@ def make_tensors(
     batch: int,
     dim: int,
     width: int,
-    mtp_step: int,
+    spec_step: int,
     has_bias: bool,
     num_slots: int = None,
     dtype: torch.dtype = torch.float16,
@@ -122,8 +122,8 @@ def make_tensors(
     if num_slots is None:
         num_slots = batch
 
-    state_len = width - 1 + mtp_step
-    x = torch.randn(batch * (mtp_step + 1), dim, device=device, dtype=dtype)
+    state_len = width - 1 + spec_step
+    x = torch.randn(batch * (spec_step + 1), dim, device=device, dtype=dtype)
     weight = torch.randn(dim, width, device=device, dtype=dtype)
     bias = torch.randn(dim, device=device, dtype=dtype) if has_bias else None
     conv_state = torch.randn(num_slots, dim, state_len, device=device, dtype=dtype)
@@ -131,24 +131,24 @@ def make_tensors(
 
     conv_state_indices = torch.arange(batch, device=device, dtype=torch.int32) % num_slots
     num_accepted_tokens = torch.ones(batch, device=device, dtype=torch.int32)
-    query_start_loc = torch.arange(batch + 1, device=device, dtype=torch.int32) * (mtp_step + 1)
+    query_start_loc = torch.arange(batch + 1, device=device, dtype=torch.int32) * (spec_step + 1)
 
     return x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc
 
 
 @pytest.mark.parametrize("width", [2, 3, 4, 5, 6])
 @pytest.mark.parametrize("dim", [64, 128])
-@pytest.mark.parametrize("mtp_step", [0, 1, 2])
+@pytest.mark.parametrize("spec_step", [0, 1, 2])
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("activation", [None, "silu"])
-def test_single_request(width, dim, mtp_step, has_bias, activation):
+def test_single_request(width, dim, spec_step, has_bias, activation):
     """Single request, no pad slots, basic functionality."""
     batch = 1
     x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc = make_tensors(
         batch=batch,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=has_bias,
         dtype=torch.float16,
     )
@@ -160,7 +160,7 @@ def test_single_request(width, dim, mtp_step, has_bias, activation):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation=activation,
         conv_state_indices=conv_state_indices,
@@ -172,7 +172,7 @@ def test_single_request(width, dim, mtp_step, has_bias, activation):
         x_orig,
         conv_state_ref,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation=activation,
         conv_state_indices=conv_state_indices,
@@ -182,7 +182,7 @@ def test_single_request(width, dim, mtp_step, has_bias, activation):
 
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, out_ref, rtol=rtol, atol=atol), (
-        f"Output mismatch: width={width}, dim={dim}, mtp_step={mtp_step}, "
+        f"Output mismatch: width={width}, dim={dim}, spec_step={spec_step}, "
         f"bias={has_bias}, activation={activation}\n"
         f"max diff={torch.abs(out_triton - out_ref).max().item():.6f}"
     )
@@ -191,14 +191,14 @@ def test_single_request(width, dim, mtp_step, has_bias, activation):
 @pytest.mark.parametrize("batch", [2, 4])
 @pytest.mark.parametrize("width", [3, 4, 5])
 @pytest.mark.parametrize("dim", [64, 256])
-@pytest.mark.parametrize("mtp_step", [0, 1, 2])
-def test_multi_request(batch, width, dim, mtp_step):
+@pytest.mark.parametrize("spec_step", [0, 1, 2])
+def test_multi_request(batch, width, dim, spec_step):
     """Multiple requests."""
     x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc = make_tensors(
         batch=batch,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=True,
         dtype=torch.float16,
     )
@@ -209,7 +209,7 @@ def test_multi_request(batch, width, dim, mtp_step):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -220,7 +220,7 @@ def test_multi_request(batch, width, dim, mtp_step):
         x_orig,
         conv_state_ref,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -230,15 +230,15 @@ def test_multi_request(batch, width, dim, mtp_step):
 
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, out_ref, rtol=rtol, atol=atol), (
-        f"Output mismatch: batch={batch}, width={width}, dim={dim}, mtp_step={mtp_step}\n"
+        f"Output mismatch: batch={batch}, width={width}, dim={dim}, spec_step={spec_step}\n"
         f"max diff={torch.abs(out_triton - out_ref).max().item():.6f}"
     )
 
 
 @pytest.mark.parametrize("width", [3, 4])
 @pytest.mark.parametrize("dim", [64, 128])
-@pytest.mark.parametrize("mtp_step", [0, 1])
-def test_pad_slots(width, dim, mtp_step):
+@pytest.mark.parametrize("spec_step", [0, 1])
+def test_pad_slots(width, dim, spec_step):
     """Some slots are padded, should produce same output as reference."""
     batch = 4
     num_slots = 4
@@ -246,7 +246,7 @@ def test_pad_slots(width, dim, mtp_step):
         batch=batch,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=True,
         num_slots=num_slots,
         dtype=torch.float16,
@@ -260,7 +260,7 @@ def test_pad_slots(width, dim, mtp_step):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -272,7 +272,7 @@ def test_pad_slots(width, dim, mtp_step):
         x_orig,
         conv_state_ref,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -283,7 +283,7 @@ def test_pad_slots(width, dim, mtp_step):
 
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, out_ref, rtol=rtol, atol=atol), (
-        f"Output mismatch with pad slots: width={width}, dim={dim}, mtp_step={mtp_step}\n"
+        f"Output mismatch with pad slots: width={width}, dim={dim}, spec_step={spec_step}\n"
         f"max diff={torch.abs(out_triton - out_ref).max().item():.6f}"
     )
 
@@ -299,22 +299,22 @@ def test_pad_slots(width, dim, mtp_step):
 
 @pytest.mark.parametrize("width", [2, 3, 4, 5])
 @pytest.mark.parametrize("dim", [64, 256])
-@pytest.mark.parametrize("mtp_step", [1, 2])
-def test_num_accepted_tokens_varied(width, dim, mtp_step):
+@pytest.mark.parametrize("spec_step", [1, 2])
+def test_num_accepted_tokens_varied(width, dim, spec_step):
     """Varying num_accepted_tokens across batch."""
     batch = 3
     x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc = make_tensors(
         batch=batch,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=True,
         dtype=torch.float16,
     )
 
     num_accepted_tokens[0] = 1
-    num_accepted_tokens[1] = mtp_step + 1
-    num_accepted_tokens[2] = max(1, mtp_step // 2 + 1)
+    num_accepted_tokens[1] = spec_step + 1
+    num_accepted_tokens[2] = max(1, spec_step // 2 + 1)
 
     x_orig = x.clone()
     conv_state_ref = conv_state.clone()
@@ -323,7 +323,7 @@ def test_num_accepted_tokens_varied(width, dim, mtp_step):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -334,7 +334,7 @@ def test_num_accepted_tokens_varied(width, dim, mtp_step):
         x_orig,
         conv_state_ref,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -344,23 +344,23 @@ def test_num_accepted_tokens_varied(width, dim, mtp_step):
 
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, out_ref, rtol=rtol, atol=atol), (
-        f"Output mismatch with varied accepted tokens: width={width}, dim={dim}, mtp_step={mtp_step}\n"
+        f"Output mismatch with varied accepted tokens: width={width}, dim={dim}, spec_step={spec_step}\n"
         f"max diff={torch.abs(out_triton - out_ref).max().item():.6f}"
     )
 
 
 @pytest.mark.parametrize("width", [2, 3, 4, 5, 6])
 @pytest.mark.parametrize("dim", [64, 128])
-@pytest.mark.parametrize("mtp_step", [0, 1])
+@pytest.mark.parametrize("spec_step", [0, 1])
 @pytest.mark.parametrize("activation", [None, "silu"])
-def test_conv_state_update_correctness(width, dim, mtp_step, activation):
+def test_conv_state_update_correctness(width, dim, spec_step, activation):
     """Verify that conv_state is updated correctly after the forward pass."""
     batch = 1
     x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc = make_tensors(
         batch=batch,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=True,
         dtype=torch.float16,
     )
@@ -372,7 +372,7 @@ def test_conv_state_update_correctness(width, dim, mtp_step, activation):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation=activation,
         conv_state_indices=conv_state_indices,
@@ -380,8 +380,8 @@ def test_conv_state_update_correctness(width, dim, mtp_step, activation):
         query_start_loc=query_start_loc,
     )
 
-    seqlen = mtp_step + 1
-    state_len = width - 1 + mtp_step
+    seqlen = spec_step + 1
+    state_len = width - 1 + spec_step
     slot = conv_state_indices[0].item()
 
     expected = torch.zeros_like(conv_state_before[slot])
@@ -400,7 +400,7 @@ def test_conv_state_update_correctness(width, dim, mtp_step, activation):
     actual = conv_state[slot]
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(actual, expected, rtol=rtol, atol=atol), (
-        f"Conv state mismatch: width={width}, dim={dim}, mtp_step={mtp_step}\n"
+        f"Conv state mismatch: width={width}, dim={dim}, spec_step={spec_step}\n"
         f"max diff={torch.abs(actual - expected).max().item():.6f}"
     )
 
@@ -410,13 +410,13 @@ def test_dtype_consistency(dtype):
     """Test that the function runs correctly with different dtypes."""
     width = 4
     dim = 128
-    mtp_step = 1
+    spec_step = 1
 
     x, conv_state, weight, bias, conv_state_indices, num_accepted_tokens, query_start_loc = make_tensors(
         batch=2,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=True,
         dtype=dtype,
     )
@@ -427,7 +427,7 @@ def test_dtype_consistency(dtype):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -439,7 +439,7 @@ def test_dtype_consistency(dtype):
         x_orig,
         conv_state_ref,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -460,20 +460,20 @@ def test_known_values(width, activation, has_bias):
     """Deterministic known values to verify numerically."""
     batch = 1
     dim = 4
-    mtp_step = 1
+    spec_step = 1
     device = "cuda"
 
     torch.manual_seed(999)
-    x = torch.randn(batch * (mtp_step + 1), dim, device=device, dtype=torch.float16)
+    x = torch.randn(batch * (spec_step + 1), dim, device=device, dtype=torch.float16)
     weight = torch.randn(dim, width, device=device, dtype=torch.float16)
     bias = torch.randn(dim, device=device, dtype=torch.float16) if has_bias else None
-    state_len = width - 1 + mtp_step
+    state_len = width - 1 + spec_step
     conv_state = torch.randn(1, dim, state_len, device=device, dtype=torch.float16)
     conv_state.add_(0.5)
 
     conv_state_indices = torch.zeros(batch, device=device, dtype=torch.int32)
     num_accepted_tokens = torch.ones(batch, device=device, dtype=torch.int32)
-    qsl = torch.arange(batch + 1, device=device, dtype=torch.int32) * (mtp_step + 1)
+    qsl = torch.arange(batch + 1, device=device, dtype=torch.int32) * (spec_step + 1)
 
     x_orig = x.clone()
     conv_state_ref = conv_state.clone()
@@ -481,7 +481,7 @@ def test_known_values(width, activation, has_bias):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation=activation,
         conv_state_indices=conv_state_indices,
@@ -492,7 +492,7 @@ def test_known_values(width, activation, has_bias):
         x_orig,
         conv_state_ref,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation=activation,
         conv_state_indices=conv_state_indices,
@@ -513,8 +513,8 @@ def test_known_values(width, activation, has_bias):
 
 
 @pytest.mark.parametrize("width", [2, 3, 4, 5, 6])
-@pytest.mark.parametrize("mtp_step", [0, 1, 2, 4])
-def test_single_step_kernel_vs_pytorch_conv(width, mtp_step):
+@pytest.mark.parametrize("spec_step", [0, 1, 2, 4])
+def test_single_step_kernel_vs_pytorch_conv(width, spec_step):
     """
     Verify the triton kernel against a direct torch.nn.functional.conv1d
     reference (transposed to per-channel depthwise conv). This test ensures
@@ -522,8 +522,8 @@ def test_single_step_kernel_vs_pytorch_conv(width, mtp_step):
     """
     batch = 1
     dim = 32
-    seqlen = mtp_step + 1
-    state_len = width - 1 + mtp_step
+    seqlen = spec_step + 1
+    state_len = width - 1 + spec_step
     device = "cuda"
 
     torch.manual_seed(123)
@@ -543,7 +543,7 @@ def test_single_step_kernel_vs_pytorch_conv(width, mtp_step):
         x.clone().half(),
         conv_state.clone().half(),
         weight.half(),
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias.half(),
         activation=None,
         conv_state_indices=conv_state_indices,
@@ -579,7 +579,7 @@ def test_single_step_kernel_vs_pytorch_conv(width, mtp_step):
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, pytorch_out, rtol=rtol, atol=atol), (
         f"Conv1d mismatch against torch.nn.functional.conv1d: "
-        f"width={width}, mtp_step={mtp_step}\n"
+        f"width={width}, spec_step={spec_step}\n"
         f"max diff={torch.abs(out_triton - pytorch_out).max().item():.6f}"
     )
 
@@ -594,8 +594,8 @@ def test_multi_step_decode_sliding_window(width, num_steps):
     """
     batch = 1
     dim = 32
-    mtp_step = 0
-    state_len = width - 1 + mtp_step
+    spec_step = 0
+    state_len = width - 1 + spec_step
     device = "cuda"
 
     torch.manual_seed(77)
@@ -619,7 +619,7 @@ def test_multi_step_decode_sliding_window(width, num_steps):
                 x_step,
                 conv_state_step,
                 weight.half(),
-                mtp_step=0,
+                spec_step=0,
                 bias=bias.half(),
                 activation=None,
                 conv_state_indices=idxs,
@@ -660,17 +660,17 @@ def test_multi_step_decode_sliding_window(width, num_steps):
 
 
 @pytest.mark.parametrize("width", [2, 3, 4])
-@pytest.mark.parametrize("mtp_step", [1, 2, 3])
-def test_mtp_decode_multi_token_per_step(width, mtp_step):
+@pytest.mark.parametrize("spec_step", [1, 2, 3])
+def test_mtp_decode_multi_token_per_step(width, spec_step):
     """
-    MTP decode: each step processes (mtp_step+1) tokens. After each step,
+    MTP decode: each step processes (spec_step+1) tokens. After each step,
     some tokens are accepted (num_accepted_tokens varies). The conv_state
     sliding window must correctly preserve history across steps.
     """
     batch = 1
     dim = 32
-    seqlen = mtp_step + 1
-    state_len = width - 1 + mtp_step
+    seqlen = spec_step + 1
+    state_len = width - 1 + spec_step
     device = "cuda"
     num_steps = 3
 
@@ -689,7 +689,7 @@ def test_mtp_decode_multi_token_per_step(width, mtp_step):
         x_full.clone().half(),
         conv_state.clone().half(),
         weight.half(),
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias.half(),
         activation="silu",
         conv_state_indices=idxs,
@@ -715,7 +715,7 @@ def test_mtp_decode_multi_token_per_step(width, mtp_step):
 
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, ref_out, rtol=rtol, atol=atol), (
-        f"MTP decode mismatch: width={width}, mtp_step={mtp_step}\n"
+        f"MTP decode mismatch: width={width}, spec_step={spec_step}\n"
         f"max diff={torch.abs(out_triton - ref_out).max().item():.6f}"
     )
 
@@ -737,7 +737,7 @@ def test_mtp_decode_multi_token_per_step(width, mtp_step):
             x_step_half,
             conv_state_step,
             weight.half(),
-            mtp_step=mtp_step,
+            spec_step=spec_step,
             bias=bias.half(),
             activation="silu",
             conv_state_indices=idxs,
@@ -749,7 +749,7 @@ def test_mtp_decode_multi_token_per_step(width, mtp_step):
             x_orig_step,
             conv_state_before_step,
             weight.half(),
-            mtp_step=mtp_step,
+            spec_step=spec_step,
             bias=bias.half(),
             activation="silu",
             conv_state_indices=idxs,
@@ -758,13 +758,13 @@ def test_mtp_decode_multi_token_per_step(width, mtp_step):
         ).float()
 
         assert torch.allclose(step_out, ref_step, rtol=rtol, atol=atol), (
-            f"Multi-step MTP step={step} mismatch: width={width}, mtp_step={mtp_step}\n"
+            f"Multi-step MTP step={step} mismatch: width={width}, spec_step={spec_step}\n"
             f"max diff={torch.abs(step_out - ref_step).max().item():.6f}"
         )
 
 
-@pytest.mark.parametrize("mtp_step", [0, 1, 2, 4])
-def test_kernel_width_2_correctness(mtp_step):
+@pytest.mark.parametrize("spec_step", [0, 1, 2, 4])
+def test_kernel_width_2_correctness(spec_step):
     """
     KERNEL_WIDTH=2 is a degenerate case: restore_conv_state_len = 0,
     meaning no history is preserved in the state update (the mask is always
@@ -774,8 +774,8 @@ def test_kernel_width_2_correctness(mtp_step):
     width = 2
     batch = 1
     dim = 64
-    seqlen = mtp_step + 1
-    state_len = width - 1 + mtp_step
+    seqlen = spec_step + 1
+    state_len = width - 1 + spec_step
     device = "cuda"
 
     torch.manual_seed(555)
@@ -787,7 +787,7 @@ def test_kernel_width_2_correctness(mtp_step):
     qsl = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
 
     # Test with multiple offsets (varying num_accepted_tokens)
-    for nac_val in range(1, min(seqlen + 1, mtp_step + 2)):
+    for nac_val in range(1, min(seqlen + 1, spec_step + 2)):
         conv_state = torch.randn(1, dim, state_len, device=device, dtype=torch.float32)
         x_half = x.clone().half()
         nat = torch.full((batch,), nac_val, device=device, dtype=torch.int32)
@@ -796,7 +796,7 @@ def test_kernel_width_2_correctness(mtp_step):
             x_half,
             conv_state.clone().half(),
             weight.half(),
-            mtp_step=mtp_step,
+            spec_step=spec_step,
             bias=bias.half(),
             activation=None,
             conv_state_indices=idxs,
@@ -821,7 +821,7 @@ def test_kernel_width_2_correctness(mtp_step):
         )
 
         assert torch.allclose(out_triton, ref_out, rtol=1e-2, atol=1e-2), (
-            f"Width=2 mismatch: mtp_step={mtp_step}, nac={nac_val}\n"
+            f"Width=2 mismatch: spec_step={spec_step}, nac={nac_val}\n"
             f"max diff={torch.abs(out_triton - ref_out).max().item():.6f}"
         )
 
@@ -832,9 +832,9 @@ def test_kernel_width_2_no_state_history():
     is always False, so the state update is fully overwritten by x tokens
     (no history preserved). Verify this yields correct output.
     """
-    batch, dim, width, mtp_step = 1, 16, 2, 2
-    state_len = width - 1 + mtp_step
-    seqlen = mtp_step + 1
+    batch, dim, width, spec_step = 1, 16, 2, 2
+    state_len = width - 1 + spec_step
+    seqlen = spec_step + 1
     device = "cuda"
 
     torch.manual_seed(42)
@@ -855,7 +855,7 @@ def test_kernel_width_2_no_state_history():
         x.clone().half(),
         conv_state.clone().half(),
         weight.half(),
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias.half(),
         activation=None,
         conv_state_indices=idxs,
@@ -880,8 +880,8 @@ def test_kernel_width_2_no_state_history():
 
 
 @pytest.mark.parametrize("width", [2, 3, 4, 5, 6])
-@pytest.mark.parametrize("mtp_step", [0, 1, 2])
-def test_output_overwrites_x_inplace(width, mtp_step):
+@pytest.mark.parametrize("spec_step", [0, 1, 2])
+def test_output_overwrites_x_inplace(width, spec_step):
     """
     Verify the kernel indeed overwrites x in-place (out == x). Also
     verify that the output values are different from the original input.
@@ -892,7 +892,7 @@ def test_output_overwrites_x_inplace(width, mtp_step):
         batch=batch,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=True,
         dtype=torch.float16,
     )
@@ -902,7 +902,7 @@ def test_output_overwrites_x_inplace(width, mtp_step):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=bias,
         activation="silu",
         conv_state_indices=conv_state_indices,
@@ -918,8 +918,8 @@ def test_output_overwrites_x_inplace(width, mtp_step):
 
 
 @pytest.mark.parametrize("width", [3, 4, 5])
-@pytest.mark.parametrize("mtp_step", [0, 1, 2])
-def test_bias_none_gives_same_shape(width, mtp_step):
+@pytest.mark.parametrize("spec_step", [0, 1, 2])
+def test_bias_none_gives_same_shape(width, spec_step):
     """bias=None should produce the same output shape as bias specified."""
     batch = 1
     dim = 32
@@ -927,7 +927,7 @@ def test_bias_none_gives_same_shape(width, mtp_step):
         batch=batch,
         dim=dim,
         width=width,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         has_bias=False,
         dtype=torch.float16,
     )
@@ -939,7 +939,7 @@ def test_bias_none_gives_same_shape(width, mtp_step):
         x,
         conv_state,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=None,
         activation=None,
         conv_state_indices=conv_state_indices,
@@ -950,7 +950,7 @@ def test_bias_none_gives_same_shape(width, mtp_step):
         x_orig,
         conv_state_ref,
         weight,
-        mtp_step=mtp_step,
+        spec_step=spec_step,
         bias=None,
         activation=None,
         conv_state_indices=conv_state_indices,
@@ -962,7 +962,7 @@ def test_bias_none_gives_same_shape(width, mtp_step):
     assert out_triton.shape == x_orig.shape
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, out_ref, rtol=rtol, atol=atol), (
-        f"No-bias mismatch: width={width}, mtp_step={mtp_step}\n"
+        f"No-bias mismatch: width={width}, spec_step={spec_step}\n"
         f"max diff={torch.abs(out_triton - out_ref).max().item():.6f}"
     )
 

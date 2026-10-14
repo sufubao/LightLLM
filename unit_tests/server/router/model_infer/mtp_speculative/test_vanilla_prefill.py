@@ -20,7 +20,7 @@ def _prefill_input(input_ids, batch_size):
             (batch_size,), input_ids.shape[0] // batch_size, dtype=torch.int32, device=input_ids.device
         ),
         b_ready_cache_len=torch.zeros(batch_size, dtype=torch.int32, device=input_ids.device),
-        mtp_draft_input_hiddens=None,
+        spec_draft_input_hiddens=None,
     )
 
 
@@ -38,13 +38,13 @@ def test_chained_prefill_advances_local_input_without_mutating_target():
                 (
                     model_input,
                     model_input.input_ids.clone(),
-                    model_input.mtp_draft_input_hiddens,
+                    model_input.spec_draft_input_hiddens,
                     model_input.b_is_decode_req,
                 )
             )
             return SimpleNamespace(
                 token_ids=output_tokens,
-                mtp_output=SimpleNamespace(spec_hidden=output_hidden),
+                spec_output=SimpleNamespace(spec_hidden=output_hidden),
             )
 
         return SimpleNamespace(forward=forward)
@@ -62,7 +62,7 @@ def test_chained_prefill_advances_local_input_without_mutating_target():
 
     proposer.fill_draft_model_kv_state(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=torch.tensor([13, 23], dtype=torch.int64, device=device),
     )
 
@@ -81,13 +81,13 @@ def test_chained_prefill_advances_local_input_without_mutating_target():
     assert not forwarded[0][3].any()
     assert forwarded[0][3].data_ptr() == forwarded[1][3].data_ptr()
     assert target_input.input_ids is original_input_ids
-    assert target_input.mtp_draft_input_hiddens is None
+    assert target_input.spec_draft_input_hiddens is None
 
 
 def test_overlap_chained_prefill_uses_local_microbatch_inputs(monkeypatch):
-    def prepare(model_input, b_next_token_ids, mtp_draft_input_hiddens):
+    def prepare(model_input, b_next_token_ids, spec_draft_input_hiddens):
         model_input.input_ids = model_input.input_ids + b_next_token_ids
-        model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
+        model_input.spec_draft_input_hiddens = spec_draft_input_hiddens
         return model_input
 
     target_input0 = _prefill_input(torch.tensor([1, 2], dtype=torch.int64), batch_size=2)
@@ -105,7 +105,7 @@ def test_overlap_chained_prefill_uses_local_microbatch_inputs(monkeypatch):
             return tuple(
                 SimpleNamespace(
                     token_ids=torch.full((2,), self.token_offset + index, dtype=torch.int64),
-                    mtp_output=SimpleNamespace(spec_hidden=hidden + self.token_offset),
+                    spec_output=SimpleNamespace(spec_hidden=hidden + self.token_offset),
                 )
                 for index, hidden in enumerate((target_hidden0, target_hidden1))
             )
@@ -119,10 +119,10 @@ def test_overlap_chained_prefill_uses_local_microbatch_inputs(monkeypatch):
 
     proposer.fill_draft_model_kv_state_overlap(
         target_model_input0=target_input0,
-        target_model_output0=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden0)),
+        target_model_output0=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden0)),
         target_next_token_ids0=torch.tensor([5, 6], dtype=torch.int64),
         target_model_input1=target_input1,
-        target_model_output1=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden1)),
+        target_model_output1=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden1)),
         target_next_token_ids1=torch.tensor([7, 8], dtype=torch.int64),
     )
 
@@ -146,7 +146,7 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
         is_prefill=False,
         batch_size=6,
         input_ids=original_input_ids,
-        mtp_draft_input_hiddens=None,
+        spec_draft_input_hiddens=None,
     )
     target_hidden = torch.arange(12, dtype=torch.float32, device=device).reshape(6, 2)
     forwarded = []
@@ -157,13 +157,13 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
                 (
                     model_input,
                     model_input.input_ids.clone(),
-                    model_input.mtp_draft_input_hiddens,
+                    model_input.spec_draft_input_hiddens,
                 )
             )
             return SimpleNamespace(
                 token_ids=output_tokens,
                 token_probs=output_probs,
-                mtp_output=SimpleNamespace(spec_hidden=output_hidden),
+                spec_output=SimpleNamespace(spec_hidden=output_hidden),
             )
 
         return SimpleNamespace(forward=forward)
@@ -190,7 +190,7 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
 
     proposal = proposer.propose_next(
         target_model_input=target_input,
-        target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
+        target_model_output=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden)),
         target_next_token_ids=original_input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32, device=device),
         draft_step=3,
@@ -224,12 +224,12 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
         torch.tensor([[0.32, 0.42, 0.52], [0.34, 0.44, 0.54]], device=device),
     )
     assert target_input.input_ids is original_input_ids
-    assert target_input.mtp_draft_input_hiddens is None
+    assert target_input.spec_draft_input_hiddens is None
 
     with pytest.raises(AssertionError, match="requires the full chained draft depth"):
         proposer.propose_next(
             target_model_input=target_input,
-            target_model_output=SimpleNamespace(mtp_output=SimpleNamespace(spec_hidden=target_hidden)),
+            target_model_output=SimpleNamespace(spec_output=SimpleNamespace(spec_hidden=target_hidden)),
             target_next_token_ids=original_input_ids,
             b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32, device=device),
             draft_step=2,

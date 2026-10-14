@@ -31,7 +31,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         self._prepare_eagle_prefill_inputs(
             model_input=draft_input,
             b_next_token_ids=target_next_token_ids,
-            mtp_draft_input_hiddens=target_model_output.mtp_output.spec_hidden,
+            spec_draft_input_hiddens=target_model_output.spec_output.spec_hidden,
         )
         self.backend.draft_models[0].forward(draft_input)
 
@@ -60,7 +60,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         assert accept_len is not None
         assert accept_len.shape == (req_num,)
         assert target_next_token_ids.shape[0] == target_model_input.batch_size
-        assert target_model_output.mtp_output.spec_hidden.shape[0] == target_model_input.batch_size
+        assert target_model_output.spec_output.spec_hidden.shape[0] == target_model_input.batch_size
         assert target_model_input.b_position_delta is not None
         assert len(self.backend.draft_models) == 1
 
@@ -72,7 +72,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         # draft forward 不会改变 target_model_input 对象自身的字段。
         verify_draft_input = copy.copy(target_model_input)
         verify_draft_input.input_ids = target_next_token_ids
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_output.spec_hidden
+        verify_draft_input.spec_draft_input_hiddens = target_model_output.spec_output.spec_hidden
         extend_output = draft_model.forward(verify_draft_input)
 
         # 只在 req_num 行 logits 上进行 argmax，避免为未接受的 verify 行执行
@@ -107,7 +107,7 @@ class EagleWithAttProposer(BaseSpecProposer):
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             accept_len=accept_len,
             input_ids=target_next_token_ids,
-            hidden=extend_output.mtp_output.spec_hidden,
+            hidden=extend_output.spec_output.spec_hidden,
             b_req_idx=target_model_input.b_req_idx,
             b_mtp_index=target_model_input.b_mtp_index,
             b_seq_len=target_model_input.b_seq_len,
@@ -136,11 +136,11 @@ class EagleWithAttProposer(BaseSpecProposer):
 
         for step in range(1, draft_step):
             draft_input.input_ids = draft_token_ids
-            draft_input.mtp_draft_input_hiddens = draft_hidden
+            draft_input.spec_draft_input_hiddens = draft_hidden
             draft_input.max_kv_seq_len = max_kv_seq_len + step
             draft_input.total_token_num = req_num * draft_input.max_kv_seq_len
             draft_output = draft_model.forward(draft_input)
-            draft_hidden = draft_output.mtp_output.spec_hidden
+            draft_hidden = draft_output.spec_output.spec_hidden
 
             if self.enable_dynmaic_mtp:
                 draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(draft_output)
@@ -171,7 +171,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         self,
         model_input: ModelInput,
         b_next_token_ids: torch.Tensor,
-        mtp_draft_input_hiddens: torch.Tensor,
+        spec_draft_input_hiddens: torch.Tensor,
     ) -> ModelInput:
         """构造 EAGLE With-Att draft model 的 prompt prefill 输入。
 
@@ -183,14 +183,14 @@ class EagleWithAttProposer(BaseSpecProposer):
 
         此外会把 ``b_is_decode_req`` 设置为缓存的全 False GPU 张量，使
         mixed-prefill 输入整理逻辑保留这里生成的 token；target model 输出的
-        hidden 则通过 ``mtp_draft_input_hiddens`` 传给 EAGLE pre-layer。
+        hidden 则通过 ``spec_draft_input_hiddens`` 传给 EAGLE pre-layer。
 
         参数：
             model_input: draft prompt prefill 输入。本方法原地更新其
                 ``input_ids``、``b_is_decode_req`` 和 hidden 字段。
             b_next_token_ids: 每个请求追加到当前 query 末尾的 next token，
                 shape 为 ``[batch_size]``。
-            mtp_draft_input_hiddens: target prefill 为当前 query 产生的 hidden，
+            spec_draft_input_hiddens: target prefill 为当前 query 产生的 hidden，
                 第一维与扁平 ``input_ids`` 对齐。
 
         返回：
@@ -215,5 +215,5 @@ class EagleWithAttProposer(BaseSpecProposer):
             b_seq_len=model_input.b_seq_len,
             b_ready_cache_len=model_input.b_ready_cache_len,
         )
-        model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
+        model_input.spec_draft_input_hiddens = spec_draft_input_hiddens
         return model_input

@@ -175,7 +175,7 @@ def test_pd_nodes_use_pd_queue(overrides):
 
 @pytest.mark.parametrize("page_size", [1, 16])
 def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length(page_size, monkeypatch):
-    monkeypatch.setattr(req_module, "get_env_start_args", lambda: SimpleNamespace(page_size=page_size, mtp_step=0))
+    monkeypatch.setattr(req_module, "get_env_start_args", lambda: SimpleNamespace(page_size=page_size, spec_step=0))
     queue = PDDecodeQueue.__new__(PDDecodeQueue)
     queue.args = SimpleNamespace(run_mode="decode", page_size=page_size)
     queue.dp_index = 0

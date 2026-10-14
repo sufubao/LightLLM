@@ -65,12 +65,12 @@ def _run_both(
     return o_old, o_new, fs_old, fs_new
 
 
-@pytest.mark.parametrize("mtp_step", [1, 2, 3])
-def test_mtp_verify_path(mtp_step):
+@pytest.mark.parametrize("spec_step", [1, 2, 3])
+def test_mtp_verify_path(spec_step):
     """MTP verify path with cu_seqlens and 2D SSM indices."""
     torch.manual_seed(123)
     batch, H, HV, K, V = 2, 2, 8, 64, 64
-    seqlen = mtp_step + 1
+    seqlen = spec_step + 1
     num_tokens = batch * seqlen
     cache_slots = 64
 
@@ -106,7 +106,7 @@ def test_mtp_verify_path(mtp_step):
     ), f"output mismatch, max diff={torch.abs(o_old.float() - o_new.float()).max().item():.6f}"
     if not torch.equal(fs_old, fs_new):
         assert torch.allclose(fs_old.float(), fs_new.float(), rtol=1e-2, atol=5.0), (
-            f"final_state mismatch at mtp_step={mtp_step}, "
+            f"final_state mismatch at spec_step={spec_step}, "
             f"max diff={torch.abs(fs_old.float() - fs_new.float()).max().item():.6f}"
         )
 
@@ -114,10 +114,10 @@ def test_mtp_verify_path(mtp_step):
 @pytest.mark.parametrize("seed", [1, 2, 3, 4])
 def test_variable_length_cu_seqlens(seed):
     """Variable-length sequences via cu_seqlens: individual lengths vary,
-    each ≤ mtp_step+1, with some padded to shorter lengths."""
+    each ≤ spec_step+1, with some padded to shorter lengths."""
     torch.manual_seed(seed)
-    batch, mtp_step, H, HV, K, V = 4, 3, 2, 8, 64, 64
-    max_len = mtp_step + 1  # 4
+    batch, spec_step, H, HV, K, V = 4, 3, 2, 8, 64, 64
+    max_len = spec_step + 1  # 4
     cache_slots = 64
 
     # Random per-sequence lengths in [1, max_len]

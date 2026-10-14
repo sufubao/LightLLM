@@ -202,9 +202,9 @@ DeepSeek R1 可以使用 ``/mtc/models/DeepSeek-R1`` 和 ``/mtc/models/DeepSeek-
     python test/benchmark/static_inference/test_model.py \
         --model_dir /path/to/main_model \
         --benchmark decode \
-        --mtp_mode eagle_with_att \
-        --mtp_step 2 \
-        --mtp_draft_model_dir /path/to/draft_model \
+        --spec_mode eagle_with_att \
+        --spec_step 2 \
+        --spec_draft_model_dir /path/to/draft_model \
         --mtp_accept_rate 0.8 \
         --batch_sizes 8,16 \
         --context_lens 1024,4096 \
@@ -213,9 +213,9 @@ DeepSeek R1 可以使用 ``/mtc/models/DeepSeek-R1`` 和 ``/mtc/models/DeepSeek-
 参数说明：
 
 - ``--model_dir``: 主模型路径
-- ``--mtp_mode``: MTP 模式，如 ``eagle_with_att``、``vanilla_with_att``、``eagle_no_att``、``vanilla_no_att``
-- ``--mtp_step``: 每次 decode 额外预测的 draft token 数量
-- ``--mtp_draft_model_dir``: 草稿模型路径
+- ``--spec_mode``: MTP 模式，如 ``eagle_with_att``、``vanilla_with_att``、``eagle_no_att``、``vanilla_no_att``
+- ``--spec_step``: 每次 decode 额外预测的 draft token 数量
+- ``--spec_draft_model_dir``: 草稿模型路径
 - ``--mtp_accept_rate``: 每个 draft token 的模拟接受概率，采样过程不计入 decode 耗时
 
 Vision Transformer 测试 (test_vit.py)

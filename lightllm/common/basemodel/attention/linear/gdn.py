@@ -36,7 +36,7 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
-        self.mtp_step = get_env_start_args().mtp_step
+        self.spec_step = get_env_start_args().spec_step
 
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
@@ -113,12 +113,12 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
     def init_state(self):
         backend: LinearAttBackend = self.backend
-        mtp_step = backend.mtp_step
+        spec_step = backend.spec_step
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (spec_step + 1)
         return
 
     def prefill_att(
@@ -141,8 +141,8 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
-        if backend.mtp_step > 0:
-            conv_states = conv_states[:, :, : -backend.mtp_step]
+        if backend.spec_step > 0:
+            conv_states = conv_states[:, :, : -backend.spec_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(
             mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight
@@ -206,7 +206,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+        draft_step = self.backend.model.spec_manager.get_decode_draft_step(self.backend.model.is_spec_draft_model)
         if draft_step == 0:
             self._init_normal_decode_state()
         elif self.backend.uses_dynamic_spec_verify_layout():
@@ -282,7 +282,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
 
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+        draft_step = self.backend.model.spec_manager.get_decode_draft_step(self.backend.model.is_spec_draft_model)
         if draft_step > 0:
             core_attn_out = self._gdn_mtp_kernel(
                 mixed_qkv,
@@ -375,7 +375,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             mixed_qkv,
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
-            mtp_step=backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model),
+            spec_step=backend.model.spec_manager.get_decode_draft_step(backend.model.is_spec_draft_model),
             bias=layer_weight.linear_conv1d.bias,
             activation=backend.activation,
             conv_state_indices=self.b_conv_buffer_idx,
@@ -386,7 +386,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
-        # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
+        # and MTP decode only writes values in [1, spec_step+1]. The old per-layer per-step
         # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
         core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
             q=query,

@@ -18,22 +18,22 @@ def test_dspark_prefill_uses_a_shallow_copy_for_target_hidden():
         b_position_delta=None,
         b_req_idx=torch.tensor([3, 5], dtype=torch.int32),
         input_ids=torch.arange(5, dtype=torch.int64),
-        mtp_draft_input_hiddens=None,
+        spec_draft_input_hiddens=None,
     )
     target_hidden = torch.empty((5, 8))
 
     proposer.fill_draft_model_kv_state(
         target_model_input=model_input,
         target_model_output=SimpleNamespace(
-            mtp_output=SimpleNamespace(spec_hidden=target_hidden),
+            spec_output=SimpleNamespace(spec_hidden=target_hidden),
         ),
         target_next_token_ids=torch.tensor([11, 13], dtype=torch.int64),
     )
 
     assert len(forwarded_inputs) == 1
     assert forwarded_inputs[0] is not model_input
-    assert forwarded_inputs[0].mtp_draft_input_hiddens is target_hidden
-    assert model_input.mtp_draft_input_hiddens is None
+    assert forwarded_inputs[0].spec_draft_input_hiddens is target_hidden
+    assert model_input.spec_draft_input_hiddens is None
 
 
 def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
@@ -46,7 +46,7 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         ]
     )
     block_output = SimpleNamespace(
-        mtp_output=SimpleNamespace(
+        spec_output=SimpleNamespace(
             draft_token_ids=draft_token_ids,
             confidence_logits=confidence_logits,
         )
@@ -93,13 +93,13 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         b_shared_seq_len=torch.tensor([3, 3, 3, 6, 6], dtype=torch.int32),
         b_shared_radix_node_id=torch.tensor([17, 17, 17, 19, 19], dtype=torch.int64),
         multimodal_params=[{"images": [], "audios": []} for _ in range(5)],
-        mtp_draft_input_hiddens=None,
+        spec_draft_input_hiddens=None,
     )
 
     proposal = proposer.propose_next(
         target_model_input=model_input,
         target_model_output=SimpleNamespace(
-            mtp_output=SimpleNamespace(spec_hidden=target_hidden),
+            spec_output=SimpleNamespace(spec_hidden=target_hidden),
         ),
         target_next_token_ids=model_input.input_ids,
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32),
@@ -110,15 +110,15 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
     assert len(forwarded_inputs) == 2
     verify_draft_input, block_draft_input = forwarded_inputs
     assert verify_draft_input is not model_input
-    assert verify_draft_input.mtp_draft_input_hiddens is target_hidden
-    assert model_input.mtp_draft_input_hiddens is None
+    assert verify_draft_input.spec_draft_input_hiddens is target_hidden
+    assert model_input.spec_draft_input_hiddens is None
 
     assert torch.equal(block_draft_input.input_ids, torch.tensor([11, 99, 99, 21, 99, 99]))
     assert torch.equal(block_draft_input.b_req_idx, torch.tensor([7, 7, 7, 9, 9, 9], dtype=torch.int32))
     assert torch.equal(block_draft_input.b_mtp_index, torch.zeros(6, dtype=torch.int32))
     assert torch.equal(block_draft_input.b_seq_len, torch.tensor([6, 7, 8, 10, 11, 12], dtype=torch.int32))
     assert torch.equal(block_draft_input.b_position_delta, torch.tensor([1, 1, 1, 2, 2, 2], dtype=torch.int32))
-    assert block_draft_input.mtp_draft_input_hiddens is None
+    assert block_draft_input.spec_draft_input_hiddens is None
 
     assert torch.equal(proposal.token_ids, torch.tensor([[30, 31], [40, 41]], dtype=torch.int64))
     torch.testing.assert_close(

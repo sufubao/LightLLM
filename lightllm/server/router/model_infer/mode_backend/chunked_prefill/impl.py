@@ -30,7 +30,7 @@ class ChunkedPrefillBackend(ModeBackend):
         self.control_state_machine = ControlState()
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
-        if get_env_start_args().mtp_mode is not None:
+        if get_env_start_args().spec_mode is not None:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
         else:
@@ -43,8 +43,8 @@ class ChunkedPrefillBackend(ModeBackend):
     def init_spec_engine(self):
         self.spec_engine = SpecEngine(
             backend=self,
-            spec_mode=self.args.mtp_mode,
-            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
+            spec_mode=self.args.spec_mode,
+            enable_dynmaic_mtp=self.args.spec_dynamic_verify,
         )
         return
 

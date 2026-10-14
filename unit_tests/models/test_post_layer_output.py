@@ -3,9 +3,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import FinalHiddenPolicy, PostLayerOutput
+from lightllm.common.basemodel.batch_objs import FinalHiddenOutputPolicy, PostLayerOutput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.mtp_collector import FinalHiddenMtpCollector, NoopMtpCollector
+from lightllm.common.basemodel.spec_collector import FinalHiddenSpecCollector, NoopSpecCollector
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk
 from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
     pack_vocab_parallel_topk,
@@ -274,7 +274,7 @@ def test_prefill_prompt_logits_do_not_replace_candidate_output(draft) -> None:
         is_draft_model=draft,
         is_prefill=True,
         return_all_prompt_logics=True,
-        final_hidden_policy=FinalHiddenPolicy.NONE,
+        final_hidden_output_policy=FinalHiddenOutputPolicy.NONE,
         prompt_logics=torch.ones(5, 2),
     )
     head._norm = lambda hidden, state, weight: hidden
@@ -297,7 +297,7 @@ def test_model_output_and_unpadding_preserve_candidate_mapping() -> None:
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     logits = torch.randn(3, 2)
     ids = torch.tensor([[10, 20], [30, 40], [50, 60]])
-    state = SimpleNamespace(mtp_collector=NoopMtpCollector(), prompt_logics=None)
+    state = SimpleNamespace(spec_collector=NoopSpecCollector(), prompt_logics=None)
     output = model._create_model_output(PostLayerOutput(logits, ids), state)
     unpadded = model._create_unpad_decode_model_output(output, 2)
     torch.testing.assert_close(unpadded.logits, logits[:2])
@@ -328,16 +328,16 @@ def test_overlap_keeps_each_microbatch_mapping() -> None:
 @pytest.mark.parametrize(
     "hidden_policy,is_prefill,prompt,draft,top_k",
     [
-        (FinalHiddenPolicy.NONE, True, False, False, None),
-        (FinalHiddenPolicy.PRE_NORM, True, False, False, None),
-        (FinalHiddenPolicy.POST_NORM, True, False, False, None),
-        (FinalHiddenPolicy.NONE, True, True, False, None),
-        (FinalHiddenPolicy.PRE_NORM, True, True, False, None),
-        (FinalHiddenPolicy.POST_NORM, True, True, True, None),
-        (FinalHiddenPolicy.NONE, True, True, True, 2),
-        (FinalHiddenPolicy.POST_NORM, True, True, False, 2),
-        (FinalHiddenPolicy.POST_NORM, False, False, True, None),
-        (FinalHiddenPolicy.POST_NORM, False, False, True, 2),
+        (FinalHiddenOutputPolicy.NONE, True, False, False, None),
+        (FinalHiddenOutputPolicy.PRE_NORM, True, False, False, None),
+        (FinalHiddenOutputPolicy.POST_NORM, True, False, False, None),
+        (FinalHiddenOutputPolicy.NONE, True, True, False, None),
+        (FinalHiddenOutputPolicy.PRE_NORM, True, True, False, None),
+        (FinalHiddenOutputPolicy.POST_NORM, True, True, True, None),
+        (FinalHiddenOutputPolicy.NONE, True, True, True, 2),
+        (FinalHiddenOutputPolicy.POST_NORM, True, True, False, 2),
+        (FinalHiddenOutputPolicy.POST_NORM, False, False, True, None),
+        (FinalHiddenOutputPolicy.POST_NORM, False, False, True, 2),
     ],
 )
 def test_norm_and_hidden_policy(monkeypatch, hidden_policy, is_prefill, prompt, draft, top_k):
@@ -378,7 +378,7 @@ def test_norm_and_hidden_policy(monkeypatch, hidden_policy, is_prefill, prompt, 
         b_ready_cache_len=torch.zeros(2, dtype=torch.long),
         return_all_prompt_logics=prompt,
         prompt_logics=None,
-        final_hidden_policy=hidden_policy,
+        final_hidden_output_policy=hidden_policy,
     )
     weight = SimpleNamespace(lm_head_weight_=LMHead())
     output = head.token_forward(hidden, state, weight)
@@ -399,17 +399,17 @@ def test_norm_and_hidden_policy(monkeypatch, hidden_policy, is_prefill, prompt, 
         torch.testing.assert_close(state.prompt_logics, all_logits)
     else:
         assert state.prompt_logics is None
-    if hidden_policy is FinalHiddenPolicy.POST_NORM:
+    if hidden_policy is FinalHiddenOutputPolicy.POST_NORM:
         torch.testing.assert_close(output.final_hidden, normed)
-    elif hidden_policy is FinalHiddenPolicy.PRE_NORM:
+    elif hidden_policy is FinalHiddenOutputPolicy.PRE_NORM:
         assert output.final_hidden is hidden
     else:
         assert output.final_hidden is None
-    assert norm_rows == [5 if prompt or hidden_policy is FinalHiddenPolicy.POST_NORM else state.batch_size]
+    assert norm_rows == [5 if prompt or hidden_policy is FinalHiddenOutputPolicy.POST_NORM else state.batch_size]
 
 
 @pytest.mark.parametrize("model_name", ["qwen2", "internlm2"])
-@pytest.mark.parametrize("hidden_policy", list(FinalHiddenPolicy))
+@pytest.mark.parametrize("hidden_policy", list(FinalHiddenOutputPolicy))
 def test_reward_hidden_policy(model_name, hidden_policy):
     from lightllm.models.qwen2_reward.layer_infer.post_layer_infer import Qwen2RewardPostLayerInfer
     from lightllm.models.internlm2_reward.layer_infer.post_layer_infer import Internlm2RewardPostLayerInfer
@@ -432,29 +432,29 @@ def test_reward_hidden_policy(model_name, hidden_policy):
         score_down_weight_=SimpleNamespace(mm=lambda value: value @ score_weight),
         score_head_=SimpleNamespace(mm=lambda value: value @ score_weight),
     )
-    collector = NoopMtpCollector() if hidden_policy is FinalHiddenPolicy.NONE else FinalHiddenMtpCollector()
+    collector = NoopSpecCollector() if hidden_policy is FinalHiddenOutputPolicy.NONE else FinalHiddenSpecCollector()
     state = SimpleNamespace(
         is_prefill=True,
         batch_size=2,
         b_seq_len=torch.tensor([2, 3]),
         b_ready_cache_len=torch.zeros(2, dtype=torch.long),
         return_all_prompt_logics=False,
-        mtp_collector=collector,
-        final_hidden_policy=hidden_policy,
+        spec_collector=collector,
+        final_hidden_output_policy=hidden_policy,
     )
     output = head.token_forward(hidden, state, weight)
     normed = torch.nn.functional.rms_norm(hidden, (3,), norm_weight, eps=1e-6)
     torch.testing.assert_close(output.logits, normed[[1, 4]] @ score_weight)
-    if hidden_policy is FinalHiddenPolicy.PRE_NORM:
+    if hidden_policy is FinalHiddenOutputPolicy.PRE_NORM:
         assert output.final_hidden is hidden
-    elif hidden_policy is FinalHiddenPolicy.POST_NORM:
+    elif hidden_policy is FinalHiddenOutputPolicy.POST_NORM:
         torch.testing.assert_close(output.final_hidden, normed)
     else:
         assert output.final_hidden is None
-    assert norm_rows == [5 if hidden_policy is FinalHiddenPolicy.POST_NORM else 2]
+    assert norm_rows == [5 if hidden_policy is FinalHiddenOutputPolicy.POST_NORM else 2]
     collector.collect_post_output(output)
     collected = collector.finish_output(state).spec_hidden
-    if hidden_policy is FinalHiddenPolicy.NONE:
+    if hidden_policy is FinalHiddenOutputPolicy.NONE:
         assert collected is None
     else:
         torch.testing.assert_close(collected, output.final_hidden)
@@ -493,7 +493,7 @@ def test_model_does_not_fallback_to_raw_hidden(monkeypatch, forward):
     def state():
         return SimpleNamespace(
             input_ids=torch.ones(2, dtype=torch.long),
-            mtp_collector=FinalHiddenMtpCollector(),
+            spec_collector=FinalHiddenSpecCollector(),
             need_dp_prefill_balance=False,
             call_overlap_hook=lambda: None,
         )

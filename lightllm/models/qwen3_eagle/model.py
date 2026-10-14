@@ -13,7 +13,7 @@ from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Q
 
 
 class Qwen3EagleModel(LlamaTpPartModel):
-    is_mtp_draft_model = True
+    is_spec_draft_model = True
 
     pre_and_post_weight_class = Qwen3EaglePreAndPostLayerWeight
     pre_layer_infer_class = Qwen3EaglePreLayerInfer
@@ -92,7 +92,7 @@ class Qwen3EagleModel(LlamaTpPartModel):
         使用浅副本避免覆盖调用方持有的 target ModelInput。
         """
 
-        draft_hiddens = model_input.mtp_draft_input_hiddens
+        draft_hiddens = model_input.spec_draft_input_hiddens
         assert draft_hiddens is not None
         assert draft_hiddens.ndim == 2
         assert draft_hiddens.shape[0] == model_input.input_ids.shape[0]
@@ -100,9 +100,9 @@ class Qwen3EagleModel(LlamaTpPartModel):
         hidden_size = int(self.config["hidden_size"])
         if draft_hiddens.shape[-1] != hidden_size:
             model_input = copy.copy(model_input)
-            model_input.mtp_draft_input_hiddens = self.pre_post_weight.fc_weight_.mm(draft_hiddens)
+            model_input.spec_draft_input_hiddens = self.pre_post_weight.fc_weight_.mm(draft_hiddens)
 
-        assert model_input.mtp_draft_input_hiddens.shape == (model_input.input_ids.shape[0], hidden_size)
+        assert model_input.spec_draft_input_hiddens.shape == (model_input.input_ids.shape[0], hidden_size)
         return super()._create_inferstate(model_input=model_input, microbatch_index=microbatch_index)
 
     # d2t stores per-token offsets: target_id = draft_id + d2t[draft_id].

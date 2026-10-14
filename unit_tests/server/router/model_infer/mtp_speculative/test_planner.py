@@ -378,7 +378,7 @@ def test_each_mode_proposer_inherits_its_expected_implementation_base():
     assert DpOverlapEagle3Proposer.__bases__ == (DpOverlapEagleWithAttProposer,)
 
 
-def test_each_mtp_mode_builds_its_own_proposer():
+def test_each_spec_mode_builds_its_own_proposer():
     backend = SimpleNamespace()
     proposer_types = {
         "vanilla_with_att": VanillaWithAttProposer,
@@ -395,7 +395,7 @@ def test_each_mtp_mode_builds_its_own_proposer():
         assert type(proposer) is proposer_type
 
 
-def test_each_supported_dp_overlap_mtp_mode_builds_its_own_proposer():
+def test_each_supported_dp_overlap_spec_mode_builds_its_own_proposer():
     backend = SimpleNamespace()
     proposer_types = {
         "vanilla_with_att": DpOverlapVanillaWithAttProposer,
@@ -433,9 +433,9 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
 
 def test_records_request_mtp_metrics_in_one_pass():
     class MetricReq:
-        def __init__(self, req_idx: int, mtp_step: int):
+        def __init__(self, req_idx: int, spec_step: int):
             self.req_idx = req_idx
-            self.mtp_step = mtp_step
+            self.spec_step = spec_step
             self.accepted = 0
             self.verified = 0
             self.verify_steps = 0
@@ -450,8 +450,8 @@ def test_records_request_mtp_metrics_in_one_pass():
             self.verify_steps += verify_step_num
 
     backend = SimpleNamespace(is_master_in_dp=True)
-    req0 = MetricReq(req_idx=10, mtp_step=3)
-    req1 = MetricReq(req_idx=11, mtp_step=3)
+    req0 = MetricReq(req_idx=10, spec_step=3)
+    req1 = MetricReq(req_idx=11, spec_step=3)
 
     mtp_utils.record_request_mtp_metrics(
         backend=backend,
@@ -463,7 +463,7 @@ def test_records_request_mtp_metrics_in_one_pass():
     assert (req0.accepted, req0.verified, req0.verify_steps) == (1, 2, 1)
     assert (req1.accepted, req1.verified, req1.verify_steps) == (0, 1, 1)
 
-    fixed_req = MetricReq(req_idx=12, mtp_step=3)
+    fixed_req = MetricReq(req_idx=12, spec_step=3)
     mtp_utils.record_request_mtp_metrics(
         backend=backend,
         decode_reqs=[fixed_req],
@@ -647,7 +647,7 @@ def test_dynamic_prepare_delegates_row_compaction(monkeypatch):
     selected_row_mask = torch.tensor([1, 0, 1, 0], dtype=torch.int32)
     monkeypatch.setattr(
         dynamic_mtp_utils,
-        "prepare_dynamic_mtp_model_input",
+        "prepare_dynamic_spec_model_input",
         lambda model_input, **kwargs: (model_input, selected_row_mask),
     )
     async_mask = object()

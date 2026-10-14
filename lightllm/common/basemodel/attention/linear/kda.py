@@ -44,7 +44,7 @@ class KDALinearAttBackend(BaseAttBackend):
         self.tp_hidden_size = self.tp_num_heads * self.head_dim
         self.conv_kernel_size = config["short_conv_kernel_size"]
         self.lower_bound = config.get("gate_lower_bound", -5.0)
-        self.mtp_step = model.args.mtp_step
+        self.spec_step = model.args.spec_step
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return KDAPrefillAttState(backend=self, infer_state=infer_state)
@@ -63,7 +63,7 @@ class KDAPrefillAttState(BasePrefillAttState):
 
     def init_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.mtp_step + 1)
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.spec_step + 1)
 
     def prefill_att(
         self,
@@ -130,13 +130,13 @@ class KDADecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        mtp_step = self.backend.mtp_step
-        if mtp_step == 0:
+        spec_step = self.backend.spec_step
+        if spec_step == 0:
             self._init_normal_decode_state()
         elif self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(mtp_step + 1)
+            self._init_dynamic_mtp_decode_state(spec_step + 1)
         else:
-            self._init_fixed_mtp_decode_state(mtp_step)
+            self._init_fixed_mtp_decode_state(spec_step)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -155,12 +155,12 @@ class KDADecodeAttState(BaseDecodeAttState):
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
-    def _init_fixed_mtp_decode_state(self, mtp_step: int):
-        mtp_size = mtp_step + 1
+    def _init_fixed_mtp_decode_state(self, spec_step: int):
+        mtp_size = spec_step + 1
         batch_size = self.infer_state.batch_size
         assert batch_size % mtp_size == 0, (
-            "KDA fixed-layout decode requires batch_size to be divisible by mtp_step + 1, "
-            f"got batch_size={batch_size}, mtp_step={mtp_step}."
+            "KDA fixed-layout decode requires batch_size to be divisible by spec_step + 1, "
+            f"got batch_size={batch_size}, spec_step={spec_step}."
         )
 
         att_batch_size = batch_size // mtp_size
@@ -206,16 +206,16 @@ class KDADecodeAttState(BaseDecodeAttState):
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
         conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)
         conv_update = causal_conv1d_update
-        if backend.mtp_step > 0:
+        if backend.spec_step > 0:
             conv_update = causal_conv1d_update_mtp
             conv_kwargs.update(
-                mtp_step=backend.mtp_step,
+                spec_step=backend.spec_step,
                 num_accepted_tokens=self.b_num_accepted_tokens,
                 query_start_loc=self.b1_mtp_cu_q_seq_len,
             )
         mixed_qkv = conv_update(mixed_qkv, conv_states, layer_weight.get_merged_kda_conv_weight(), **conv_kwargs)
         q, k, v = backend.split_qkv(mixed_qkv)
-        shape = (1, -1) if backend.mtp_step > 0 else (-1, 1)
+        shape = (1, -1) if backend.spec_step > 0 else (-1, 1)
         q = q.view(*shape, backend.tp_num_heads, backend.head_dim)
         k = k.view(*shape, backend.tp_num_heads, backend.head_dim)
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)

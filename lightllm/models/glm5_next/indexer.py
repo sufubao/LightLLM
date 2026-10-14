@@ -115,7 +115,7 @@ class Glm5NextNsaInfer:
         )
         metadata = deep_gemm.get_paged_mqa_logits_metadata(lengths, 64, deep_gemm.get_num_sms())
         # Each MTP position has its own pool length; HOLD rows have no valid pools.
-        # Fixed-width mtp_step=2 gives Q=[3 * num_requests, 1, heads, dim], so next_n stays 1.
+        # Fixed-width spec_step=2 gives Q=[3 * num_requests, 1, heads, dim], so next_n stays 1.
         # All three verify positions are preserved despite the SM90 kernel's native next_n limit of 2.
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8.unsqueeze(1), pages, weights, lengths, block_table, metadata, max_pools, clean_logits=False

@@ -18,7 +18,7 @@ from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import 
 class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
-    is_mtp_draft_model = True
+    is_spec_draft_model = True
 
     pre_and_post_weight_class = Qwen3DFlashPreAndPostLayerWeight
     transformer_weight_class = Qwen3DFlashTransformerLayerWeight
@@ -39,8 +39,8 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         super()._verify_params()
         assert not self.enable_tpsp_mix_mode, "Qwen3 DFlash draft model does not support TP-SP"
 
-        assert self.args.mtp_step <= self.config["block_size"]
-        self.config["block_size"] = self.args.mtp_step
+        assert self.args.spec_step <= self.config["block_size"]
+        self.config["block_size"] = self.args.spec_step
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
@@ -86,10 +86,10 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         ]
 
     def _decode(self, model_input: ModelInput) -> ModelOutput:
-        if model_input.mtp_draft_input_hiddens is None:
+        if model_input.spec_draft_input_hiddens is None:
             return super()._decode(model_input)
 
-        assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
+        assert model_input.spec_draft_input_hiddens.shape[0] == model_input.batch_size
 
         # Target verification already computed the hidden rows that need to be
         # committed to the draft cache. Project those rows and write their KV
@@ -97,7 +97,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         # needed for this half of the parallel-block proposal.
         position_ids = model_input.b_seq_len - 1
         infer_state = self.infer_state_class()
-        infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
+        infer_state.spec_draft_input_hiddens = model_input.spec_draft_input_hiddens
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
         infer_state.mem_manager = self.mem_manager
@@ -112,7 +112,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         return ModelOutput(logits=hidden.new_empty((model_input.batch_size, 1)))
 
     def _gen_special_model_input(self, token_num: int):
-        return {"mtp_draft_input_hiddens": None}
+        return {"spec_draft_input_hiddens": None}
 
     def _autotune_warmup(self):
         return

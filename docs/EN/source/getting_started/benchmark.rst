@@ -201,9 +201,9 @@ model pair such as ``/mtc/models/DeepSeek-R1`` and
     python test/benchmark/static_inference/test_model.py \
         --model_dir /path/to/main_model \
         --benchmark decode \
-        --mtp_mode eagle_with_att \
-        --mtp_step 2 \
-        --mtp_draft_model_dir /path/to/draft_model \
+        --spec_mode eagle_with_att \
+        --spec_step 2 \
+        --spec_draft_model_dir /path/to/draft_model \
         --mtp_accept_rate 0.8 \
         --batch_sizes 8,16 \
         --context_lens 1024,4096 \
@@ -212,7 +212,7 @@ model pair such as ``/mtc/models/DeepSeek-R1`` and
 Parameter Description:
 
 - ``--model_dir``: Main model path
-- ``--mtp_mode``: MTP mode, for example ``eagle_with_att``, ``vanilla_with_att``, ``eagle_no_att``, or ``vanilla_no_att``
-- ``--mtp_step``: Number of extra draft tokens predicted per decode step
-- ``--mtp_draft_model_dir``: Draft model path
+- ``--spec_mode``: MTP mode, for example ``eagle_with_att``, ``vanilla_with_att``, ``eagle_no_att``, or ``vanilla_no_att``
+- ``--spec_step``: Number of extra draft tokens predicted per decode step
+- ``--spec_draft_model_dir``: Draft model path
 - ``--mtp_accept_rate``: Simulated per-draft-token accept probability; sampling is excluded from decode timing

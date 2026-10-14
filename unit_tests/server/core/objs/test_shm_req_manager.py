@@ -18,7 +18,7 @@ def setup_env():
         EasyDict(
             running_max_req_size=10,
             disable_chunked_prefill=True,
-            mtp_step=0,
+            spec_step=0,
             llm_prefill_att_backend=["None"],
             llm_decode_att_backend=["None"],
             cpu_cache_token_page_size=256,

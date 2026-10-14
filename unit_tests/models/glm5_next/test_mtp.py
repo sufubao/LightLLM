@@ -8,11 +8,11 @@ from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-@pytest.mark.parametrize("mtp_step", [1, 2, 3, 5])
+@pytest.mark.parametrize("spec_step", [1, 2, 3, 5])
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-def test_kda_mtp_matches_single_token_decode_and_restores_accepted_state(mtp_step, state_dtype):
+def test_kda_mtp_matches_single_token_decode_and_restores_accepted_state(spec_step, state_dtype):
     torch.manual_seed(53)
-    width, heads, dim = mtp_step + 1, 2, 128
+    width, heads, dim = spec_step + 1, 2, 128
     # Nonconsecutive requests plus a zero-length graph-padding sequence.
     req_ids = torch.tensor([3, 1, 5], device="cuda", dtype=torch.int32)
     slots = req_ids[:, None] * width + torch.arange(width, device="cuda", dtype=torch.int32)
@@ -68,14 +68,14 @@ def test_kda_mtp_matches_single_token_decode_and_restores_accepted_state(mtp_ste
         accepted = torch.tensor([min(2, lengths[0]), 1, 1], device="cuda", dtype=torch.int32)
 
 
-@pytest.mark.parametrize("mtp_step", [1, 2, 3, 5])
+@pytest.mark.parametrize("spec_step", [1, 2, 3, 5])
 @pytest.mark.parametrize("prefix", [1, 2, 3, 4, 7, 15])
-def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
+def test_kpool_verify_and_draft_rewind_match_full_prefill(spec_step, prefix):
     torch.manual_seed(53)
-    width, capacity = mtp_step + 1, 128
+    width, capacity = spec_step + 1, 128
     raw = torch.randn(capacity, 256, device="cuda", dtype=torch.bfloat16)
     ape = torch.randn(4, 128, device="cuda", dtype=torch.bfloat16)
-    ring = torch.zeros(2, 4 + mtp_step, 256, device="cuda", dtype=torch.bfloat16)
+    ring = torch.zeros(2, 4 + spec_step, 256, device="cuda", dtype=torch.bfloat16)
     packed = torch.zeros(capacity, 132, device="cuda", dtype=torch.uint8)
     ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
 
@@ -181,7 +181,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
             expected_ssm[req * width + token] = state[0]
             row += 1
     backend = SimpleNamespace(
-        mtp_step=2,
+        spec_step=2,
         tp_num_heads=heads,
         head_dim=dim,
         tp_hidden_size=hidden,

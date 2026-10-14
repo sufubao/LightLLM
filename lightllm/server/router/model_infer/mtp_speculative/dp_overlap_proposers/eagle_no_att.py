@@ -93,7 +93,7 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
                 b_req_mtp_start_loc=req_mtp_start_loc,
                 accept_len=batch_accept_len,
                 input_ids=token_ids,
-                hidden=model_output.mtp_output.spec_hidden,
+                hidden=model_output.spec_output.spec_hidden,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 b_seq_len=model_input.b_seq_len,
@@ -120,7 +120,7 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
         for step in range(draft_step):
             for batch_index, draft_input in enumerate(draft_inputs):
                 draft_input.input_ids = draft_token_ids_by_batch[batch_index]
-                draft_input.mtp_draft_input_hiddens = draft_hiddens_by_batch[batch_index]
+                draft_input.spec_draft_input_hiddens = draft_hiddens_by_batch[batch_index]
 
             draft_outputs = draft_model._microbatch_overlap_decode_cuda(*draft_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
@@ -130,7 +130,7 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
                 else:
                     draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
                 draft_token_ids_by_batch[batch_index] = draft_token_ids
-                draft_hiddens_by_batch[batch_index] = draft_output.mtp_output.spec_hidden
+                draft_hiddens_by_batch[batch_index] = draft_output.spec_output.spec_hidden
 
                 batch_req_num = req_num_by_batch[batch_index]
                 proposal_row_start = proposal_row_offsets[batch_index]

@@ -44,7 +44,7 @@ def _make_decode_req(req_idx: int):
         req_idx=req_idx,
         cur_kv_len=3,
         hold_kv_len=4,
-        mtp_step=0,
+        spec_step=0,
         multimodal_params={"images": [], "audios": []},
         shared_kv_node=None,
         get_cur_total_len=lambda: 4,

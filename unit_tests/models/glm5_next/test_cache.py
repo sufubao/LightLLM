@@ -37,8 +37,8 @@ def test_nope_cache_config_uses_native_mla_width():
 
 @pytest.mark.parametrize("small_page", [False, True])
 @pytest.mark.parametrize("tp_world_size", [1, 4])
-@pytest.mark.parametrize("mtp_step", [0, 2])
-def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step):
+@pytest.mark.parametrize("spec_step", [0, 2])
+def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, spec_step):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
@@ -48,8 +48,8 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         linear_att_hash_page_size=4,
         linear_att_page_block_num=2,
         cpu_cache_token_page_size=8,
-        mtp_step=mtp_step,
-        mtp_mode="eagle_with_att" if mtp_step else None,
+        spec_step=spec_step,
+        spec_mode="eagle_with_att" if spec_step else None,
     )
     set_unique_server_name(args)
     get_env_start_args.cache_clear()
@@ -72,7 +72,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         ssm_state_dtype=torch.float32,
         full_attention_interval=4,
         all_layer_num=4,
-        draft_full_att_kv_layer_num=int(mtp_step > 0),
+        draft_full_att_kv_layer_num=int(spec_step > 0),
     )
     full_layers = config.get_full_att_kv_layer_num_with_draft_model()
     mem = Glm5NextMemManager(16, torch.bfloat16, 1, 584, full_layers, config)
@@ -88,9 +88,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     mem.operator.copy_kv_to_mem_manager(3, destinations, new_kv)
     assert torch.equal(att_kv[destinations], new_kv)
     assert torch.equal(index_bytes, expected_index_bytes)
-    assert req.get_indexer_tail_buffer(3).shape == (4, 4 + mtp_step, 256)
-    if mtp_step:
-        assert req.get_indexer_tail_buffer(4).shape == (4, 4 + mtp_step, 256)
+    assert req.get_indexer_tail_buffer(3).shape == (4, 4 + spec_step, 256)
+    if spec_step:
+        assert req.get_indexer_tail_buffer(4).shape == (4, 4 + spec_step, 256)
         assert mem.get_att_input_params(4).shape == att_kv.shape
     cache = req.create_small_page_cache_manager(2) if small_page else mem.big_page_buffers
     slot = cache.alloc_one_state_cache()
@@ -116,7 +116,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         req.restore_big_page_state(slot, dest_req)
     torch.cuda.synchronize()
     assert torch.equal(req.req_to_conv_state.buffer[:, 2, ..., :3], conv)
-    assert torch.equal(req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1)], ssm)
+    assert torch.equal(req.req_to_ssm_state.buffer[:, 2 * (spec_step + 1)], ssm)
     # Both page sizes are aligned to complete pools. Restoring a prefix must
     # discard stale tail values from a previously allocated request slot.
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
@@ -124,7 +124,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     req.req_to_indexer_tail.buffer[:, 2].normal_()
     req.init_hybrid_attention_state(dest_req)
     assert not req.req_to_conv_state.buffer[:, 2].any()
-    assert not req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
+    assert not req.req_to_ssm_state.buffer[:, 2 * (spec_step + 1) : 3 * (spec_step + 1)].any()
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     # KV moves carry MLA latents and pooled FP8 bytes; raw keys/gates only

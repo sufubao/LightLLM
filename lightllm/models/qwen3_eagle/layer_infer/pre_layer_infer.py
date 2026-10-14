@@ -14,7 +14,7 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
         self,
         infer_state: InferStateInfo,
     ) -> None:
-        draft_hiddens = infer_state.mtp_draft_input_hiddens
+        draft_hiddens = infer_state.spec_draft_input_hiddens
         assert draft_hiddens is not None
         assert draft_hiddens.shape[-1] == self.hidden_size_
         infer_state.eagle_draft_hidden_states = draft_hiddens

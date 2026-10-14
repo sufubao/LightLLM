@@ -37,9 +37,9 @@ P_COMMON_ARGS=(
   --linear_att_hash_page_size 2048
   --linear_att_page_block_num 8
   --quant_type fp8w8a8-pt-sgl
-  --mtp_mode eagle_with_att
-  --mtp_draft_model_dir "${MODEL_DIR}"
-  --mtp_step 3
+  --spec_mode eagle_with_att
+  --spec_draft_model_dir "${MODEL_DIR}"
+  --spec_step 3
   "${CHAT_TEMPLATE_ARGS[@]}"
   --pd_trans_mode nccl
   --pd_kv_page_size 4096
@@ -59,9 +59,9 @@ D_COMMON_ARGS=(
   --batch_max_tokens 256
   --linear_att_cache_size 500
   --quant_type fp8w8a8-pt-sgl
-  --mtp_mode eagle_with_att
-  --mtp_draft_model_dir "${MODEL_DIR}"
-  --mtp_step 3
+  --spec_mode eagle_with_att
+  --spec_draft_model_dir "${MODEL_DIR}"
+  --spec_step 3
   "${CHAT_TEMPLATE_ARGS[@]}"
   --pd_trans_mode nccl
   --pd_kv_page_size 4096

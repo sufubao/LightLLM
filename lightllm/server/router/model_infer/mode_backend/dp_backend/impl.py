@@ -30,7 +30,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         self.control_state_machine = DPControlState(backend=self)
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
-        spec_mode = get_env_start_args().mtp_mode
+        spec_mode = get_env_start_args().spec_mode
         if spec_mode is not None:
             if spec_mode in ("dspark", "dflash"):
                 raise NotImplementedError("DP backend does not support DFlash/DSpark parallel block drafting yet.")
@@ -59,14 +59,14 @@ class DPChunkedPrefillBackend(ModeBackend):
     def init_spec_engine(self):
         engine_kwargs = dict(
             backend=self,
-            spec_mode=self.args.mtp_mode,
-            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
+            spec_mode=self.args.spec_mode,
+            enable_dynmaic_mtp=self.args.spec_dynamic_verify,
         )
         # 非 overlap DP 与普通后端复用同一个 SpecEngine。
         self.spec_engine = SpecEngine(
             backend=self,
-            spec_mode=self.args.mtp_mode,
-            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
+            spec_mode=self.args.spec_mode,
+            enable_dynmaic_mtp=self.args.spec_dynamic_verify,
         )
 
         self.dp_overlap_spec_engine = DPOverlapSpecEngine(

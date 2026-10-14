@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelMtpOutput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelSpecOutput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_no_att import (
     DpOverlapVanillaNoAttProposer,
 )
@@ -25,7 +25,7 @@ class _DraftModel:
                     dtype=torch.float32,
                     device=model_input.input_ids.device,
                 ).view(-1, 1),
-                mtp_output=ModelMtpOutput(
+                spec_output=ModelSpecOutput(
                     spec_hidden=torch.ones(
                         (model_input.batch_size, 2),
                         device=model_input.input_ids.device,
@@ -86,14 +86,14 @@ def test_dp_vanilla_proposer_owns_overlap_decode():
         target_model_input0=model_input0,
         target_model_output0=ModelOutput(
             logits=torch.empty((6, 1), device=device),
-            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((6, 2), device=device)),
+            spec_output=ModelSpecOutput(spec_hidden=torch.ones((6, 2), device=device)),
         ),
         target_next_token_ids0=torch.tensor([10, 11, 0], dtype=torch.int64, device=device),
         accept_len0=torch.tensor([2], dtype=torch.int32, device=device),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1), device=device),
-            mtp_output=ModelMtpOutput(spec_hidden=torch.ones((6, 2), device=device)),
+            spec_output=ModelSpecOutput(spec_hidden=torch.ones((6, 2), device=device)),
         ),
         target_next_token_ids1=torch.tensor([20, 21, 22], dtype=torch.int64, device=device),
         accept_len1=torch.tensor([1], dtype=torch.int32, device=device),
@@ -123,11 +123,11 @@ def test_dp_vanilla_proposer_builds_padded_inputs_for_empty_verify_rows():
     model_input1 = SimpleNamespace(batch_size=0, b_req_idx=empty_i32, b_mtp_index=empty_i32)
     model_output0 = ModelOutput(
         logits=torch.empty((0, 1), device=device),
-        mtp_output=ModelMtpOutput(spec_hidden=torch.ones((0, 2), device=device)),
+        spec_output=ModelSpecOutput(spec_hidden=torch.ones((0, 2), device=device)),
     )
     model_output1 = ModelOutput(
         logits=torch.empty((0, 1), device=device),
-        mtp_output=ModelMtpOutput(spec_hidden=torch.ones((0, 2), device=device)),
+        spec_output=ModelSpecOutput(spec_hidden=torch.ones((0, 2), device=device)),
     )
 
     proposal = proposer.propose_next_overlap(

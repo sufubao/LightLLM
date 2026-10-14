@@ -92,7 +92,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def init_state(self):
         self.backend: MlaFa3AttBackend = self.backend
         self.causal = self.backend.uses_causal_attention()
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+        draft_step = self.backend.model.spec_manager.get_decode_draft_step(self.backend.model.is_spec_draft_model)
         if self.backend.uses_dynamic_spec_verify_layout():
             b_att_req_idx = self._init_dynamic_spec_verify_state(draft_step)
         elif draft_step > 0:

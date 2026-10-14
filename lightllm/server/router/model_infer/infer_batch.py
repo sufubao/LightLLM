@@ -585,9 +585,9 @@ class InferReq:
         # 兼容策略可以同时包含 GPU、CPU 和 Disk 多层。
         self.cache_tiers: Tuple[CacheTier, ...] = (CacheTier.GPU,)
 
-        # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
+        # spec_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
-        self.mtp_step: int = get_env_start_args().mtp_step
+        self.spec_step: int = get_env_start_args().spec_step
 
         if g_infer_context.is_hybrid_att_model:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_hybrid_att
@@ -951,12 +951,12 @@ class InferReq:
     def decode_need_token_num(self) -> Tuple[int, int]:
         """返回 (decode 需要的 token 数, 需要额外分配的 KV token 容量)。
 
-        第一个值沿用分页分配前的需求估算：普通 decode 为 1，MTP 为 2 * (mtp_step + 1)，
+        第一个值沿用分页分配前的需求估算：普通 decode 为 1，MTP 为 2 * (spec_step + 1)，
         其中 MTP 的两倍系数包含原有的预留窗口，并非本轮实际接受的输出 token 数。
         第二个值将 cur_kv_len 加上上述需求后按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
         用于检查和分配 KV 空间。已有页的剩余容量足够时，第二个值为 0，仍可继续 decode。
         """
-        decode_token_num = 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
+        decode_token_num = 1 if self.spec_step == 0 else 2 * (1 + self.spec_step)
         alloc_token_num = self._kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
         return decode_token_num, alloc_token_num
 

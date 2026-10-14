@@ -667,8 +667,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 得到系统真正能支持的最大长度，同时收到启动参数中模型支持长度的限制，也收到token容量的限制。
         # MTP overlap 模式下，达到最大输出长度时，可能仍有部分 accepted token 已提交但停止状态尚未生效；
         # 同时下一轮 overlap 还需要为 target verify 和 draft token 保留 KV 位置。因此按三倍
-        # (mtp_step + 1) 预留额外 token，避免请求逻辑长度贴近总容量时发生 KV 申请失败。
-        mtp_overlap_token_reserve = 3 * (self.args.mtp_step + 1)
+        # (spec_step + 1) 预留额外 token，避免请求逻辑长度贴近总容量时发生 KV 申请失败。
+        mtp_overlap_token_reserve = 3 * (self.args.spec_step + 1)
         # 调度器会把单请求的 KV 资源向上扩展到 page_size 的整数倍。额外预留一个页面，
         # 可以在输入阶段截断物理容量不足的请求，避免请求进入等待队列后始终无法被调度。
         return min(

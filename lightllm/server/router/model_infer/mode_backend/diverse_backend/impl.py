@@ -22,7 +22,7 @@ class DiversehBackend(ChunkedPrefillBackend):
         super().__init__()
 
         self.prefill = self.beam_prefill
-        spec_mode = get_env_start_args().mtp_mode
+        spec_mode = get_env_start_args().spec_mode
         if spec_mode is not None:
             assert spec_mode in [
                 "vanilla_no_att",

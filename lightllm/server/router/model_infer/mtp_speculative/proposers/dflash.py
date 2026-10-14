@@ -30,7 +30,7 @@ class DFlashProposer(BaseSpecProposer):
         assert target_next_token_ids.shape == target_model_input.b_req_idx.shape
         assert len(self.backend.draft_models) == 1
 
-        target_hidden = target_model_output.mtp_output.spec_hidden
+        target_hidden = target_model_output.spec_output.spec_hidden
         assert target_hidden is not None
         assert target_hidden.shape[0] == target_model_input.input_ids.shape[0]
         if target_hidden.numel() == 0:
@@ -40,7 +40,7 @@ class DFlashProposer(BaseSpecProposer):
         # hidden 初始化唯一 draft model 的 KV。使用浅副本避免在 target 输入上
         # 保留 draft 专用状态。
         draft_input = copy.copy(target_model_input)
-        draft_input.mtp_draft_input_hiddens = target_hidden
+        draft_input.spec_draft_input_hiddens = target_hidden
         self.backend.draft_models[0].forward(draft_input)
 
     @torch.no_grad()
@@ -71,8 +71,8 @@ class DFlashProposer(BaseSpecProposer):
         assert accept_len is not None
         assert accept_len.shape == (req_num,)
         assert target_next_token_ids.shape[0] == target_model_input.batch_size
-        assert target_model_output.mtp_output.spec_hidden is not None
-        assert target_model_output.mtp_output.spec_hidden.shape[0] == target_model_input.batch_size
+        assert target_model_output.spec_output.spec_hidden is not None
+        assert target_model_output.spec_output.spec_hidden.shape[0] == target_model_input.batch_size
         assert target_model_input.b_position_delta is not None
         assert len(self.backend.draft_models) == 1
 
@@ -82,7 +82,7 @@ class DFlashProposer(BaseSpecProposer):
         # 附加 target hidden 后执行一次 draft forward，将这些行提交到 DFlash
         # KV cache；浅副本保证 target_model_input 本身保持不变。
         verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_output.spec_hidden
+        verify_draft_input.spec_draft_input_hiddens = target_model_output.spec_output.spec_hidden
         draft_model.forward(verify_draft_input)
 
         # 每个请求始终展开完整 block，未被本轮 proposal 返回的 block 尾部仍会
@@ -100,7 +100,7 @@ class DFlashProposer(BaseSpecProposer):
         )
         draft_input = copy.copy(target_model_input)
         draft_input.input_ids = block_input_ids
-        draft_input.mtp_draft_input_hiddens = None
+        draft_input.spec_draft_input_hiddens = None
         draft_input.total_token_num = req_num * block_size
         draft_input.batch_size = draft_input.total_token_num
         draft_input.max_q_seq_len = 1

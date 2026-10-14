@@ -480,7 +480,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
-                (priority when mtp_step > 0: fa3 > flashinfer > triton;
+                (priority when spec_step > 0: fa3 > flashinfer > triton;
                 otherwise: flashinfer > fa3 > triton)
                 for hybrid linear-attention models, the second value selects the linear-attention backend
                 (currently triton only); when omitted, it defaults to auto""",
@@ -790,6 +790,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",
     )
     parser.add_argument(
+        "--spec_mode",
         "--mtp_mode",
         choices=[
             "vanilla_with_att",
@@ -808,14 +809,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(
+        "--spec_draft_model_dir",
         "--mtp_draft_model_dir",
         type=str,
         nargs="+",
         default=None,
-        help="""Path to the speculative draft model. The legacy option name is
-        retained for command-line compatibility.""",
+        help="""Path to the speculative draft model.""",
     )
     parser.add_argument(
+        "--spec_step",
         "--mtp_step",
         type=int,
         default=0,
@@ -823,6 +825,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         For DSpark and DFlash this value is derived from the draft checkpoint block_size.""",
     )
     parser.add_argument(
+        "--spec_dynamic_verify",
         "--mtp_dynamic_verify",
         action="store_true",
         help="""Enable dynamic speculative scheduling.""",

@@ -16,7 +16,7 @@ class Qwen3DFlashPreLayerInfer(LlamaPreLayerInfer):
         layer_weight: Qwen3DFlashPreAndPostLayerWeight,
     ):
         target_hidden_states = layer_weight.fc_weight_.mm(
-            infer_state.mtp_draft_input_hiddens,
+            infer_state.spec_draft_input_hiddens,
             use_custom_tensor_mananger=False,
         )
         return layer_weight.hidden_norm_weight_(

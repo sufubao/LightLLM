@@ -321,7 +321,7 @@ def test_mtp_pre_layer_applies_main_norm_before_hidden_fusion(config, monkeypatc
         hnorm_weight_=norms[2],
         eh_proj_weight_=SimpleNamespace(mm=lambda x: x @ projection),
     )
-    state = SimpleNamespace(mtp_draft_input_hiddens=hidden.clone())
+    state = SimpleNamespace(spec_draft_input_hiddens=hidden.clone())
     monkeypatch.setattr(LlamaMultimodalPreLayerInfer, method, lambda self, ids, state, weight: embeddings.clone())
     actual = getattr(Glm5NextMTPPreLayerInfer(config), method)(None, state, weight)
 

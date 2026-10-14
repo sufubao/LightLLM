@@ -211,9 +211,9 @@ class NsaInfer:
         lengths = att_state.lengths
 
         if infer_state.is_prefill:
-            mtp_step = 0
+            spec_step = 0
         else:
-            mtp_step = get_env_start_args().mtp_step
+            spec_step = get_env_start_args().spec_step
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
             I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
@@ -222,7 +222,7 @@ class NsaInfer:
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
             out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
             max_kv_seq_len=infer_state.max_kv_seq_len,
-            mtp_step=mtp_step,
+            spec_step=spec_step,
         )
 
         import deep_gemm

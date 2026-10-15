@@ -82,6 +82,10 @@ def _validate_ssm_state_mode(args: StartArgs):
     ), "Non-native SSM state modes currently require a GDN or KDA model"
     if args.ssm_state_mode == "compact":
         assert args.mtp_step > 0, "ssm_state_mode=compact requires MTP (mtp_step > 0)"
+        assert args.mtp_step <= 15, (
+            "ssm_state_mode=compact requires mtp_step <= 15: "
+            "linear attention MTP state acceptance supports verify width <= 16"
+        )
     else:
         assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
         capacity = config["cache_len"]

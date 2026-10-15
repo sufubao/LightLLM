@@ -31,6 +31,7 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
+
 gather_token = _operator_backend.resolve("common.basemodel.gather_token_id.gather_token")
 gather_token_prefill_decode_mixed = _operator_backend.resolve(
     "common.basemodel.gather_token_id.gather_token_prefill_decode_mixed"

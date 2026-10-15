@@ -7,6 +7,7 @@ _operator_backend = get_operator_backend()
 
 qk_rmsnorm_forward = _operator_backend.resolve("common.basemodel.norm.qk_norm.qk_rmsnorm_forward")
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+
 rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight

@@ -12,6 +12,7 @@ _operator_backend = get_operator_backend()
 rmsnorm_forward = _operator_backend.resolve("common.basemodel.norm.rmsnorm.rmsnorm_forward")
 rotary_emb_fwd = _operator_backend.resolve("models.deepseek2.rotary_emb.rotary_emb_fwd")
 from lightllm.common.basemodel.attention.base_att import AttControl
+
 act_quant = _operator_backend.resolve("models.deepseek3_2.act_quant.act_quant")
 destindex_copy_indexer_ks = _operator_backend.resolve(
     "models.deepseek3_2.destindex_copy_indexer_ks.destindex_copy_indexer_ks"

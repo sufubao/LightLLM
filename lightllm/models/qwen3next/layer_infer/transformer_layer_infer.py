@@ -19,6 +19,7 @@ _operator_backend = get_operator_backend()
 
 sigmoid_mul_ = _operator_backend.resolve("models.qwen3next.shared_expert_gate.sigmoid_mul_")
 from lightllm.distributed import all_reduce
+
 rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 from lightllm.utils.envs_utils import get_env_start_args
 from functools import partial

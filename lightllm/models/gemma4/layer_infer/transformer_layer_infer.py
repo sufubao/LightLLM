@@ -11,11 +11,13 @@ _operator_backend = get_operator_backend()
 
 rmsnorm_forward = _operator_backend.resolve("common.basemodel.norm.rmsnorm.rmsnorm_forward")
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
+
 context_attention_fwd_gemma4_mm = _operator_backend.resolve(
     "models.gemma4.context_attention_fwd_gemma4_mm.context_attention_fwd_gemma4_mm"
 )
 silu_and_mul_fwd = _operator_backend.resolve("common.basemodel.fused_moe.moe_silu_and_mul.silu_and_mul_fwd")
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+
 rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 
 

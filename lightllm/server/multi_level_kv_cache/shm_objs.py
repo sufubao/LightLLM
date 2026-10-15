@@ -2,7 +2,7 @@ import ctypes
 import numpy as np
 from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.shm_utils import ServiceSharedMemory, get_service_shm_name
+from lightllm.utils.shm_utils import ServiceSharedMemory, get_service_shm_name, shm_size_matches
 
 logger = init_logger(__name__)
 

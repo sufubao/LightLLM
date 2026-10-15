@@ -64,7 +64,6 @@ def mp_tuning(func, args: Dict[str, Any]):
 
 
 def set_seed():
-    import torch
     import random
     import numpy as np
 

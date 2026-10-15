@@ -144,7 +144,6 @@ if _device_runtime.supports_tensor_cache and torch.__version__ >= "2.1.0" and (n
             ans.storage_weak_ptr = buf_node.storage_weak_ptr
             return ans
 
-
 else:
     logger.info("USE_GPU_TENSOR_CACHE is OFF")
 

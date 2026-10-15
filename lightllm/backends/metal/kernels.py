@@ -224,7 +224,7 @@ def _fused_recurrent_gated_delta_rule_mps(
     if value_heads % query_heads:
         raise ValueError("The number of value heads must be divisible by the number of query heads.")
     if scale is None:
-        scale = key_dim**-0.5
+        scale = key_dim ** -0.5
 
     q_flat = q.reshape(-1, query_heads, key_dim)
     k_flat = k.reshape(-1, query_heads, key_dim)
@@ -457,7 +457,6 @@ def gen_cumsum_pad0_tensor(b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor
 
 
 def gen_prefill_params(input_token_num: int, b_ready_cache_len: torch.Tensor, b_seq_len: torch.Tensor):
-    batch_size = b_ready_cache_len.shape[0]
     assert b_ready_cache_len.shape[0] == b_seq_len.shape[0]
     b_q_seq_len = b_seq_len - b_ready_cache_len
     b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_seq_len)
@@ -654,7 +653,6 @@ def mrope_triton_fused(
     partial_rotary_factor: float = 1.0,
     run_config: Optional[dict] = None,
 ):
-    head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = int(q.shape[2] * partial_rotary_factor)
     num_tokens = q.shape[0]
     section_t, section_h, section_w = mrope_section.detach().to(device="cpu").tolist()

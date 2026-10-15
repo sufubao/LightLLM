@@ -21,6 +21,7 @@ _operator_backend = get_operator_backend()
 rms_norm = _operator_backend.resolve("models.vit.rms_norm_vit.rms_norm")
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
 apply_rotary_pos_emb_triton = _operator_backend.resolve("models.qwen2_vl.rotary_pos_emb.apply_rotary_pos_emb_triton")
 
 

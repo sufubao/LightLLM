@@ -10,8 +10,10 @@ _operator_backend = get_operator_backend()
 
 sample_kv = _operator_backend.resolve("models.deepseek2.sample_kv.sample_kv")
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+
 rotary_emb_fwd = _operator_backend.resolve("models.deepseek2.rotary_emb.rotary_emb_fwd")
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
+
 use_sm100_mega_moe = _operator_backend.resolve("common.basemodel.fused_moe.grouped_fused_moe_ep.use_sm100_mega_moe")
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale

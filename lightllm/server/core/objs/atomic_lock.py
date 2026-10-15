@@ -10,7 +10,7 @@ from lightllm.utils.shm_utils import create_or_link_shm
 logger = init_logger(__name__)
 
 
-class AtomicShmLock:
+class _AtomicShmLock:
     def __init__(self, lock_name: str):
         self.lock_name = lock_name
         self.dest_size = 4
@@ -54,3 +54,5 @@ class AtomicShmLock:
 
 if sys.platform == "darwin":
     from .file_lock import FileShmLock as AtomicShmLock
+else:
+    AtomicShmLock = _AtomicShmLock

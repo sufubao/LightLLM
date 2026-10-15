@@ -11,6 +11,7 @@ mrope_triton_fused = _operator_backend.resolve("models.qwen2_vl.mrope.mrope_trit
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
+
 apply_deepstack_features = _operator_backend.resolve(
     "models.qwen3_vl.deepstack_multimodal_emb.apply_deepstack_features"
 )

@@ -9,6 +9,7 @@ _operator_backend = get_operator_backend()
 
 rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
+
 token_att_fwd = _operator_backend.resolve("models.llama.token_attention_nopad_att1.token_att_fwd")
 from lightllm.models.qwen3_moe.layer_infer.transformer_layer_infer import Qwen3MOETransformerLayerInfer
 from lightllm.models.neo_chat_moe.layer_weights.transformer_layer_weight import NeoChatMOETransformerLayerWeight

@@ -63,15 +63,9 @@ def _validate_ssm_state_mode(args: StartArgs):
         logger.info(f"SSM mode: replay, config: {config}")
     else:
         logger.info(f"SSM mode: {args.ssm_state_mode}")
-    if args.ssm_state_mode == "native":
-        return
-    assert args.linear_att_ssm_data_type in (
-        "float32",
-        "bfloat16",
-    ), "Non-native SSM state modes require FP32 or BF16 state"
     from lightllm.utils.config_utils import get_model_type
 
-    assert get_model_type(args.model_dir) in (
+    is_gdn_or_kda = get_model_type(args.model_dir) in (
         "glm5_next",
         "glm5_next_text",
         "qwen3_next",
@@ -79,13 +73,20 @@ def _validate_ssm_state_mode(args: StartArgs):
         "qwen3_5_moe",
         "qwen3_5_text",
         "qwen3_5_moe_text",
-    ), "Non-native SSM state modes currently require a GDN or KDA model"
+    )
+    if is_gdn_or_kda:
+        assert args.mtp_step <= 15, (
+            "GDN/KDA requires mtp_step <= 15: " "linear attention MTP state acceptance supports verify width <= 16"
+        )
+    if args.ssm_state_mode == "native":
+        return
+    assert args.linear_att_ssm_data_type in (
+        "float32",
+        "bfloat16",
+    ), "Non-native SSM state modes require FP32 or BF16 state"
+    assert is_gdn_or_kda, "Non-native SSM state modes currently require a GDN or KDA model"
     if args.ssm_state_mode == "compact":
         assert args.mtp_step > 0, "ssm_state_mode=compact requires MTP (mtp_step > 0)"
-        assert args.mtp_step <= 15, (
-            "ssm_state_mode=compact requires mtp_step <= 15: "
-            "linear attention MTP state acceptance supports verify width <= 16"
-        )
     else:
         assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
         capacity = config["cache_len"]

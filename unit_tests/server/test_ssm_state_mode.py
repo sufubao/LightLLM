@@ -10,6 +10,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
     "mode,dtype,step,model,capacity,error",
     [
         ("native", "bfloat16", 0, "llama", 16, None),
+        ("native", "bfloat16", 32, "llama", 16, None),
         ("compact", "bfloat16", 2, "qwen3_5", 16, None),
         ("compact", "float32", 2, "qwen3_5", 16, None),
         ("compact", "float32", 15, "qwen3_5", 16, None),
@@ -26,7 +27,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
         ("replay", "bfloat16", 2, "qwen3_5", 16, None),
         ("replay", "bfloat16", 2, "qwen3_5", 4, None),
         ("replay", "bfloat16", 0, "qwen3_5", 16, None),
-        ("replay", "float32", 16, "qwen3_5", 16, "capacity"),
+        ("replay", "float32", 4, "qwen3_5", 4, "capacity"),
         ("compact", "float32", 2, "llama", 16, "require a GDN"),
         ("replay", "float32", 2, "llama", 16, "require a GDN"),
     ],
@@ -49,6 +50,34 @@ def test_ssm_mode_validation(monkeypatch, mode, dtype, step, model, capacity, er
         with pytest.raises(AssertionError, match=error):
             _validate_ssm_state_mode(args)
     else:
+        _validate_ssm_state_mode(args)
+
+
+@pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
+@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+@pytest.mark.parametrize("step", [15, 16])
+def test_gdn_kda_mtp_width_limit(monkeypatch, model, mode, step):
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model)
+    args = StartArgs(ssm_state_mode=mode, mtp_step=step)
+    if step <= 15:
+        _validate_ssm_state_mode(args)
+    else:
+        with pytest.raises(AssertionError, match="GDN/KDA requires mtp_step <= 15"):
+            _validate_ssm_state_mode(args)
+
+
+@pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute", "parallel"])
+@pytest.mark.parametrize("cache_len", [32, 64])
+def test_replay_large_cache_does_not_bypass_mtp_width_limit(monkeypatch, model, compute_mode, cache_len):
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model)
+    args = StartArgs(
+        ssm_state_mode="replay",
+        ssm_replay_config={"cache_len": cache_len, "compute_mode": compute_mode},
+        linear_att_ssm_data_type="bfloat16",
+        mtp_step=16,
+    )
+    with pytest.raises(AssertionError, match="GDN/KDA requires mtp_step <= 15"):
         _validate_ssm_state_mode(args)
 
 

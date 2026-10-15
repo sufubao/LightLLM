@@ -1,5 +1,9 @@
 import torch
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 def ptr_to_tensor(device_ptr: int, nbytes: int) -> torch.Tensor:
     import cupy as cp
@@ -7,7 +11,7 @@ def ptr_to_tensor(device_ptr: int, nbytes: int) -> torch.Tensor:
     mem = cp.cuda.UnownedMemory(device_ptr, nbytes, owner=None)
     memptr = cp.cuda.MemoryPointer(mem, offset=0)
     arr = cp.ndarray((nbytes,), dtype=cp.uint8, memptr=memptr)
-    return torch.as_tensor(arr, dtype=torch.uint8, device="cuda")
+    return _device_runtime.as_tensor(arr, dtype=torch.uint8, device=_device_runtime.device)
 
 
 def tensor_to_no_ref_tensor(origin_tensor: torch.Tensor) -> torch.Tensor:

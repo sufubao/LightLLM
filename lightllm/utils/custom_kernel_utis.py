@@ -3,6 +3,10 @@ import triton
 import triton.language as tl
 from typing import List
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 def custom_cat(tensors):
     """
@@ -12,16 +16,16 @@ def custom_cat(tensors):
     if not isinstance(tensors, (list, tuple)):
         raise ValueError("Input must be a list of tensors")
 
-    assert tensors[0].is_cuda and len(tensors[0].shape) == 1
+    assert _device_runtime.is_device_tensor(tensors[0]) and len(tensors[0].shape) == 1
     sizes = [t.shape[0] for t in tensors]
     dest_size = sum(sizes)
-    out_tensor = torch.empty((dest_size,), dtype=tensors[0].dtype, device="cpu", pin_memory=True)
+    out_tensor = _device_runtime.empty((dest_size,), dtype=tensors[0].dtype, device="cpu", pin_memory=True)
 
     start_loc = 0
     for t, size in zip(tensors, sizes):
         out_tensor[start_loc : (start_loc + size)].copy_(t, non_blocking=True)
         start_loc += size
-    torch.cuda.current_stream().synchronize()
+    _device_runtime.current_stream().synchronize()
 
     return out_tensor
 
@@ -34,7 +38,7 @@ def torch_cat_3(tensors: List[torch.Tensor], dim=0):
     assert ref.ndim == 3
     dim = dim % ref.ndim
 
-    out = torch.empty(
+    out = _device_runtime.empty(
         [sum(t.size(dim) for t in tensors) if i == dim else ref.size(i) for i in range(ref.ndim)],
         dtype=ref.dtype,
         device=ref.device,
@@ -123,14 +127,14 @@ def pad2dim_tensor_to_new_batch(input: torch.Tensor, new_batch_size: int):
     hidden = input.shape[1]
 
     if origin_batch_size == 0:
-        return torch.zeros(
+        return _device_runtime.zeros(
             (new_batch_size, hidden),
             dtype=input.dtype,
             device=input.device,
             requires_grad=False,
         )
 
-    out = torch.empty((new_batch_size, hidden), dtype=input.dtype, device=input.device, requires_grad=False)
+    out = _device_runtime.empty((new_batch_size, hidden), dtype=input.dtype, device=input.device, requires_grad=False)
     out[0:origin_batch_size, :] = input
     out[origin_batch_size:, :] = input[0:1, :]
     return out

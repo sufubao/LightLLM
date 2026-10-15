@@ -4,11 +4,15 @@ import collections
 from dataclasses import dataclass
 from typing import List, Dict, Union, Sequence
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 @dataclass
 class AsyncPinnedCpuTensor:
     tensor: torch.Tensor
-    ready_event: torch.cuda.Event
+    ready_event: _device_runtime.event_type
 
     def wait(self) -> None:
         self.ready_event.synchronize()
@@ -32,7 +36,7 @@ class PinMemTensorManager:
         with self.lock:
             if key not in self.key_to_tensor_list:
                 self.key_to_tensor_list[key] = [
-                    torch.empty(size=(max(2048, size),), dtype=dtype, device="cpu", pin_memory=True)
+                    _device_runtime.empty(size=(max(2048, size),), dtype=dtype, device="cpu", pin_memory=True)
                     for _ in range(self.buffer_size)
                 ]
                 self.key_to_alloc_index[key] = 0
@@ -40,7 +44,7 @@ class PinMemTensorManager:
             alloc_index = self.key_to_alloc_index[key]
             buff_tensor = self.key_to_tensor_list[key][alloc_index]
             if buff_tensor.numel() < size:
-                self.key_to_tensor_list[key][alloc_index] = torch.empty(
+                self.key_to_tensor_list[key][alloc_index] = _device_runtime.empty(
                     size=(size,), dtype=dtype, device="cpu", pin_memory=True
                 )
                 buff_tensor = self.key_to_tensor_list[key][alloc_index]
@@ -65,7 +69,7 @@ class PinMemTensorManager:
         gpu_tensor: torch.Tensor,
     ) -> AsyncPinnedCpuTensor:
         cpu_tensor = self.async_copy_from_gpu_tensor(key=key, gpu_tensor=gpu_tensor)
-        ready_event = torch.cuda.Event()
+        ready_event = _device_runtime.new_event()
         ready_event.record()
         return AsyncPinnedCpuTensor(tensor=cpu_tensor, ready_event=ready_event)
 
@@ -89,7 +93,7 @@ class PinMemTensorManager:
             buf = self.key_to_const_cpu_tensor.get(key)
             if buf is None or buf.numel() < size:
                 n = max(size, 2048)
-                buf = torch.full((n,), fill_value, dtype=dtype, device="cpu", pin_memory=True)
+                buf = _device_runtime.full((n,), fill_value, dtype=dtype, device="cpu", pin_memory=True)
                 self.key_to_const_cpu_tensor[key] = buf
             else:
                 assert buf.dtype == dtype, f"const cpu tensor key={key!r} dtype mismatch: {buf.dtype} vs {dtype}"
@@ -115,7 +119,7 @@ class PinMemTensorManager:
             buf = self.key_to_const_gpu_tensor.get(key)
             if buf is None or buf.numel() < size:
                 n = max(size, 2048)
-                buf = torch.full((n,), fill_value, dtype=dtype, device="cuda")
+                buf = _device_runtime.full((n,), fill_value, dtype=dtype, device=_device_runtime.device)
                 self.key_to_const_gpu_tensor[key] = buf
             else:
                 assert buf.dtype == dtype, f"const gpu tensor key={key!r} dtype mismatch: {buf.dtype} vs {dtype}"

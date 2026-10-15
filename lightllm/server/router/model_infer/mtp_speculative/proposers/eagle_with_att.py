@@ -73,10 +73,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         verify_draft_input = copy.copy(target_model_input)
         verify_draft_input.input_ids = target_next_token_ids
         verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        if (
-            draft_model.use_replayssm_draft_tail()
-            and verify_draft_input.batch_size > draft_model.args.running_max_req_size
-        ):
+        if draft_model.use_replayssm_draft_tail():
             verify_draft_input.b_logits_rows = accepted_tail_rows
         extend_output = draft_model.forward(verify_draft_input)
 

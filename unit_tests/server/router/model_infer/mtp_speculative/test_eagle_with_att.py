@@ -216,7 +216,8 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
     assert target_input.mtp_draft_input_hiddens is None
 
 
-def test_selected_tail_logits_keep_complete_draft_kv_input():
+@pytest.mark.parametrize("capacity", [2, 10, 264])
+def test_selected_tail_logits_keep_complete_draft_kv_input(capacity):
     hidden = torch.arange(20).view(10, 2).float()
     target_input = SimpleNamespace(
         is_prefill=False,
@@ -237,7 +238,7 @@ def test_selected_tail_logits_keep_complete_draft_kv_input():
     draft_model = SimpleNamespace(
         forward=forward,
         use_replayssm_draft_tail=lambda: True,
-        args=SimpleNamespace(running_max_req_size=2),
+        args=SimpleNamespace(running_max_req_size=capacity),
     )
     proposer = EagleWithAttProposer(
         backend=SimpleNamespace(draft_models=[draft_model], _gen_argmax_token_ids=lambda out: out.logits[:, 0].long()),

@@ -13,6 +13,9 @@ class CudaRuntime:
     device_type = "cuda"
     device = "cuda"
     distributed_backend = "nccl"
+    supports_graphs = True
+    supports_tensor_cache = True
+    supports_pinned_memory = True
 
     def device_at(self, index):
         return f"cuda:{index}"
@@ -25,6 +28,9 @@ class CudaRuntime:
 
     def generator(self, *args, **kwargs):
         return torch.Generator(*args, **kwargs)
+
+    def exponential_(self, tensor, generator=None):
+        return tensor.exponential_(generator=generator)
 
     def is_available(self, *args, **kwargs):
         return torch.cuda.is_available(*args, **kwargs)

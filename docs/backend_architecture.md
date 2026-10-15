@@ -10,6 +10,8 @@ flowchart TD
     Core --> Runtime[DeviceRuntime]
     Core --> Ops[OperatorBackend]
     Runtime --> CUDA[CudaRuntime: original PyTorch CUDA APIs]
+    Runtime --> Metal[MetalRuntime: PyTorch MPS]
+    Ops --> MetalOps[Metal SDPA, GDN and Torch operators]
     Ops --> Selectors[Original attention and weight selection policies]
     Ops --> Kernels[Original CUDA and Triton kernels]
 ```
@@ -45,7 +47,7 @@ execution uses `ModelInput.to_device()`.
 The CUDA provider handles:
 
 - Named kernel resolution, using the explicit table in
-  `lightllm/backends/cuda/bindings.py`.
+  `lightllm/backends/cuda/bindings.py` (Metal has its own explicit table).
 - Full/MLA/NSA/NEO, linear and vision attention selection.
 - `PlatformAwareOp` routing and its existing Triton/native fallback policy.
 - The Triton allocator setup required by linear attention.
@@ -95,15 +97,33 @@ inference modules retain bound runtime and kernel references. A worker must
 select its providers before importing those modules. Unknown names and attempts
 to switch an already-bound provider raise an explicit error.
 
-This stage provides CUDA implementations only. Apple Metal support is a
-separate stage; no Metal/MPS/MLX implementation or dependency is added here.
+Apple Metal is selected by `--hardware_platform metal` in the standard server.
+The launcher selects both providers before importing the inference code and
+propagates `LIGHTLLM_BACKEND=metal` to spawned workers. Direct model integrations
+can set that environment variable before their first LightLLM import.
+
+`lightllm/backends/metal` implements runtime operations, dense SDPA over the
+existing paged KV buffers, and GDN convolution/recurrent operators over
+`ReqManagerForMamba` state. Model orchestration, weights, scheduler, sampling,
+radix cache and HTTP serving are the original LightLLM implementations.
+No separate model runner, KV allocator or HTTP server is introduced.
+
+Metal uses the default command queue with synchronous event barriers. CUDA graph
+capture, tensor storage recycling, pinned host transfers, device collectives
+and CUDA IPC are unavailable; unsupported server configurations fail at startup.
+Gloo supplies single-rank process-group metadata; existing singleton collective
+shortcuts avoid device communication. The portable Torch allocator owns Metal
+intermediate tensors. CUDA retains its original allocator and native handles.
+
+See [Apple Metal deployment](apple_metal.md) for supported flags and commands.
 
 ## Review scope
 
 The refactor uses argument-preserving call substitutions and moves selection
 policies without changing their algorithms. Source review compares normalized
-ASTs against upstream, including call order and arguments. CUDA/Triton kernel
-sources, dependencies and deployment commands remain unchanged.
+ASTs against upstream, including call order and arguments. CUDA/Triton numerical kernel sources and CUDA deployment commands remain unchanged.
+CUDA-only package dependencies have Darwin environment markers; Metal serving
+dependencies are provided by the optional `metal` extra.
 
 Static equivalence does not establish GPU execution or performance equivalence.
 This change has not been exercised on CUDA hardware in the current Mac workspace.

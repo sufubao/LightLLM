@@ -97,7 +97,8 @@ def init_vision_distributed_env(kvargs):
     )
     # warmup nccl communicator
     _a = torch.zeros([1]).to(_device_runtime.device_at(device_id))
-    dist.all_reduce(_a)
+    if _device_runtime.distributed_backend == "nccl":
+        dist.all_reduce(_a)
     del _a
 
 
@@ -128,7 +129,8 @@ def init_audio_distributed_env(kvargs):
         device_id=torch.device(_device_runtime.device_at(device_id)),
     )
     _a = torch.zeros([1]).to(_device_runtime.device_at(device_id))
-    dist.all_reduce(_a)
+    if _device_runtime.distributed_backend == "nccl":
+        dist.all_reduce(_a)
     del _a
 
 
@@ -149,7 +151,8 @@ def init_distributed_env(kvargs):
     dp_size_in_node = max(1, get_dp_size() // nnodes)
     set_dp_rank_in_node(get_global_dp_rank() % dp_size_in_node)
 
-    _init_nccl_env()
+    if _device_runtime.distributed_backend == "nccl":
+        _init_nccl_env()
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
     _device_runtime.set_device(device_id)
@@ -161,7 +164,8 @@ def init_distributed_env(kvargs):
     )
     # warmup nccl communicator
     _a = torch.zeros([1]).to(_device_runtime.device_at(device_id))
-    dist.all_reduce(_a)
+    if _device_runtime.distributed_backend == "nccl":
+        dist.all_reduce(_a)
     del _a
 
 

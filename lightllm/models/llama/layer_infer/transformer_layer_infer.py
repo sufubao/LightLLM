@@ -1,5 +1,4 @@
 import torch
-import triton
 import torch.distributed as dist
 from functools import partial
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight

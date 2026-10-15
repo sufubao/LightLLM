@@ -13,8 +13,17 @@ logger = init_logger("lightllm.common.basemodel.layer_weights.meta_weights.platf
 
 class CudaOperatorBackend(OperatorBackend):
     name = "cuda"
+    supports_autotune = True
 
     def resolve(self, name):
+        if name == "sampling.gather":
+            import torch
+
+            return torch.gather
+        if name == "tensor_copy_3dim":
+            from .tensor_copy import tensor_copy_3dim
+
+            return tensor_copy_3dim
         try:
             module_name, attribute = KERNEL_BINDINGS[name]
         except KeyError:

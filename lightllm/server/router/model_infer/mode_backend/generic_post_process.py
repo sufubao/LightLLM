@@ -6,6 +6,8 @@ from lightllm.backends import get_device_runtime, get_operator_backend
 _device_runtime = get_device_runtime()
 _operator_backend = get_operator_backend()
 
+gather = _operator_backend.resolve("sampling.gather")
+
 apply_penalty = _operator_backend.resolve("common.basemodel.post_process.apply_penalty.apply_penalty")
 apply_penalty_gpu_cache = _operator_backend.resolve(
     "common.basemodel.post_process.apply_penalty_gpu_cache.apply_penalty_gpu_cache"
@@ -115,13 +117,13 @@ def sample(
 
     if is_all_greedy:
         batch_next_token_ids = torch.argmax(logits, -1)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+        batch_next_token_probs = gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     elif skip_top_k and skip_top_p:
         # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
         batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+        batch_next_token_probs = gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     else:
@@ -159,8 +161,8 @@ def _top_p_top_k_sample(
             sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
         else:
             sampled_index = _random_sample(probs_sort, reqs, exist_req_use_random_seed).view(-1, 1)
-        next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
-        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
+        next_token_ids = gather(probs_idx, dim=1, index=sampled_index)
+        next_token_logprobs = torch.log(gather(probs_sort, dim=1, index=sampled_index))
         return next_token_ids.view(-1), next_token_logprobs.view(-1)
 
     elif sampling_backend == "flashinfer":
@@ -175,7 +177,7 @@ def _top_p_top_k_sample(
         )
         int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
         int64_batch_next_token_ids[:] = batch_next_token_ids
-        batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
+        batch_next_token_probs = gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
     else:
         assert False, "Unsupported sampling backend for top_p_top_k_sample"
@@ -187,7 +189,7 @@ def _random_sample(probs: torch.Tensor, reqs: List[InferReq], exist_req_use_rand
     if exist_req_use_random_seed:
         for i, req in enumerate(reqs):
             if req.generator is not None:
-                q[i].exponential_(generator=req.generator)
+                _device_runtime.exponential_(q[i], generator=req.generator)
     return probs.div(q).argmax(dim=-1).view(-1)
 
 

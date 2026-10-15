@@ -330,6 +330,7 @@ class Platform(Enum):
     MUSA = "musa"  # musa
     ROCM = "rocm"  # rocm
     CPU = "cpu"  # cpu
+    METAL = "metal"
 
 
 # 目前仅支持cuda 和 musa
@@ -343,7 +344,7 @@ def get_platform(platform_name: Optional[str] = None) -> Platform:
     Returns:
         Platform: platform enum value
     """
-    assert platform_name in ["cuda", "musa"], f"Only support cuda and musa now, but got {platform_name}"
+    assert platform_name in ["cuda", "musa", "metal"], f"Only support cuda, musa and metal now, but got {platform_name}"
     platform_name = platform_name.lower()
     platform_map = {
         "cuda": Platform.CUDA,
@@ -352,6 +353,7 @@ def get_platform(platform_name: Optional[str] = None) -> Platform:
         "musa": Platform.MUSA,
         "rocm": Platform.ROCM,
         "cpu": Platform.CPU,
+        "metal": Platform.METAL,
     }
 
     platform = platform_map.get(platform_name)

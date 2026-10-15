@@ -5,6 +5,8 @@ from typing import Callable
 
 
 class OperatorBackend(ABC):
+    supports_autotune = False
+
     @abstractmethod
     def resolve(self, name: str) -> Callable:
         """Bind a named operation once; return the actual implementation."""

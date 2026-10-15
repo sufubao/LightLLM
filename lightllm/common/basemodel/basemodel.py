@@ -1057,6 +1057,8 @@ class TpPartBaseModel:
     @torch.no_grad()
     @post_empty_cache
     def _autotune_warmup(self):
+        if not _operator_backend.supports_autotune:
+            return
         Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
         torch.distributed.barrier()
 

@@ -46,7 +46,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def _init_triton(self):
         get_operator_backend().initialize_linear_attention()
-        logger.info("Triton allocator set for Qwen3Next model")
+        logger.info(f"Linear attention allocator initialized by {get_operator_backend().name} backend")
 
     def autotune_layers(self):
         return self.config["full_attention_interval"]

@@ -96,8 +96,10 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         gpu_conv_state = self.req_to_conv_state.buffer[:, req_idx, ..., :conv_cache_width]
         gpu_ssm_state = self.req_to_ssm_state.buffer[:, req_idx * (self.mtp_step + 1), ...]
         dst_conv_state, dst_ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
-        dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
-        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
+        # Metal host checkpoints must be complete before the request state
+        # advances. Only runtimes with pinned transfers use the async path.
+        dst_conv_state.copy_(gpu_conv_state, non_blocking=_device_runtime.supports_pinned_memory)
+        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=_device_runtime.supports_pinned_memory)
 
     def get_mamba_cache(self, layer_idx_in_all: int):
         assert (

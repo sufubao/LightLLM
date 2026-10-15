@@ -125,3 +125,7 @@ We have published a number of papers around components or features of LightLLM, 
   year={2025}
 }
 ```
+
+### Apple Metal (Qwen3.5-0.8B)
+
+See [Apple Metal deployment](docs/apple_metal.md) for the standard LightLLM server on Apple Silicon.

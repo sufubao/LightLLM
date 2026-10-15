@@ -18,12 +18,7 @@ from lightllm.utils.envs_utils import (
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_hybrid_att_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.common.kv_cache_mem_manager import (
-    MemoryManager,
-    PPLINT8KVMemoryManager,
-    PPLINT4KVMemoryManager,
-    Deepseek2MemoryManager,
-)
+
 
 from typing import List, Tuple, Optional
 from tqdm import tqdm
@@ -64,6 +59,13 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
 
 @lru_cache(maxsize=None)
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
+    from lightllm.common.kv_cache_mem_manager import (
+        MemoryManager,
+        PPLINT8KVMemoryManager,
+        PPLINT4KVMemoryManager,
+        Deepseek2MemoryManager,
+    )
+
     args = get_env_start_args()
     assert args.enable_cpu_cache
 

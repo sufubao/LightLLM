@@ -218,7 +218,7 @@ class ModeBackend:
         self.node_broadcast_tensor = _device_runtime.tensor(
             [0], dtype=torch.int32, device=_device_runtime.device, requires_grad=False
         )
-        self.node_nccl_group = create_new_group_for_current_node("nccl")
+        self.node_nccl_group = create_new_group_for_current_node(_device_runtime.distributed_backend)
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:

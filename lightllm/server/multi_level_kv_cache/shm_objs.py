@@ -15,7 +15,7 @@ class IntList(object):
         shm = _create_shm(name=shm_name, byte_size=byte_size)
         self.shm = shm
 
-        if self.shm.size != byte_size:
+        if not shm_size_matches(self.shm.size, byte_size):
             logger.info(f"size not same, unlink lock shm {self.shm.name} and create again")
             self.shm.close()
             self.shm.unlink()
@@ -61,7 +61,7 @@ class ShmLinkedList(object):
         shm = _create_shm(name=shm_name, byte_size=byte_size)
         self.shm = shm
 
-        if self.shm.size != byte_size:
+        if not shm_size_matches(self.shm.size, byte_size):
             logger.info(f"size not same, unlink lock shm {self.shm.name} and create again")
             self.shm.close()
             self.shm.unlink()

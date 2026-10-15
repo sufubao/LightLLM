@@ -9,6 +9,7 @@ from lightllm.backends import get_device_runtime
 _device_runtime = get_device_runtime()
 
 
+@QUANTMETHODS.register("none", platform="metal")
 @QUANTMETHODS.register("none", platform="musa")
 @QUANTMETHODS.register("none", platform="cuda")
 class NoQuantization(QuantizationMethod):

@@ -18,7 +18,7 @@ logger = init_logger(__name__)
 
 _disable_gpu_tensor_cache = os.getenv("DISABLE_GPU_TENSOR_CACHE", None) is not None
 
-if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
+if _device_runtime.supports_tensor_cache and torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
     logger.info("USE_GPU_TENSOR_CACHE is On")
 
     # 用于进行引用计数调整和判断

@@ -8,17 +8,19 @@ from lightllm.backends import get_device_runtime
 _device_runtime = get_device_runtime()
 
 
-try:
-    from torch_memory_saver import (
-        torch_memory_saver,
-        configure_subprocess as tms_configure_subprocess,
-    )
+HAS_TORCH_MEMORY_SAVER = False
+if _device_runtime.device_type == "cuda":
+    try:
+        from torch_memory_saver import (
+            torch_memory_saver,
+            configure_subprocess as tms_configure_subprocess,
+        )
 
-    HAS_TORCH_MEMORY_SAVER = True
+        HAS_TORCH_MEMORY_SAVER = True
 
-except ImportError:
-    HAS_TORCH_MEMORY_SAVER = False
-    pass
+    except ImportError:
+        HAS_TORCH_MEMORY_SAVER = False
+        pass
 
 logger = init_logger(__name__)
 

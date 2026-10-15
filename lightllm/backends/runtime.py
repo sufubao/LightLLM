@@ -12,6 +12,9 @@ class DeviceRuntime(Protocol):
     name: str
     device_type: str
     device: str
+    supports_graphs: bool
+    supports_tensor_cache: bool
+    supports_pinned_memory: bool
     distributed_backend: str
     event_type: Any
     stream_type: Any
@@ -28,6 +31,9 @@ class DeviceRuntime(Protocol):
         ...
 
     def generator(self, *args, **kwargs):
+        ...
+
+    def exponential_(self, tensor, generator=None):
         ...
 
     def is_available(self, *args, **kwargs):

@@ -60,7 +60,7 @@ class PinMemTensorManager:
     def async_copy_from_gpu_tensor(self, key: str, gpu_tensor: torch.Tensor) -> torch.Tensor:
         size = gpu_tensor.numel()
         pin_mem = self.alloc_pin_tensor(key, size=size, dtype=gpu_tensor.dtype)
-        pin_mem.copy_(gpu_tensor.view(-1), non_blocking=True)
+        pin_mem.copy_(gpu_tensor.view(-1), non_blocking=_device_runtime.supports_pinned_memory)
         return pin_mem.view(gpu_tensor.shape)
 
     def async_copy_from_gpu_tensor_with_event(

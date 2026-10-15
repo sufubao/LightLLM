@@ -17,7 +17,6 @@ from lightllm.utils.dist_utils import (
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.shm_utils import get_service_shm_name
 from lightllm.utils.config_utils import get_num_key_value_heads
-from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
@@ -157,6 +156,8 @@ class MemoryManager:
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for tp_index in range(dp_world_size):
             if tp_index % repeat_count == 0:
+                from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
+
                 page_io(
                     mem_indexes=mem_indexes_gpu,
                     page_tensor=cur_page,
@@ -190,6 +191,8 @@ class MemoryManager:
             _device_runtime.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True), non_blocking=True
         )
         for tp_index in range(dp_world_size):
+            from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
+
             page_io(
                 mem_indexes=mem_indexes_gpu,
                 page_tensor=cur_page,

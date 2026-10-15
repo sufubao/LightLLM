@@ -1,4 +1,5 @@
 import argparse
+import json
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -955,24 +956,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="SSM state storage: native snapshots, compact MTP records, or deferred GDN/KDA replay (FP32/BF16).",
     )
     parser.add_argument(
-        "--replayssm_cache_len",
-        type=int,
-        default=16,
-        choices=[4, 8, 16, 32, 64],
-        help="History capacity for ssm_state_mode=replay only; must cover the MTP verify width.",
-    )
-    parser.add_argument(
-        "--replayssm_projection_mode",
-        choices=["inline", "precompute", "parallel"],
-        default="inline",
-        help="ReplaySSM projection; parallel uses a Tensor Core GDN MTP solver (BF16, 128x128 heads).",
-    )
-    parser.add_argument(
-        "--replayssm_fold_method",
-        choices=["raw", "derived"],
-        default="raw",
-        help="ReplaySSM fold: raw replays accepted inputs; derived reuses parallel-solver updates and changes "
-        "checkpoint rounding. Derived requires parallel projection; state precision and capacity are unchanged.",
+        "--ssm_replay_config",
+        type=json.loads,
+        default={},
+        help='Replay-only JSON object: {"cache_len":16,"compute_mode":"inline","fold_method":"raw"}. '
+        "cache_len: 4/8/16/32/64, at least the verify width; compute_mode: inline/precompute/parallel; "
+        "fold_method: raw/derived. Parallel requires BF16 GDN MTP with 128x128 heads; derived requires parallel.",
     )
     parser.add_argument(
         "--linear_att_ssm_data_type",

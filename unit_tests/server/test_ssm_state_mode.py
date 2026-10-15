@@ -1,3 +1,4 @@
+import json
 import pytest
 
 from lightllm.server.api_cli import make_argument_parser
@@ -36,8 +37,8 @@ def test_ssm_mode_validation(monkeypatch, mode, dtype, step, model, capacity, er
             dtype,
             "--mtp_step",
             str(step),
-            "--replayssm_cache_len",
-            str(capacity),
+            "--ssm_replay_config",
+            json.dumps({"cache_len": capacity} if mode == "replay" else {}),
         ]
     )
     if error:
@@ -50,7 +51,7 @@ def test_ssm_mode_validation(monkeypatch, mode, dtype, step, model, capacity, er
 def test_ssm_mode_defaults_and_removed_flag():
     parser = make_argument_parser()
     assert parser.parse_args([]).ssm_state_mode == StartArgs().ssm_state_mode == "native"
-    assert parser.parse_args([]).replayssm_projection_mode == StartArgs().replayssm_projection_mode == "inline"
+    assert parser.parse_args([]).ssm_replay_config == StartArgs().ssm_replay_config == {}
     with pytest.raises(SystemExit):
         parser.parse_args(["--enable_replayssm"])
     with pytest.raises(SystemExit):
@@ -60,8 +61,8 @@ def test_ssm_mode_defaults_and_removed_flag():
 @pytest.mark.parametrize(
     "overrides,error",
     [
-        ({"replayssm_cache_len": 2}, "power of two and at least 4"),
-        ({"replayssm_cache_len": 6}, "power of two and at least 4"),
+        ({"ssm_replay_config": {"cache_len": 2}}, "power of two and at least 4"),
+        ({"ssm_replay_config": {"cache_len": 6}}, "power of two and at least 4"),
         ({"mtp_step": -1}, "mtp_step >= 0"),
         ({"linear_att_ssm_data_type": "float16"}, "FP32 or BF16"),
     ],
@@ -78,7 +79,7 @@ def test_programmatic_replay_config_rejected_before_model_loading(monkeypatch, o
 def test_replay_projection_mode_requires_replay(monkeypatch):
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "qwen3_5")
     parser = make_argument_parser()
-    args = parser.parse_args(["--ssm_state_mode", "replay", "--replayssm_projection_mode", "precompute"])
+    args = parser.parse_args(["--ssm_state_mode", "replay", "--ssm_replay_config", '{"compute_mode":"precompute"}'])
     _validate_ssm_state_mode(args)
     args.ssm_state_mode = "compact"
     with pytest.raises(AssertionError, match="requires ssm_state_mode=replay"):
@@ -92,8 +93,7 @@ def test_parallel_replay_configuration(monkeypatch, fold):
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "qwen3_5")
     args = StartArgs(
         ssm_state_mode="replay",
-        replayssm_projection_mode="parallel",
-        replayssm_fold_method=fold,
+        ssm_replay_config={"compute_mode": "parallel", "fold_method": fold},
         mtp_step=4,
         mtp_mode="eagle_with_att",
         linear_att_ssm_data_type="bfloat16",
@@ -107,6 +107,63 @@ def test_parallel_replay_configuration(monkeypatch, fold):
 def test_derived_replay_requires_parallel_configuration():
     from lightllm.server.core.objs.start_args_type import StartArgs
 
-    args = StartArgs(ssm_state_mode="replay", replayssm_fold_method="derived")
+    args = StartArgs(ssm_state_mode="replay", ssm_replay_config={"fold_method": "derived"})
     with pytest.raises(AssertionError, match="requires parallel"):
         _validate_ssm_state_mode(args)
+
+
+@pytest.mark.parametrize(
+    "config,error",
+    [
+        ([], "JSON object"),
+        (None, "JSON object"),
+        ({"projection_mode": "inline"}, "Unknown"),
+        ({"cache_len": True}, "capacity"),
+        ({"cache_len": 16.0}, "capacity"),
+        ({"cache_len": "16"}, "capacity"),
+        ({"cache_len": 128}, "capacity"),
+        ({"compute_mode": "auto"}, "compute_mode"),
+        ({"fold_method": "auto"}, "fold_method"),
+    ],
+)
+def test_invalid_replay_config(config, error):
+    args = StartArgs(ssm_state_mode="replay", ssm_replay_config=config)
+    with pytest.raises(AssertionError, match=error):
+        _validate_ssm_state_mode(args)
+
+
+@pytest.mark.parametrize("mode", ["native", "compact"])
+def test_replay_config_rejects_other_modes(mode):
+    args = StartArgs(ssm_state_mode=mode, ssm_replay_config={"cache_len": 16})
+    with pytest.raises(AssertionError, match="requires ssm_state_mode=replay"):
+        _validate_ssm_state_mode(args)
+
+
+def test_partial_replay_config_defaults_and_serialization(monkeypatch):
+    from dataclasses import asdict
+
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "qwen3_5")
+    args = make_argument_parser().parse_args(
+        ["--ssm_state_mode", "replay", "--ssm_replay_config", '{"compute_mode":"precompute"}']
+    )
+    _validate_ssm_state_mode(args)
+    assert args.ssm_replay_config == {"cache_len": 16, "compute_mode": "precompute", "fold_method": "raw"}
+    original = StartArgs(ssm_state_mode="replay", ssm_replay_config=args.ssm_replay_config)
+    restored = StartArgs(**json.loads(json.dumps(asdict(original))))
+    _validate_ssm_state_mode(restored)
+    assert restored.ssm_replay_config == args.ssm_replay_config
+    assert StartArgs().ssm_replay_config == {}
+
+
+@pytest.mark.parametrize(
+    "option,value",
+    [
+        ("--replayssm_cache_len", "16"),
+        ("--replayssm_projection_mode", "inline"),
+        ("--replayssm_fold_method", "raw"),
+        ("--ssm_replay_config", "{invalid}"),
+    ],
+)
+def test_removed_flags_and_malformed_json(option, value):
+    with pytest.raises(SystemExit):
+        make_argument_parser().parse_args([option, value])

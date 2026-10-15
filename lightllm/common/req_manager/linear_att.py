@@ -62,13 +62,13 @@ class ReqManagerForMamba(HybridAttentionReqManager):
 
             self.ssm_update_cache = ReplaySSMCache(
                 self.req_to_ssm_state.buffer,
-                args.replayssm_cache_len,
+                args.ssm_replay_config.get("cache_len", 16),
                 self.mtp_step + 1,
                 linear_config.conv_state_dtype,
                 num_key_heads=linear_config.num_linear_k_heads,
                 kda=self.kda,
-                projection_mode=args.replayssm_projection_mode,
-                fold_method=args.replayssm_fold_method,
+                projection_mode=args.ssm_replay_config.get("compute_mode", "inline"),
+                fold_method=args.ssm_replay_config.get("fold_method", "raw"),
             )
         elif args.ssm_state_mode == "compact":
             from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache

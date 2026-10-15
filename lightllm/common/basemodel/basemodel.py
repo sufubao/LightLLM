@@ -281,7 +281,7 @@ class TpPartBaseModel:
         return (
             self.is_mtp_draft_model
             and self.args.ssm_state_mode == "replay"
-            and self.args.replayssm_projection_mode == "parallel"
+            and self.args.ssm_replay_config.get("compute_mode", "inline") == "parallel"
             and self.args.mtp_mode == "eagle_with_att"
             and self.args.mtp_step > 0
             and not self.args.mtp_dynamic_verify

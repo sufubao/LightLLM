@@ -254,7 +254,7 @@ def test_draft_tail_scope(disabled):
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = StartArgs(
-        ssm_state_mode="replay", replayssm_projection_mode="parallel", mtp_mode="eagle_with_att", mtp_step=4
+        ssm_state_mode="replay", ssm_replay_config={"compute_mode": "parallel"}, mtp_mode="eagle_with_att", mtp_step=4
     )
     model.is_mtp_draft_model = disabled != "target"
     model.tp_world_size_ = 2 if disabled == "tp" else 1
@@ -262,5 +262,5 @@ def test_draft_tail_scope(disabled):
     model.args.mtp_dynamic_verify = disabled == "dynamic"
     model.args.enable_decode_microbatch_overlap = disabled == "overlap"
     if disabled == "projection":
-        model.args.replayssm_projection_mode = "inline"
+        model.args.ssm_replay_config = {"compute_mode": "inline"}
     assert model.use_replayssm_draft_tail() == (disabled is None)

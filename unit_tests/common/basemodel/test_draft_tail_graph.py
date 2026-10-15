@@ -15,7 +15,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 def draft_model(monkeypatch):
     args = StartArgs(
         ssm_state_mode="replay",
-        replayssm_projection_mode="parallel",
+        ssm_replay_config={"compute_mode": "parallel"},
         mtp_mode="eagle_with_att",
         mtp_step=4,
         running_max_req_size=264,

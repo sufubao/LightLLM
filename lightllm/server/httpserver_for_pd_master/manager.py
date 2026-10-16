@@ -356,7 +356,7 @@ class HttpServerManagerForPDMaster:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.debug(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
+                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
                 # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
                 # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧

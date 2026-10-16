@@ -51,6 +51,26 @@ def sample(
         g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32), non_blocking=True
     )
 
+    if (
+        is_all_greedy
+        and not has_invalid_token_ids
+        and not has_output_constraints
+        and sampling_params_manager.penalty_counter_mode == "gpu_counter"
+    ):
+        greedy = getattr(_operator_backend, "greedy_sample", None)
+        if greedy is not None:
+            result = greedy(
+                logits,
+                b_req_idx,
+                b_temperatures,
+                b_length_penalty_param,
+                b_mask_eos_reqs,
+                eos_ids,
+                sampling_params_manager,
+            )
+            if result is not None:
+                return result
+
     # 这里需要区分历史token的频率惩罚类的系数的生效模式，目前支持两种在线统计方式:
     # 一种是基于 cpu 的，每个 req 对象利用其上绑定的dict对象out_token_id_count，每生成一个token就进行相应
     # 的计数更新，当进行使用的时候, 对一个需要处理的req list, 会生成对应的3个 triton kernel 需要使用的惩罚系数

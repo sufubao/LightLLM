@@ -16,6 +16,7 @@ class CudaRuntime:
     supports_graphs = True
     supports_tensor_cache = True
     supports_pinned_memory = True
+    layer_submission_hook = None
 
     def device_at(self, index):
         return f"cuda:{index}"

@@ -22,6 +22,7 @@ from lightllm.backends import get_device_runtime, get_operator_backend
 
 _device_runtime = get_device_runtime()
 _operator_backend = get_operator_backend()
+_layer_submission_hook = getattr(_device_runtime, "layer_submission_hook", None)
 
 select_kv_index_from_req = _operator_backend.resolve("common.basemodel.copy_kv_index_to_req.select_kv_index_from_req")
 select_kv_index_from_req_prefill = _operator_backend.resolve(
@@ -715,6 +716,8 @@ class TpPartBaseModel:
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
+            if _layer_submission_hook is not None:
+                _layer_submission_hook(i, infer_state.batch_size)
             hidden_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)

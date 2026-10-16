@@ -8,6 +8,7 @@ KERNEL_BINDINGS = {
     "common.basemodel.embedding.embedding": "embedding",
     "common.basemodel.fused_moe.moe_silu_and_mul.silu_and_mul_fwd": "silu_and_mul_fwd",
     "common.basemodel.gather_token_id.gather_token": "gather_token",
+    "common.basemodel.gather_token_id.gather_token_prefill_decode_mixed": "gather_token_prefill_decode_mixed",
     "common.basemodel.gather_token_id.scatter_token": "scatter_token",
     "common.basemodel.gen_decode_params.gen_decode_params": "gen_decode_params",
     "common.basemodel.gen_prefill_params.gen_prefill_params": "gen_prefill_params",

@@ -1,46 +1,65 @@
 """PyTorch MPS runtime on Apple's single default Metal command queue.
 
-Stream scopes are serialized: events perform a real device synchronization.
+Stream scopes share the default queue; events mark GPU progress without
+forcing a device-wide CPU wait at every record.
 CUDA graph capture and IPC are deliberately unavailable on this runtime.
 """
 from contextlib import nullcontext
 from types import SimpleNamespace
 import time
+import threading
 import torch
+
+from .transfers import HostTransferQueue
 
 
 class MetalEvent:
     def __init__(self, **kwargs):
         self._recorded = False
+        self._enable_timing = kwargs.get("enable_timing", False)
         self._time = None
+        self._event = torch.mps.Event(enable_timing=False)
 
     def record(self, stream=None):
-        torch.mps.synchronize()
+        if self._enable_timing:
+            # Synchronized host timestamps preserve the previous timing
+            # contract on macOS 14, where native elapsed_time can block.
+            # Ordinary dependency events never take this device-wide barrier.
+            torch.mps.synchronize()
+            self._time = time.perf_counter()
+        self._event.record()
         self._recorded = True
-        self._time = time.perf_counter()
 
     def synchronize(self):
-        torch.mps.synchronize()
+        self._event.synchronize()
 
     def query(self):
-        return self._recorded
+        return self._event.query()
 
     def wait(self, stream=None):
-        self.synchronize()
+        self._event.wait()
 
     def elapsed_time(self, end_event):
+        if self._time is None or end_event._time is None:
+            raise RuntimeError("Record both events with enable_timing=True before measuring elapsed time")
+        end_event.synchronize()
         return (end_event._time - self._time) * 1000
 
 
 class MetalStream:
+    def __init__(self, synchronize=None):
+        self._synchronize = synchronize or torch.mps.synchronize
+
     def synchronize(self):
-        torch.mps.synchronize()
+        self._synchronize()
 
     def wait_event(self, event):
-        event.synchronize()
+        event.wait(self)
 
     def wait_stream(self, stream):
-        stream.synchronize()
+        # Every MetalStream is the same underlying MPS queue. Submission
+        # order already supplies this dependency; a CPU barrier is unnecessary.
+        pass
 
     def record_event(self, event=None):
         event = event or MetalEvent()
@@ -63,7 +82,23 @@ class MetalRuntime:
     graph_context_type = object
 
     def __init__(self):
-        self._stream = MetalStream()
+        self._host_transfers = HostTransferQueue()
+        self._stream = MetalStream(self.synchronize)
+        self._submission_state = threading.local()
+        self.layer_submission_hook = self._submit_decode_layer
+
+    def _submit_decode_layer(self, layer_index, batch_size):
+        # Submit early enough to overlap Python encoding with GPU execution.
+        # Larger batches amortize command-buffer/event overhead over four
+        # layers. Public non-timing Event.record commits without a CPU wait.
+        interval = 1 if batch_size <= 4 else 4
+        if (layer_index + 1) % interval:
+            return
+        event = getattr(self._submission_state, "event", None)
+        if event is None:
+            event = torch.mps.Event(enable_timing=False)
+            self._submission_state.event = event
+        event.record()
 
     def device_at(self, index):
         if int(index) != 0:
@@ -73,6 +108,10 @@ class MetalRuntime:
     def move(self, value, device=None, non_blocking=False, memory_format=torch.preserve_format):
         if device is not None and device not in (0, "mps", "mps:0", torch.device("mps")):
             raise ValueError(f"Unsupported Metal device: {device}")
+        if non_blocking:
+            result = self._host_transfers.move(value, memory_format)
+            if result is not None:
+                return result
         return value.to(device=self.device, non_blocking=False, memory_format=memory_format)
 
     def is_device_tensor(self, value):
@@ -124,7 +163,7 @@ class MetalRuntime:
         return SimpleNamespace(name=self.get_device_name(), total_memory=torch.mps.recommended_max_memory())
 
     def synchronize(self, device=None):
-        torch.mps.synchronize()
+        self._host_transfers.synchronize()
 
     def current_stream(self, device=None):
         return self._stream
@@ -152,6 +191,7 @@ class MetalRuntime:
         return False
 
     def empty_cache(self):
+        self.synchronize()
         torch.mps.empty_cache()
 
     def memory_allocated(self, device=None):

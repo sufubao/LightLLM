@@ -28,6 +28,9 @@ The runtime owns:
 - Device selection, generators, synchronization and memory queries.
 - Streams, events, graph handles, capture contexts and graph pools.
 - The default accelerator communication backend (`nccl` for CUDA).
+- An optional `layer_submission_hook(index, batch_size)` after decode layers.
+  CUDA leaves this hook `None`. Metal uses non-timing MPS events to enqueue work
+  while the CPU encodes subsequent layers; the hook adds no completion wait.
 
 CUDA methods forward the original positional and keyword arguments unchanged.
 Tensor moves continue to call `.cuda()` internally. CPU allocations keep their

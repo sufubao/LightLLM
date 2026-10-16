@@ -9,6 +9,10 @@ if get_device_runtime().device_type == "cuda":
     from .deepgemm import *
     from .awq import *
 from .no_quant import *
+
+if get_device_runtime().name == "metal":
+    from lightllm.backends.metal.quantization import MetalNoQuantization
+
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import is_sm100_gpu
 

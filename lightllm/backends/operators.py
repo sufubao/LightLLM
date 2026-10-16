@@ -7,6 +7,10 @@ from typing import Callable
 class OperatorBackend(ABC):
     supports_autotune = False
 
+    def greedy_sample(self, logits, requests, temperatures, length_penalty, mask_eos, eos_ids, manager):
+        """Optional fused greedy path; None retains the existing sampler unchanged."""
+        return None
+
     @abstractmethod
     def resolve(self, name: str) -> Callable:
         """Bind a named operation once; return the actual implementation."""

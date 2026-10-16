@@ -21,7 +21,6 @@ def configure_server(args):
         "enable_torch_memory_saver",
         "enable_rl",
         "enable_mps",
-        "enable_prefill_decode_mixed",
         "enable_prompt_logprobs",
         "use_reward_model",
         "diverse_mode",

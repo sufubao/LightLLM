@@ -20,6 +20,8 @@ class DeviceRuntime(Protocol):
     stream_type: Any
     graph_type: Any
     graph_context_type: Any
+    # Optional enqueue hint between decode layers; never a completion barrier.
+    layer_submission_hook: Any
 
     def device_at(self, index) -> str:
         ...

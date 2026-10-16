@@ -125,6 +125,12 @@ def _causal_conv1d_mps(
     activation: Optional[str],
     pad_slot_id: int,
 ) -> torch.Tensor:
+    from .convolution import prefill
+
+    if prefill(
+        x, weight, bias, query_start_loc, cache_indices, has_initial_state, conv_states, activation, pad_slot_id
+    ):
+        return x
     if x.ndim == 2:
         if query_start_loc is None:
             starts = [0, x.shape[-1]]
@@ -242,6 +248,31 @@ def _fused_recurrent_gated_delta_rule_mps(
     else:
         output = out.reshape_as(v_flat)
 
+    if (
+        cu_seqlens is not None
+        and not inplace_final_state
+        and ssm_state_indices is None
+        and ssm_state_write_indices is None
+        and num_accepted_tokens is None
+        and A_log is None
+    ):
+        from .recurrent import prefill
+
+        result = prefill(
+            q_flat,
+            k_flat,
+            v_flat,
+            g_flat,
+            beta_flat,
+            initial_state,
+            cu_seqlens,
+            output,
+            use_qk_l2norm_in_kernel,
+            scale,
+        )
+        if result is not None:
+            return result[0].view_as(v), result[1]
+
     if cu_seqlens is None:
         sequence_ranges = [(index * steps, (index + 1) * steps) for index in range(batch)]
     else:
@@ -261,9 +292,6 @@ def _fused_recurrent_gated_delta_rule_mps(
         if num_accepted_tokens is not None
         else None
     )
-    head_map = torch.arange(value_heads, device=q.device) // (value_heads // query_heads)
-    log_decay = A_log.reshape(-1).float() if A_log is not None else None
-    dt_bias_fp32 = dt_bias.reshape(-1).float() if dt_bias is not None else None
     if inplace_final_state:
         if initial_state is None:
             raise NotImplementedError("In-place MPS recurrent gated delta rule requires an initial state tensor.")
@@ -274,6 +302,37 @@ def _fused_recurrent_gated_delta_rule_mps(
             dtype=initial_state.dtype if initial_state is not None else v.dtype,
             device=v.device,
         )
+
+    # Fuse ordinary recurrence over all tokens into one Metal dispatch. Keep
+    # the reference implementation for speculative/state-aliasing layouts.
+    if accepted is None and (not inplace_final_state or steps == 1):
+        from .recurrent import recurrent
+
+        if recurrent(
+            q_flat,
+            k_flat,
+            v_flat,
+            g_flat,
+            beta_flat,
+            initial_state,
+            final_state,
+            output,
+            sequence_ranges,
+            read_indices,
+            write_indices,
+            use_qk_l2norm_in_kernel,
+            scale,
+            A_log,
+            dt_bias,
+            a_flat,
+            b_flat,
+            inplace_final_state,
+        ):
+            return output.view_as(v), final_state
+
+    head_map = torch.arange(value_heads, device=q.device) // (value_heads // query_heads)
+    log_decay = A_log.reshape(-1).float() if A_log is not None else None
+    dt_bias_fp32 = dt_bias.reshape(-1).float() if dt_bias is not None else None
 
     # Ordinary decode has one token per request and 1-D recurrent-state
     # indices. Process the whole batch together to avoid dispatching the
@@ -438,6 +497,10 @@ def select_kv_index_from_req_prefill(
 
 
 def destindex_copy_kv(K, DestLoc, Out):
+    from .scatter import copy_kv
+
+    if copy_kv(K, DestLoc, Out):
+        return
     dest_indexes = DestLoc.to(device=Out.device, dtype=torch.long)
     Out.index_copy_(0, dest_indexes, K)
     return
@@ -500,6 +563,12 @@ def silu_and_mul_fwd(
     else:
         raise ValueError(f"Unsupported SiLU-and-multiply layout: {layout}")
 
+    if limit is None and input.device.type == "mps" and not ffn_use_tanh_approximate_gelu():
+        from .elementwise import silu_product
+
+        if silu_product(input, output, layout):
+            return
+
     gate_f = gate.float()
     if limit is not None and alpha is not None:
         gate_f = torch.clamp(gate_f, max=limit)
@@ -557,6 +626,11 @@ def fused_gdn_gating(
     threshold: float = 20.0,
     run_config: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    from .gating import gating
+
+    result = gating(A_log, a, b, dt_bias, beta=beta, threshold=threshold)
+    if result is not None:
+        return result
     a_fp32 = a.float() + dt_bias.float()
     g = -A_log.float().exp() * torch.nn.functional.softplus(a_fp32, beta=beta, threshold=threshold)
     # The Triton kernel rounds beta to b's dtype before storing it in the
@@ -595,6 +669,22 @@ def conv_pack_gdn_decode_inputs(
     assert (
         conv_state.shape[2] >= conv_size - 1
     ), f"conv_state width must be at least conv_size - 1, got {conv_state.shape[2]} and {conv_size}"
+    from .convolution import decode as conv_decode
+
+    packed = conv_decode(mixed_qkv, conv_state, conv_weight, conv_bias, conv_state_indices, activation, conv_size)
+    if packed is not None:
+        q = packed[:, :q_dim].view(batch, 1, num_k_heads, head_k_dim)
+        k = packed[:, q_dim : q_dim + k_dim].view(batch, 1, num_k_heads, head_k_dim)
+        v = packed[:, q_dim + k_dim :].view(batch, 1, num_v_heads, head_v_dim)
+        return (
+            q,
+            k,
+            v,
+            z_raw.reshape(batch, num_v_heads, head_v_dim),
+            a_raw.reshape(batch, gate_dim),
+            b_raw.reshape(batch, gate_dim),
+        )
+
     state_indices = conv_state_indices.to(device="cpu", dtype=torch.long).tolist()
     conv_values = mixed_qkv.float()
     conv_weight_fp32 = conv_weight.float()
@@ -653,6 +743,10 @@ def mrope_triton_fused(
     partial_rotary_factor: float = 1.0,
     run_config: Optional[dict] = None,
 ):
+    from .rotary import rotary
+
+    if rotary(q, k, cos, sin, mrope_section, is_interleaved, partial_rotary_factor):
+        return
     head_dim = int(q.shape[2] * partial_rotary_factor)
     num_tokens = q.shape[0]
     section_t, section_h, section_w = mrope_section.detach().to(device="cpu").tolist()
@@ -698,6 +792,10 @@ def sigmoid_mul_(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     x_arg = x.view(-1, x.shape[-1])
     gate_arg = gate.view(-1, gate.shape[-1])
     assert gate_arg.shape[0] == x_arg.shape[0] and gate_arg.shape[1] in (1, x_arg.shape[1])
+    from .elementwise import sigmoid_product
+
+    if sigmoid_product(x_arg, gate_arg):
+        return x
     rounded_gate = gate_arg.float().sigmoid().to(gate_arg.dtype)
     x_arg.mul_(rounded_gate)
     return x
@@ -723,6 +821,36 @@ def fused_recurrent_gated_delta_rule(
     b_raw=None,
     out=None,
 ):
+    if (
+        inplace_final_state
+        and initial_state is not None
+        and q.shape[1] == 1
+        and cu_seqlens is None
+        and ssm_state_indices is not None
+        and ssm_state_indices.ndim == 1
+        and ssm_state_write_indices is None
+        and num_accepted_tokens is None
+    ):
+        from .recurrent import decode
+
+        result = decode(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state,
+            ssm_state_indices,
+            use_qk_l2norm_in_kernel,
+            scale,
+            A_log,
+            dt_bias,
+            a_raw,
+            b_raw,
+            out,
+        )
+        if result is not None:
+            return result
     return _fused_recurrent_gated_delta_rule_mps(
         q,
         k,
@@ -750,6 +878,11 @@ def tensor_copy_3dim(dest_tensor, source_tensor):
 
 
 def rmsnorm_forward(x, weight, eps, out=None, **kwargs):
+    from .normalization import rms
+
+    result = rms(x, weight, eps, out=out)
+    if result is not None:
+        return result
     value = x.float()
     value = (value * torch.rsqrt(value.square().mean(-1, keepdim=True) + eps) * weight.float()).to(x.dtype)
     if out is None:
@@ -769,6 +902,11 @@ def qk_rmsnorm_fused_forward(q, k, w_q, w_k, eps, **kwargs):
 
 
 def gated_rmsnorm_forward(x, weight, bias, eps, z, out=None, gate_type="silu", **kwargs):
+    from .normalization import rms
+
+    result = rms(x, weight, eps, out=out, z=z, gate=gate_type)
+    if result is not None:
+        return result
     value = rmsnorm_forward(x.float(), weight.float(), eps)
     gate = torch.nn.functional.silu(z.float()) if gate_type == "silu" else z.float().sigmoid()
     value = (value * gate).to(x.dtype)
@@ -822,6 +960,18 @@ def gather_token(req_to_next_token_ids, b_req_idx, b_mtp_index):
     return req_to_next_token_ids[b_req_idx.long(), b_mtp_index.long()]
 
 
+def gather_token_prefill_decode_mixed(
+    input_ids, req_to_next_token_ids, b_req_idx, b_mtp_index, b_is_decode_req, b_prefill_start_loc
+):
+    from .tokens import gather_mixed
+
+    if not gather_mixed(input_ids, req_to_next_token_ids, b_req_idx, b_mtp_index, b_is_decode_req, b_prefill_start_loc):
+        active = b_is_decode_req.bool()
+        values = req_to_next_token_ids[b_req_idx[active].long(), b_mtp_index[active].long()]
+        input_ids[b_prefill_start_loc[active].long()] = values.to(input_ids.dtype)
+    return input_ids
+
+
 def scatter_token(next_token_ids, req_to_next_token_ids, b_req_idx, b_mtp_index, b_has_out=None):
     rows, cols = b_req_idx.long(), b_mtp_index.long()
     if b_has_out is not None:
@@ -837,6 +987,10 @@ def token_id_counter(prompt_ids, out_token_id_counter):
 
 
 def update_req_to_token_id_counter(b_req_idx, next_token_ids, req_to_out_token_id_counter, mask=None):
+    from .elementwise import update_counter
+
+    if update_counter(b_req_idx, next_token_ids, req_to_out_token_id_counter, mask):
+        return
     rows, cols = b_req_idx.long(), next_token_ids.long()
     if mask is not None:
         rows, cols = rows[mask.bool()], cols[mask.bool()]

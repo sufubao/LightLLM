@@ -8,6 +8,11 @@ from .bindings import KERNEL_BINDINGS
 class MetalOperatorBackend(OperatorBackend):
     name = "metal"
 
+    def greedy_sample(self, logits, requests, temperatures, length_penalty, mask_eos, eos_ids, manager):
+        from .sampling import greedy
+
+        return greedy(logits, requests, temperatures, length_penalty, mask_eos, eos_ids, manager)
+
     def resolve(self, name):
         from . import kernels
 
@@ -32,9 +37,22 @@ class MetalOperatorBackend(OperatorBackend):
         # Norm signatures, including gated RMS, are shared by the device
         # implementations and dispatch to this backend's native Torch kernels.
         from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import RMSNormWeight, QKRMSNORMWeight
+        from lightllm.common.basemodel.layer_weights.meta_weights.embedding_weight import LMHeadWeight
 
         if isinstance(op, (RMSNormWeight, QKRMSNORMWeight)):
             return op._triton_forward
+
+        if isinstance(op, LMHeadWeight):
+
+            def lm_head_forward(input, out=None, alloc_func=None):
+                from .lm_head import project
+
+                result = project(input, op.weight, out=out)
+                if result is not None:
+                    return result
+                return op._native_forward(input=input, out=out)
+
+            return lm_head_forward
 
         def forward(*args, **kwargs):
             kwargs.pop("alloc_func", None)

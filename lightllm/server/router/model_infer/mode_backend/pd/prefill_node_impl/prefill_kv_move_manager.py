@@ -73,6 +73,6 @@ class PrefillKVMoveManager(BaseKVMoveManager):
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task)
                 if isinstance(task, PDChunckedTransTask):
-                    logger.info(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
+                    logger.debug(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
             except BaseException as e:
                 logger.exception(str(e))

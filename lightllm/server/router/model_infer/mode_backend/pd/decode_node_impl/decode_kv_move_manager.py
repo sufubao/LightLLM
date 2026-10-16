@@ -91,7 +91,7 @@ class DecodeKVMoveManager(BaseKVMoveManager):
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
                 if isinstance(task_group, PDChunckedTransTaskGroup):
-                    logger.info(
+                    logger.debug(
                         f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
                     )
 

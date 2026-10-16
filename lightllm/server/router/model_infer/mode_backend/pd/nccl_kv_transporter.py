@@ -306,7 +306,7 @@ class _NcclPeer:
         event = torch.cuda.Event()
         event.record(stream)
 
-        logger.info(
+        logger.debug(
             f"NCCL send page posted request_id={trans_task.request_id} "
             f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
         )
@@ -360,7 +360,7 @@ class _NcclPeer:
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
-            logger.info(
+            logger.debug(
                 f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
             )
         except BaseException as e:

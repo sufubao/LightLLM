@@ -30,6 +30,16 @@ CASES = [
         (240, 2032),
         (255, 8191),
         (256, 8192),
+        (257, 257),
+        (511, 1024),
+        (512, 2048),
+        (513, 8192),
+        (1008, 1008),
+        (1024, 2048),
+        (1024, 8192),
+        (1025, 8192),
+        (2032, 2032),
+        (2048, 8192),
     ]
 ]
 CASES += [
@@ -40,6 +50,9 @@ CASES += [
     (1, 19, 1317, 3.0),
     (1, 128, 2048, 3.0),
     (2, 33, 129, 3.0),
+    (2, 257, 1024, 1.0),
+    (3, 511, 2048, 1.0),
+    (1, 512, 2048, 3.0),
 ]
 
 
@@ -104,9 +117,9 @@ def test_prefill_unsupported_inputs_are_readonly():
     assert prefill(q, k, k, 112, out=q) is None
     assert prefill(q.requires_grad_(), k, k, 112) is None
     q.requires_grad_(False)
-    q257 = torch.empty(1, 257, 8, 256, device=q.device, dtype=q.dtype)
+    q2049 = torch.empty(1, 2049, 8, 256, device=q.device, dtype=q.dtype)
     k8193 = torch.empty(1, 8193, 2, 256, device=q.device, dtype=q.dtype)
-    assert prefill(q257, k8193, k8193, 0) is None
+    assert prefill(q2049, k8193[:, :8192], k8193[:, :8192], 0) is None
     assert prefill(q, k8193, k8193, 0) is None
     unaligned = torch.empty(q.numel() + 1, device=q.device, dtype=q.dtype)[1:].view(q.shape)
     assert prefill(unaligned, k, k, 112) is None

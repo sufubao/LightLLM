@@ -171,7 +171,7 @@ def prefill(q, k, v, query_start, out=None):
     if any(t.dtype != torch.float16 or t.device != q.device or t.requires_grad for t in (q, k, v)):
         return None
     batch, queries, heads, dim = q.shape
-    if not 1 <= batch <= 16 or not 2 <= queries <= 256 or (heads, dim) != (8, 256):
+    if not 1 <= batch <= 16 or not 2 <= queries <= 2048 or (heads, dim) != (8, 256):
         return None
     if k.shape != v.shape or k.shape[0] != batch or k.shape[2:] != (2, 256):
         return None

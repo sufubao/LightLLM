@@ -116,6 +116,26 @@ def test_prompt_cache_tree_trims_long_leaf_to_logical_capacity():
     assert result.prefill_node == "P1"
 
 
+@pytest.mark.parametrize("stride", (1, 7))
+def test_prompt_cache_tree_matches_edge_prefix_boundaries(stride):
+    for edge_len in (2, 7, 31, 32, 33, 65):
+        tree = PromptCacheTree(sample_stride=stride)
+        key = ("ab中🙂" * 17)[:edge_len]
+        text = "".join(char + " " * (stride - 1) for char in key)
+        with patch("time.monotonic", return_value=123.0):
+            tree.insert(text, "P0")
+        for matched in (0, 1, 2, 3, 7, 15, 31, 32, 33, 63, 64, edge_len):
+            if matched > edge_len:
+                continue
+            prefix = text[: matched * stride]
+            for query in (prefix, prefix + "!" + text[matched * stride + 1 :]):
+                result = tree.prefix_match(query)
+                assert result.matched_char_count == ((matched - 1) * stride + 1 if matched else 0)
+                assert result.input_char_count == len(query)
+                assert result.prefill_node == ("P0" if matched else None)
+                assert result.last_insert_time == (123.0 if matched else None)
+
+
 def test_prompt_cache_tree_coalesces_appended_prompts_and_refreshed_prefixes():
     tree = PromptCacheTree(sample_stride=1)
     prompt = ""

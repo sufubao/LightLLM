@@ -216,20 +216,9 @@ class PromptCacheTree:
         key = self._to_key(text)
         with self._lock:
             node, matched = self._match_at(self.root, key, 0)
-            if node is self.root:
-                prefill_node = None
-            else:
-                prefill_node = node.last_prefill_node
-            if matched <= 0:
-                matched_char_count = 0
-            else:
-                matched_char_count = min((matched - 1) * self.sample_stride + 1, len(text))
-            return PromptCacheMatchResult(
-                prefill_node=prefill_node,
-                matched_char_count=matched_char_count,
-                input_char_count=len(text),
-                last_insert_time=node.last_insert_time if node is not self.root else None,
-            )
+            # The last matched sample always falls within the input text.
+            matched_char_count = (matched - 1) * self.sample_stride + 1 if matched else 0
+            return PromptCacheMatchResult(node.last_prefill_node, matched_char_count, len(text), node.last_insert_time)
 
     def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:
         key_len = len(key)
@@ -242,10 +231,37 @@ class PromptCacheTree:
             if len(edge) == 1:
                 depth += 1
                 continue
-            matched = self._common_prefix_length(key, depth, edge)
-            depth += matched
-            if matched < len(edge):
-                break
+            if key.startswith(edge, depth):
+                depth += len(edge)
+                continue
+            # Keep shallow misses local without scanning long edges in Python.
+            matched = 1
+            while matched < 4 and depth + matched < key_len:
+                if key[depth + matched] != edge[matched]:
+                    return node, depth + matched
+                matched += 1
+            if depth + matched == key_len:
+                return node, key_len
+            if key.startswith(edge[:32], depth):
+                matched = 32
+            else:
+                while matched < 32 and depth + matched < key_len:
+                    if key[depth + matched] != edge[matched]:
+                        return node, depth + matched
+                    matched += 1
+            if depth + matched == key_len:
+                return node, key_len
+            remaining = key_len - depth
+            if remaining < len(edge) and edge.startswith(key[depth:]):
+                return node, key_len
+            low, high = matched, min(remaining, len(edge)) - 1
+            while low < high:
+                mid = (low + high + 1) // 2
+                if key.startswith(edge[:mid], depth):
+                    low = mid
+                else:
+                    high = mid - 1
+            return node, depth + low
         return node, depth
 
     def evict_lru_nodes(self) -> int:

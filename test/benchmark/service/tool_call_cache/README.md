@@ -45,6 +45,10 @@ This directory provides complementary kinds of evidence:
   computing seed-clustered uncertainty. `--public-output FILE` exports an
   explicit whitelist of aggregate/per-trial metrics and configuration; request
   contents, responses and raw server logs stay in the experiment store.
+  Current upstream emits request-correlated TTFT/cache logs at debug level.
+  Use `launch_server.py --log-level debug` consistently on both policies and the
+  unchanged baseline when collecting those metrics. Keep the logging setting in
+  the result configuration; absolute latency includes its instrumentation cost.
 * `model_provenance.py`: hashes the actual weights and tokenizer files in a
   separate untimed interval, archiving the script and results under `exp`.
 

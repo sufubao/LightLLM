@@ -89,7 +89,7 @@ def summarize(phases):
                 "python_dependency_sha256": candidate.get("python_dependency_sha256", {}),
                 "service_configuration": {
                     k: config.get(k)
-                    for k in ["tp", "max_req_tokens", "batch_tokens", "max_requests", "disable_cudagraph"]
+                    for k in ["tp", "max_req_tokens", "batch_tokens", "max_requests", "disable_cudagraph", "log_level"]
                 },
                 "backend_flags": {
                     flag: candidate["command"][candidate["command"].index(flag) + 1]

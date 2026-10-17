@@ -165,6 +165,7 @@ def main():
         "batch_tokens",
         "max_requests",
         "disable_cudagraph",
+        "log_level",
     ]:
         if left["configuration"].get(key) != right["configuration"].get(key):
             raise ValueError(f"services differ in {key}")

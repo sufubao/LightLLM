@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--prefill-queue-strategy", choices=["auto", "default", "promote_shortest", "hrrn"])
     parser.add_argument("--output-constraint-mode", choices=["none", "xgrammar"])
     parser.add_argument("--python-deps", type=Path, help="Read-only, preinstalled runtime dependency overlay")
+    parser.add_argument("--log-level", choices=["info", "debug"], default="info")
     args = parser.parse_args()
     if "EXP_RUN_DIR" not in os.environ or len(args.revision) != 40:
         parser.error("run under exp and supply a full source revision")
@@ -62,7 +63,7 @@ def main():
         "-e",
         "PYTHONPATH=/work",
         "-e",
-        "LIGHTLLM_LOG_LEVEL=info",
+        f"LIGHTLLM_LOG_LEVEL={args.log_level}",
         args.image,
         "python",
         "-m",

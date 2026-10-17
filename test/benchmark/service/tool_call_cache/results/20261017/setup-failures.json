@@ -32,6 +32,12 @@
       "paired_requests": 96,
       "input_output_finish_token_mismatches": 0,
       "resolution": "Keep the excluded warmup and its failure. Both end-to-end tool/stream/schema smokes passed. Before any final-source measured trial, configure the same explicit debug log level on candidate, control and unchanged baseline; archive the setting and include instrumentation cost in interpretation."
+    },
+    {
+      "phase": "v9 pre-validation structured-output helper invocation",
+      "kind": "orchestration helper path renamed without staging a matching file",
+      "measured_validation_or_heldout_trials_started": 0,
+      "resolution": "Preserve the terminal driver and failed invocation records. Correct the helper path and resume on the same healthy services with unchanged source/runtime/scenarios. Both JSON-schema checks and the subsequent matched96-request warmup passed, including request-correlated TTFT/cache verification."
     }
   ]
 }

@@ -8,6 +8,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import time
 
 
 def manifest(name):
@@ -42,6 +43,7 @@ def main():
     parser.add_argument(
         "--allow-different-source", action="store_true", help="Explicitly permit the original-base audit"
     )
+    parser.add_argument("--no-reset", action="store_true", help="Warmup/exploration only: retain prior cache contents")
     args = parser.parse_args()
     destination = args.root / "results" / args.phase
     destination.mkdir(parents=True, exist_ok=False)
@@ -74,12 +76,18 @@ def main():
         raise ValueError("policy comparison requires identical source; use --allow-different-source for the base audit")
     harness_sha = hashlib.sha256((args.root / "replay.py").read_bytes()).hexdigest()
     shutil.copy2(args.root / "replay.py", destination / "replay.py")
+    if not args.no_reset:
+        shutil.copy2(args.root / "reset_cache.py", destination / "reset_cache.py")
     (destination / "protocol.json").write_text(
         json.dumps(
             {
                 "cases": cases,
                 "repeats": args.repeats,
                 "harness_sha256": harness_sha,
+                "cache_isolation": "none" if args.no_reset else "expire preferences, then independent capacity flood",
+                "reset_sha256": (
+                    None if args.no_reset else hashlib.sha256((destination / "reset_cache.py").read_bytes()).hexdigest()
+                ),
                 "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
             },
             indent=2,
@@ -87,6 +95,7 @@ def main():
         + "\n"
     )
     summaries = []
+    last_done = {label: time.monotonic() for label in services}
     for case in cases:
         for repeat in range(args.repeats):
             namespace = f"{args.phase}-{case['name']}-r{repeat}"
@@ -95,6 +104,32 @@ def main():
             for label in order:
                 service = services[label]
                 output = destination / f"{case['name']}-r{repeat}-{label}.json"
+                if not args.no_reset:
+                    config = service["configuration"]
+                    wait = max(0, config["retention"] + 0.25 - (time.monotonic() - last_done[label]))
+                    reset = [
+                        args.exp,
+                        "-m",
+                        f"Untimed isolated-cache prelude {namespace} {label}; "
+                        f"service {service['source_revision']}; full manifest in {destination}",
+                        "python3",
+                        str(destination / "reset_cache.py"),
+                        "--url",
+                        f"http://127.0.0.1:{config['port']}",
+                        "--model",
+                        config["model_name"],
+                        "--cache-tokens",
+                        str(config["cache_tokens"]),
+                        "--max-req-tokens",
+                        str(config["max_req_tokens"]),
+                        "--sleep-seconds",
+                        str(wait),
+                        "--seed",
+                        str(int(hashlib.sha256(namespace.encode()).hexdigest(), 16)),
+                    ]
+                    print(f"Resetting cache before {namespace} {label}, lease wait {wait:.2f}s", flush=True)
+                    with output.with_suffix(".reset.log").open("w") as log:
+                        subprocess.run(reset, stdout=log, stderr=subprocess.STDOUT, check=True)
                 command = [
                     args.exp,
                     "-m",
@@ -147,6 +182,7 @@ def main():
                 print(f"Starting {namespace} {label}", flush=True)
                 with output.with_suffix(".log").open("w") as log:
                     completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+                last_done[label] = time.monotonic()
                 if completed.returncode:
                     raise RuntimeError(f"trial failed, preserve logs: {output.with_suffix('.log')}")
                 outputs[label] = json.loads(output.read_text())

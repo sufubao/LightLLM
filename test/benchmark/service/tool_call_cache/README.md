@@ -23,6 +23,11 @@ This directory distinguishes three kinds of evidence:
   service manifests, an immutable client snapshot, strict prompt/output checks,
   and server TTFT/cache metrics correlated by request ID. Comparison stops on
   errors or mismatches; earlier and failed results remain available.
+* `reset_cache.py`: untimed, exp-recorded isolation before each trial. Wait for
+  prior preferences to expire, then fill more than KV capacity with independent
+  ordinary completions. This removes prior trial contexts without enabling RL
+  mode (which changes token-rank inference work). Reset requests do not enter
+  replay latency/throughput metrics. `--no-reset` is for warmup/exploration only.
 
 Replay negative controls include `--mix ordinary`, `--mix mixed25`,
 `--abandon-fraction 0.5` (selected sessions stop after their first tool call),

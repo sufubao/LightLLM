@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model-dir", default="/mtc/models/Qwen3-4B")
     parser.add_argument("--model-name", default="tool-cache-qwen4b")
+    parser.add_argument("--tool-call-parser", default="qwen25")
     parser.add_argument("--image", default="ghcr.io/modeltc/lightllm:main")
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--cache-tokens", type=int, default=32768)
@@ -33,6 +34,7 @@ def main():
     parser.add_argument("--disable-cudagraph", action="store_true")
     parser.add_argument("--original-base", action="store_true", help="Source predates retention flags; omit them")
     parser.add_argument("--kernel-cache", type=Path, help="Reuse compiled kernels across service restarts")
+    parser.add_argument("--linear-att-page-block-num", type=int)
     args = parser.parse_args()
     if "EXP_RUN_DIR" not in os.environ or len(args.revision) != 40:
         parser.error("run under exp and supply a full source revision")
@@ -79,7 +81,7 @@ def main():
         "--running_max_req_size",
         str(args.max_requests),
         "--tool_call_parser",
-        "qwen25",
+        args.tool_call_parser,
         "--tool_call_cache_retention_seconds",
         str(args.retention),
         "--tool_call_cache_max_fraction",
@@ -95,6 +97,8 @@ def main():
     ]
     if args.disable_cudagraph:
         command.append("--disable_cudagraph")
+    if args.linear_att_page_block_num is not None:
+        command.extend(["--linear_att_page_block_num", str(args.linear_att_page_block_num)])
     if args.original_base:
         if args.retention:
             parser.error("original base cannot enable retention")

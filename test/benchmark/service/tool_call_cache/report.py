@@ -33,6 +33,20 @@ def summarize(phases):
         candidate = json.loads((phase / "candidate-service.json").read_text())
         control = json.loads((phase / "control-service.json").read_text())
         for trial in trials:
+            raw = {}
+            for policy in ["candidate", "control"]:
+                path = phase / f"{trial['case']}-r{trial['repeat']}-{policy}.json"
+                rows = json.loads(path.read_text())["rows"]
+                raw[policy] = {(row["session"], row["turn"]): row for row in rows}
+            if raw["candidate"].keys() != raw["control"].keys():
+                raise ValueError(f"raw request keys differ: {phase} {trial['case']}")
+            for request, candidate_row in raw["candidate"].items():
+                control_row = raw["control"][request]
+                for field in ["prompt_sha256", "finish_reason", "output_signature"]:
+                    if candidate_row[field] != control_row[field]:
+                        raise ValueError(f"raw {field} differs: {phase} {request}")
+                if candidate_row["usage"]["completion_tokens"] != control_row["usage"]["completion_tokens"]:
+                    raise ValueError(f"generated token counts differ: {phase} {request}")
             if trial["mismatches"]:
                 raise ValueError(f"mismatched trial cannot enter matched report: {phase} {trial['case']}")
             if trial["candidate"]["unexpected_end_states"] or trial["control"]["unexpected_end_states"]:

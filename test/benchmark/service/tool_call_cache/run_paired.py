@@ -209,6 +209,8 @@ def main():
                 for field in ["prompt_sha256", "finish_reason", "output_signature"]:
                     if left[key][field] != right[key][field]:
                         mismatches.append({"request": key, "field": field})
+                if left[key]["usage"]["completion_tokens"] != right[key]["usage"]["completion_tokens"]:
+                    mismatches.append({"request": key, "field": "completion_tokens"})
             summary = {"case": case["name"], "repeat": repeat, "order": order, "mismatches": mismatches}
             for label, result in outputs.items():
                 summary[label] = {k: v for k, v in result.items() if k not in ["rows", "sessions"]}

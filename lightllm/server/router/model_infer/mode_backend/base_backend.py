@@ -214,7 +214,7 @@ class ModeBackend:
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor(
-            [0, 0] if self.enable_tool_call_retention else [0],
+            [0],
             dtype=torch.int64 if self.enable_tool_call_retention else torch.int32,
             device="cuda",
             requires_grad=False,
@@ -225,7 +225,7 @@ class ModeBackend:
         if self.is_multinode_tp:
             self.multinode_tp_gather_item_tensor = torch.zeros_like(self.node_broadcast_tensor)
             self.multinode_tp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size * self.node_broadcast_tensor.numel())],
+                [0 for _ in range(self.global_world_size)],
                 dtype=self.node_broadcast_tensor.dtype,
                 device="cuda",
                 requires_grad=False,
@@ -480,19 +480,19 @@ class ModeBackend:
 
     def _try_read_new_reqs_normal(self):
         if self.is_master_in_node:
-            if self.shm_reqs_io_buffer.is_ready():
-                self.node_broadcast_tensor.fill_(1)
-            else:
-                self.node_broadcast_tensor.fill_(0)
+            ready = int(self.shm_reqs_io_buffer.is_ready())
+            if self.enable_tool_call_retention:
+                # Keep one scalar and one fill/copy per loop. The low bit is
+                # readiness; higher bits carry the master's microsecond clock.
+                ready |= (time.monotonic_ns() // 1000) << 1
+            self.node_broadcast_tensor.fill_(ready)
 
         src_rank_id = self.args.node_rank * self.node_world_size
-        if self.enable_tool_call_retention and self.is_master_in_node:
-            self.node_broadcast_tensor[1] = time.monotonic_ns()
         broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-        values = self.node_broadcast_tensor.detach().cpu().tolist()
-        new_buffer_is_ready = values[0]
+        new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if self.enable_tool_call_retention:
-            self.radix_cache.tool_call_retention.advance_clock(values[1] / 1e9)
+            self.radix_cache.tool_call_retention.advance_clock((new_buffer_is_ready >> 1) / 1e6)
+            new_buffer_is_ready &= 1
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
@@ -506,7 +506,7 @@ class ModeBackend:
 
             src_rank_id = self.args.node_rank * self.node_world_size
             broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-            new_buffer_is_ready = self.node_broadcast_tensor[0].item()
+            new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
             if new_buffer_is_ready:
                 self._read_pd_trans_io_buffer_and_update_req_status()
         return
@@ -515,12 +515,10 @@ class ModeBackend:
         """
         多节点tp模式下,需要协调所有rank的行为同步。
         """
-        if self.shm_reqs_io_buffer.is_ready():
-            self.multinode_tp_gather_item_tensor.fill_(1)
-        else:
-            self.multinode_tp_gather_item_tensor.fill_(0)
+        ready = int(self.shm_reqs_io_buffer.is_ready())
         if self.enable_tool_call_retention:
-            self.multinode_tp_gather_item_tensor[1] = time.monotonic_ns()
+            ready |= (time.monotonic_ns() // 1000) << 1
+        self.multinode_tp_gather_item_tensor.fill_(ready)
         all_gather_into_tensor(
             self.multinode_tp_all_gather_tensor,
             self.multinode_tp_gather_item_tensor,
@@ -529,9 +527,8 @@ class ModeBackend:
         )
         new_buffer_is_readys = self.multinode_tp_all_gather_tensor.detach().cpu().numpy()
         if self.enable_tool_call_retention:
-            new_buffer_is_readys = new_buffer_is_readys.reshape(-1, 2)
-            self.radix_cache.tool_call_retention.advance_clock(int(new_buffer_is_readys[0, 1]) / 1e9)
-            new_buffer_is_readys = new_buffer_is_readys[:, 0]
+            self.radix_cache.tool_call_retention.advance_clock((int(new_buffer_is_readys[0]) >> 1) / 1e6)
+            new_buffer_is_readys = new_buffer_is_readys & 1
         new_buffer_is_ready = np.all(new_buffer_is_readys == 1)
 
         if new_buffer_is_ready:

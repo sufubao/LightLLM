@@ -217,6 +217,45 @@ def test_supported_parser_markers(parser):
         assert list(map(ord, "<|tool_call_begin|>")) in markers
 
 
+@pytest.mark.parametrize("ready", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_scheduling_clock_is_packed_once_and_shared_across_ranks(monkeypatch, ready, enabled):
+    from lightllm.server.router.model_infer.mode_backend import base_backend
+
+    transmitted = []
+    read = []
+    ranks = []
+    clocks = [[], []]
+    for index in range(2):
+        backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
+        backend.is_master_in_node = index == 0
+        backend.enable_tool_call_retention = enabled
+        backend.args = SimpleNamespace(node_rank=0)
+        backend.node_world_size = 2
+        backend.node_nccl_group = None
+        backend.shm_reqs_io_buffer = SimpleNamespace(is_ready=lambda: ready)
+        backend.node_broadcast_tensor = torch.tensor([0], dtype=torch.int64 if enabled else torch.int32)
+        backend.is_pd_mode = False
+        backend.radix_cache = SimpleNamespace(tool_call_retention=SimpleNamespace(advance_clock=clocks[index].append))
+        backend._read_reqs_buffer_and_init_reqs = lambda index=index: read.append(index)
+        ranks.append(backend)
+
+    def broadcast(tensor, **kwargs):
+        if tensor is ranks[0].node_broadcast_tensor:
+            transmitted.append(tensor.clone())
+        else:
+            tensor.copy_(transmitted[-1])
+
+    monkeypatch.setattr(base_backend, "broadcast", broadcast)
+    monkeypatch.setattr(base_backend.time, "monotonic_ns", lambda: 123456789000)
+    ranks[0]._try_read_new_reqs_normal()
+    monkeypatch.setattr(base_backend.time, "monotonic_ns", lambda: 987654321000)
+    ranks[1]._try_read_new_reqs_normal()
+    assert read == ([0, 1] if ready else [])
+    assert clocks == ([[123.456789], [123.456789]] if enabled else [[], []])
+    assert transmitted[0].numel() == 1
+
+
 @pytest.mark.parametrize(
     "status, enabled, generated, expected",
     [

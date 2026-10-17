@@ -45,6 +45,20 @@ def summarize(phases):
             for policy in ["candidate", "control"]:
                 path = phase / f"{trial['case']}-r{trial['repeat']}-{policy}.json"
                 rows = json.loads(path.read_text())["rows"]
+                if any(row["finish_reason"] != row["expected_finish_reason"] for row in rows):
+                    raise ValueError(f"unexpected raw finish state: {path}")
+                if any(row["usage"]["prompt_tokens"] != row["client_prompt_tokens"] for row in rows):
+                    raise ValueError(f"raw prompt length mismatch: {path}")
+                prompt = sum(row["usage"]["prompt_tokens"] for row in rows)
+                cached = sum(row["usage"]["prompt_tokens_details"]["cached_tokens"] for row in rows)
+                totals = {
+                    "requests": len(rows),
+                    "prompt_tokens": prompt,
+                    "cached_tokens": cached,
+                    "prefilled_tokens": prompt - cached,
+                }
+                if any(trial[policy][key] != value for key, value in totals.items()):
+                    raise ValueError(f"summary totals do not match raw rows: {path}")
                 raw[policy] = {(row["session"], row["turn"]): row for row in rows}
             if raw["candidate"].keys() != raw["control"].keys():
                 raise ValueError(f"raw request keys differ: {phase} {trial['case']}")

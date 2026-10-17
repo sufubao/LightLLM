@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -14,11 +15,13 @@ import threading
 
 def monitor_gpus(services, destination):
     """Retain host load observations and reject shared experiment GPUs."""
-    gpu_ids = {gpu for service in services.values() for gpu in service["configuration"]["gpu"].split(",")}
+    gpu_ids = {gpu.strip() for service in services.values() for gpu in service["configuration"]["gpu"].split(",")}
     uuid_lines = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"], text=True
     ).splitlines()
     uuids = {uuid.strip() for line in uuid_lines for index, uuid in [line.split(",")] if index.strip() in gpu_ids}
+    if len(uuids) != len(gpu_ids):
+        raise ValueError("could not identify every experiment GPU")
     allowed_pids = set()
     for service in services.values():
         rows = subprocess.check_output(
@@ -51,7 +54,13 @@ def monitor_gpus(services, destination):
                         text=True,
                         timeout=10,
                     ).splitlines()
-                    record = {"time_unix": time.time(), "apps": apps, "load": load, "foreign_on_trial_gpus": foreign}
+                    record = {
+                        "time_unix": time.time(),
+                        "apps": apps,
+                        "load": load,
+                        "host_load_average": os.getloadavg(),
+                        "foreign_on_trial_gpus": foreign,
+                    }
                     if foreign:
                         errors.append(record)
                 except Exception as exc:

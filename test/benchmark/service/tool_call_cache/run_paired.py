@@ -69,11 +69,21 @@ def main():
         "batch_tokens",
         "max_requests",
         "disable_cudagraph",
-        "tool_call_parser",
-        "linear_att_page_block_num",
     ]:
         if left["configuration"].get(key) != right["configuration"].get(key):
             raise ValueError(f"services differ in {key}")
+    for flag in [
+        "--tool_call_parser",
+        "--linear_att_page_block_num",
+        "--llm_prefill_att_backend",
+        "--llm_decode_att_backend",
+    ]:
+        values = [
+            service["command"][service["command"].index(flag) + 1] if flag in service["command"] else None
+            for service in [left, right]
+        ]
+        if values[0] != values[1]:
+            raise ValueError(f"services differ in {flag}")
     if left["source_revision"] != right["source_revision"] and not args.allow_different_source:
         raise ValueError("policy comparison requires identical source; use --allow-different-source for the base audit")
     harness_sha = hashlib.sha256((args.root / "replay.py").read_bytes()).hexdigest()

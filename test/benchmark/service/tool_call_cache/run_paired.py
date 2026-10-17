@@ -69,8 +69,10 @@ def main():
         "batch_tokens",
         "max_requests",
         "disable_cudagraph",
+        "tool_call_parser",
+        "linear_att_page_block_num",
     ]:
-        if left["configuration"][key] != right["configuration"][key]:
+        if left["configuration"].get(key) != right["configuration"].get(key):
             raise ValueError(f"services differ in {key}")
     if left["source_revision"] != right["source_revision"] and not args.allow_different_source:
         raise ValueError("policy comparison requires identical source; use --allow-different-source for the base audit")

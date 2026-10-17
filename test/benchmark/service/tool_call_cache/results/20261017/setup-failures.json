@@ -144,7 +144,9 @@
       "diagnostic_pinned_ssm_bytes_per_rank": 1358954496,
       "diagnostic_allocation_and_copy_verified": true,
       "unchanged_configuration_recovery_health_passed": true,
-      "resolution": "Preserve both terminal startup records and raw logs privately. Both isolated allocation paths succeeded on both ranks, including real NCCL/FlashInfer communication, so the full startup trigger remains unconfirmed. Stop only verified failed own services, retain the healthy control, and resume only the three unstarted controlled probes at identical source/image, FP32 state, cache capacity, GPU group, TTL120 and fraction0.25. The post-diagnostic original configuration passed health. No diagnostic service contributes performance results; all54 completed heldout comparisons remain unchanged."
+      "resolution": "Preserve both terminal startup records and raw logs privately. Both isolated allocation paths succeeded on both ranks, including real NCCL/FlashInfer communication, so the full startup trigger remains unconfirmed. Stop only verified failed own services, retain the healthy control, and resume only the three unstarted controlled probes at identical source/image, FP32 state, cache capacity, GPU group, TTL120 and fraction0.25. The post-diagnostic original configuration passed health. No diagnostic service contributes performance results; all54 completed heldout comparisons remain unchanged.",
+      "controlled_paired_trials_completed_after_unchanged_recovery": 3,
+      "final_controlled_monitor_violations": 0
     }
   ]
 }

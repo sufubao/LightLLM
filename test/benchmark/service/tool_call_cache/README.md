@@ -171,3 +171,54 @@ exp -m "Held-out trace-shaped replay; attach exact service/model/hardware config
 Dataset: [CacheWise coding traces](https://github.com/cachewise-project/cachewise-coding-traces),
 [paper](https://arxiv.org/abs/2606.16824). Preserve the authors' attribution and
 the source revision when publishing derived results.
+
+## Completed study (2026-10-17–18)
+
+The final serving source is `dcd3551c53a13c5613d8a8b644870de00dd57820`;
+the unchanged upstream control is `22888b4237aa2c895fc24176e08089cf14bc6c89`.
+All 238 required paired comparisons completed: 36 validation, 154 held-out
+including hardware crossover, 20 default-disabled versus upstream, and 28
+controlled residency checks. Earlier-source supplemental results and excluded
+thermal/compiler-contaminated attempts remain separate.
+
+These scaled, closed-loop workloads do not establish general acceleration.
+Qwen3.5-27B trace-c16 wall speedup was 1.019x [1.011, 1.026], while trace-c8
+was 0.978x [0.949, 0.999]. Qwen3-4B results were near 1x, including a small
+high-pressure regression. The default-disabled trace-c16 p95 TTFT ratio was
+0.953x [0.905, 0.994], so this study does not establish zero overhead.
+Intervals are descriptive seed-clustered estimates with only three or five
+independent workload seeds; crossover repeats share a seed cluster.
+Retention remains disabled by default.
+
+| Evidence | Pairs | Complete results |
+|---|---:|---|
+| Qwen3-4B held-out crossover | 100 | [Table](results/20261017/final-normal-heldout-summary.md), [numeric trials](results/20261017/final-normal-heldout-summary.json.gz) |
+| Qwen3.5-27B held-out crossover | 54 | [Table](results/20261017/final-hybrid-heldout-summary.md), [numeric trials](results/20261017/final-hybrid-heldout-summary.json.gz) |
+| Default-disabled versus upstream | 20 | [Table](results/20261017/final-default-off-summary.md), [numeric trials](results/20261017/final-default-off-summary.json.gz) |
+| Ordinary-attention controlled residency | 25 | [Table](results/20261017/final-normal-pressure-summary.md), [numeric trials](results/20261017/final-normal-pressure-summary.json) |
+| Hybrid actual tool-result continuation | 3 | [Table](results/20261017/final-hybrid-pressure-summary.md), [numeric trials](results/20261017/final-hybrid-pressure-summary.json) |
+
+The controlled hybrid check retained a valid 32,768-token checkpoint versus
+zero cached tokens in the disabled control after capacity churn. Its 120-second
+window and 25% budget are a separate mechanism diagnostic, not the held-out
+30-second/50% setting or a production speedup claim. Ordinary controlled checks
+repeat the initial prompt to isolate residency; the hybrid check sends the real
+generated tool result and a subsequent tool instruction.
+
+[Validation/selection protocol](results/20261017/final-study-protocol.json),
+[actual backend parity](results/20261017/final-backend-parity.json), and
+[post-run integrity/cleanup audit](results/20261017/final-integrity-audit.json)
+record the full scope. Source snapshots, all model files and the 353-file
+runtime overlay passed byte-level checks; all 12 phases passed selected-GPU
+monitoring and final-sample checks. The earlier ordinary controlled probe lacks
+an independently timestamped initial boundary, which is explicitly identified
+in the audit. All own model containers and the last four GPU processes exited.
+
+The host was shared; selected GPUs were isolated, while CPU and I/O were not
+exclusive. Namespace isolation reduces cross-session sharing. Source text,
+output targets and waits were synthesized/scaled/capped rather than replayed
+verbatim from production. Known timed TileLang compilation caused old hybrid
+attempts to be quarantined and repeated; the guard covers logged TileLang,
+not every possible runtime compiler. Intermittent pinned-memory startup
+failures were preserved and recovered at unchanged precision/capacity/source;
+they contributed no measured trials. See [setup/exclusion records](results/20261017/setup-failures.json).

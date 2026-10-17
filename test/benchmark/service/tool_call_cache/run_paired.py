@@ -71,7 +71,8 @@ def monitor_gpus(services, destination):
                             "nvidia-smi",
                             "--query-gpu=index,utilization.gpu,power.draw,memory.used,temperature.gpu,"
                             "clocks.current.sm,clocks.current.memory,clocks_event_reasons.sw_thermal_slowdown,"
-                            "clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons_counters.sw_thermal_slowdown,"
+                            "clocks_event_reasons.hw_thermal_slowdown,"
+                            "clocks_event_reasons_counters.sw_thermal_slowdown,"
                             "clocks_event_reasons_counters.hw_thermal_slowdown",
                             "--format=csv,noheader",
                         ],

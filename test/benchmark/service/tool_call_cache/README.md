@@ -51,6 +51,12 @@ This directory provides complementary kinds of evidence:
   the result configuration; absolute latency includes its instrumentation cost.
 * `model_provenance.py`: hashes the actual weights and tokenizer files in a
   separate untimed interval, archiving the script and results under `exp`.
+* `workload_stats.py`: exports numerical input/output-length and wait
+  distributions, prompt/output target caps, and recorded context resets from
+  completed paired phases. It verifies identical paired workload descriptors
+  and omits request IDs, contents, output signatures and private configuration.
+  These per-request distributions describe the synthetic workload; they do not
+  provide additional independent performance repetitions.
 * `plot_results.py`: renders every aggregate group from a numerical public
   report as standalone SVG/PNG figures, retaining seed-clustered descriptive
   intervals. It does not pool groups or recompute estimates. Uncached input

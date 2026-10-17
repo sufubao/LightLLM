@@ -189,6 +189,13 @@ class ModeBackend:
             radix_cache=self.radix_cache,
         )
 
+        self.enable_tool_call_retention = self.args.tool_call_cache_retention_seconds > 0
+        if self.enable_tool_call_retention:
+            self.radix_cache.enable_tool_call_retention(
+                self.args.tool_call_cache_retention_seconds,
+                self.args.tool_call_cache_max_fraction,
+            )
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
@@ -206,14 +213,22 @@ class ModeBackend:
             )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        self.node_broadcast_tensor = torch.tensor(
+            [0, 0] if self.enable_tool_call_retention else [0],
+            dtype=torch.int64 if self.enable_tool_call_retention else torch.int32,
+            device="cuda",
+            requires_grad=False,
+        )
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:
-            self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
+            self.multinode_tp_gather_item_tensor = torch.zeros_like(self.node_broadcast_tensor)
             self.multinode_tp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+                [0 for _ in range(self.global_world_size * self.node_broadcast_tensor.numel())],
+                dtype=self.node_broadcast_tensor.dtype,
+                device="cuda",
+                requires_grad=False,
             )
             self.multinode_tp_nccl_group = dist.new_group(
                 [rank for rank in range(self.global_world_size)], backend="nccl"
@@ -471,8 +486,13 @@ class ModeBackend:
                 self.node_broadcast_tensor.fill_(0)
 
         src_rank_id = self.args.node_rank * self.node_world_size
+        if self.enable_tool_call_retention and self.is_master_in_node:
+            self.node_broadcast_tensor[1] = time.monotonic_ns()
         broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-        new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+        values = self.node_broadcast_tensor.detach().cpu().tolist()
+        new_buffer_is_ready = values[0]
+        if self.enable_tool_call_retention:
+            self.radix_cache.tool_call_retention.advance_clock(values[1] / 1e9)
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
@@ -486,7 +506,7 @@ class ModeBackend:
 
             src_rank_id = self.args.node_rank * self.node_world_size
             broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-            new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+            new_buffer_is_ready = self.node_broadcast_tensor[0].item()
             if new_buffer_is_ready:
                 self._read_pd_trans_io_buffer_and_update_req_status()
         return
@@ -499,6 +519,8 @@ class ModeBackend:
             self.multinode_tp_gather_item_tensor.fill_(1)
         else:
             self.multinode_tp_gather_item_tensor.fill_(0)
+        if self.enable_tool_call_retention:
+            self.multinode_tp_gather_item_tensor[1] = time.monotonic_ns()
         all_gather_into_tensor(
             self.multinode_tp_all_gather_tensor,
             self.multinode_tp_gather_item_tensor,
@@ -506,6 +528,10 @@ class ModeBackend:
             async_op=False,
         )
         new_buffer_is_readys = self.multinode_tp_all_gather_tensor.detach().cpu().numpy()
+        if self.enable_tool_call_retention:
+            new_buffer_is_readys = new_buffer_is_readys.reshape(-1, 2)
+            self.radix_cache.tool_call_retention.advance_clock(int(new_buffer_is_readys[0, 1]) / 1e9)
+            new_buffer_is_readys = new_buffer_is_readys[:, 0]
         new_buffer_is_ready = np.all(new_buffer_is_readys == 1)
 
         if new_buffer_is_ready:
@@ -724,7 +750,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -957,7 +982,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

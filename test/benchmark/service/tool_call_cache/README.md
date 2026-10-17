@@ -1,6 +1,6 @@
 # Tool-call-aware KV retention experiments
 
-This directory distinguishes three kinds of evidence:
+This directory provides complementary kinds of evidence:
 
 * `trace_data.py`: observations from pinned, public, sanitized CacheWise sessions.
   Multiple assistant chunks are grouped by request ID. Missing original finish
@@ -83,6 +83,14 @@ recency, and never acquire references or prevent pressure-driven reclamation.
 Hybrid recurrent-state eviction follows the same preference but still reclaims
 unusable leaves first. TP ranks consume a common clock through the existing
 scheduling broadcast, so expiry cannot diverge due to process-local clocks.
+
+The hint originates from tool-enabled chat requests and is applied in the
+inference worker that finishes generation. This does not send decode completion
+feedback to a separate prefill service in PD deployments. A PD prefill cache
+therefore cannot be assumed to receive the same benefit. Native completion
+requests without parser marker metadata follow ordinary eviction. Multiple
+requests that share a prefix can retain that prefix until their leases expire;
+an ordinary response revokes only its completed branch, not other branches.
 
 Example trace collection and analysis (replace `TRACE_SHA` with a full SHA):
 

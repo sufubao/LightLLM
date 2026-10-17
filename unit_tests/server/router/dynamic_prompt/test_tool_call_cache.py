@@ -424,6 +424,36 @@ def test_post_eos_speculative_tool_marker_does_not_receive_a_preference():
     assert not node.cache_protected
 
 
+@pytest.mark.parametrize("is_master", [False, True])
+@pytest.mark.parametrize("callback_finishes", [False, True])
+def test_later_speculative_packs_keep_kv_updates_but_preserve_first_finish_boundary(is_master, callback_finishes):
+    from lightllm.server.core.objs import FinishStatus
+    from lightllm.server.router.model_infer.infer_batch import InferReqUpdatePack
+
+    accepted = []
+    status = FinishStatus()
+    shm = SimpleNamespace(input_len=4)
+
+    def finish(**kwargs):
+        status.set_status(FinishStatus.FINISHED_STOP)
+
+    req = SimpleNamespace(
+        shm_req=shm,
+        finish_status=status,
+        finish_output_len=0,
+        set_next_gen_token_id=lambda token, logprob, length, rank: accepted.append((token, length)),
+        update_finish_status=(lambda **kwargs: None) if callback_finishes else finish,
+    )
+    callback = (lambda *args: finish()) if callback_finishes else None
+    for length, token in [(2, 7), (3, 8), (4, 9)]:
+        InferReqUpdatePack(req, length).handle(token, 0.0, 0, [7], is_master, callback)
+    assert accepted == [(7, 2), (8, 3), (9, 4)]
+    assert req.finish_output_len == 2
+    if is_master:
+        assert shm.finish_token_index == 5
+        assert shm.shm_cur_output_len == 2
+
+
 @pytest.mark.parametrize("seed", range(8))
 def test_randomized_split_expiry_eviction_and_rank_agreement(seed):
     rng = random.Random(seed)

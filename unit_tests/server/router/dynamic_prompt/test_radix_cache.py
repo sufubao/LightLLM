@@ -243,12 +243,20 @@ def test_case9():
     assert torch.equal(unmerged_node_d.token_id_key, torch.tensor([6], dtype=torch.int64))
 
 
-def test_case10():
+@pytest.mark.parametrize("retention_seconds", [0, 10])
+def test_case10(retention_seconds):
     """
     测试场景：测试 flush_cache 函数
     """
     print("\nTest Case 10: Testing flush_cache function\n")
-    tree = RadixCache(100, 0)
+    allocator = SimpleNamespace(can_use_mem_size=95)
+    freed = []
+
+    def free(values):
+        freed.extend(values.tolist())
+        allocator.can_use_mem_size += len(values)
+
+    tree = RadixCache(100, 0, mem_manager=SimpleNamespace(allocator=allocator, free=free, page_size=1))
     tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
     tree_node, size, values = tree.match_prefix(
@@ -256,7 +264,17 @@ def test_case10():
     )
     assert tree_node is not None
     assert size == 3
+    # Flush reclaims idle KV through the allocator. A live request must first
+    # release its reference; retention preferences must never prevent reclaim.
+    tree.dec_node_ref_counter(tree_node)
+    if retention_seconds:
+        tree.enable_tool_call_retention(retention_seconds, 0.5)
+        tree.tool_call_retention.protect(tree_node)
     tree.flush_cache()
+    assert sorted(freed) == [1, 2, 3, 4, 5]
+    assert allocator.can_use_mem_size == 100
+    if retention_seconds:
+        assert tree.tool_call_retention.protected_tokens == 0
     tree_node, size, values = tree.match_prefix(
         torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True
     )

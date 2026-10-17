@@ -81,6 +81,17 @@ class ToolCallCacheRetention:
                 self._remove(node)
             node = node.parent
 
+    def invalidate_checkpoint(self, node, is_resumable):
+        """Drop a lost hybrid checkpoint's preference, preserving useful state."""
+        while node.parent is not None:
+            if any(child.cache_protected for child in node.children.values()):
+                return
+            if node.cache_protected:
+                self._remove(node)
+            node = node.parent
+            if is_resumable(node):
+                return
+
     def split(self, node, parent):
         """Transfer a compressed radix edge's lease without changing its size."""
         entry = self._leases.get(node)

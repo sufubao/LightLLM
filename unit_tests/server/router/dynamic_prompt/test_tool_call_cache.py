@@ -133,6 +133,38 @@ def test_oversized_hybrid_prefix_uses_existing_resumable_checkpoint():
     assert tree.tool_call_retention.protected_tokens == 4
 
 
+def test_hybrid_does_not_prefer_a_prefix_without_recurrent_state():
+    buffers = SimpleNamespace(free_state_cache=lambda *args, **kwargs: None)
+    tree = HybridAttPagedRadixCache(20, 0, 2, 1000, SimpleNamespace(big_page_buffers=buffers), buffers)
+    tree.enable_tool_call_retention(10, 0.25)
+    _, tail = tree.insert(torch.arange(12), block_hashs=[11, 22, 33, 44, 55, 66], block_state_idxs=[None] * 5 + [10])
+    tree.tool_call_retention.protect(tail)
+    assert tree.tool_call_retention.protected_tokens == 0
+
+
+def test_evicted_recurrent_state_falls_back_to_a_valid_older_checkpoint():
+    freed = []
+    buffers = SimpleNamespace(
+        free_state_cache=lambda indexes=None, free_indexes=None: freed.extend(indexes or free_indexes),
+        get_free_cache_num=lambda: 0,
+    )
+    tree = HybridAttPagedRadixCache(20, 0, 2, 1000, SimpleNamespace(big_page_buffers=buffers), buffers)
+    tree.enable_tool_call_retention(10, 0.5)
+    _, older = tree.insert(torch.arange(2), block_hashs=[11], block_state_idxs=[10])
+    _, newer = tree.insert(torch.arange(4), block_hashs=[11, 22], block_state_idxs=[None, 20])
+    tree.tool_call_retention.protect(newer)
+    matched, _, _ = tree.match_prefix(torch.arange(2), block_hashs=[11], update_refs=True)
+    tree.dec_node_ref_counter(matched)
+    tree.free_one_small_page_buffer()
+    assert freed == [20]
+    assert not newer.cache_protected
+    assert older.cache_protected
+    assert tree.tool_call_retention.protected_tokens == 2
+    tree.free_one_small_page_buffer()
+    assert tree.tool_call_retention.protected_tokens == 0
+    tree._evict_tree_set._check()
+
+
 @pytest.mark.parametrize("split_by_insert", [False, True])
 def test_split_preserves_lease_deadline_and_token_accounting(split_by_insert):
     tree = cache()
@@ -309,6 +341,32 @@ def test_scheduling_clock_is_packed_once_and_shared_across_ranks(monkeypatch, re
     assert transmitted[0].numel() == 1
 
 
+@pytest.mark.parametrize("all_ready", [False, True])
+def test_multinode_expiry_uses_rank_zero_clock_and_masks_readiness(monkeypatch, all_ready):
+    from lightllm.server.router.model_infer.mode_backend import base_backend
+
+    backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
+    backend.enable_tool_call_retention = True
+    backend.shm_reqs_io_buffer = SimpleNamespace(is_ready=lambda: all_ready)
+    backend.multinode_tp_gather_item_tensor = torch.zeros(1, dtype=torch.int64)
+    backend.multinode_tp_all_gather_tensor = torch.zeros(2, dtype=torch.int64)
+    backend.multinode_tp_nccl_group = None
+    backend.is_pd_mode = False
+    clocks = []
+    initialized = []
+    backend.radix_cache = SimpleNamespace(tool_call_retention=SimpleNamespace(advance_clock=clocks.append))
+    backend._read_reqs_buffer_and_init_reqs = lambda: initialized.append(True)
+
+    def gather(output, value, **kwargs):
+        # Rank zero is ready, but the peer may not be. Their local clocks differ.
+        output.copy_(torch.tensor([(123456789 << 1) | 1, (987654321 << 1) | int(all_ready)]))
+
+    monkeypatch.setattr(base_backend, "all_gather_into_tensor", gather)
+    backend._try_read_new_reqs_multinode_tp()
+    assert clocks == [123.456789]
+    assert initialized == ([True] if all_ready else [])
+
+
 @pytest.mark.parametrize(
     "status, enabled, generated, expected",
     [
@@ -332,6 +390,7 @@ def test_only_normal_stop_with_generated_tool_signal_receives_lease(status, enab
     marker.initialize([[8, 9]])
     req = SimpleNamespace(
         finish_status=FinishStatus(status),
+        finish_output_len=len(generated),
         sampling_param=SimpleNamespace(
             shm_param=SimpleNamespace(tool_call_cache_markers=marker), disable_prompt_cache=not enabled
         ),
@@ -341,6 +400,28 @@ def test_only_normal_stop_with_generated_tool_signal_receives_lease(status, enab
     )
     InferenceContext(radix_cache=tree)._retain_tool_call_prefix(req, node)
     assert node.cache_protected is expected
+
+
+def test_post_eos_speculative_tool_marker_does_not_receive_a_preference():
+    from lightllm.server.core.objs import FinishStatus
+    from lightllm.server.core.objs.sampling_params import ToolCallCacheMarkers
+    from lightllm.server.router.model_infer.infer_batch import InferenceContext
+
+    tree = cache()
+    node = insert(tree, [1, 2, 3])
+    marker = ToolCallCacheMarkers()
+    marker.initialize([[8, 9]])
+    req = SimpleNamespace(
+        finish_status=FinishStatus(FinishStatus.FINISHED_STOP),
+        finish_output_len=1,
+        sampling_param=SimpleNamespace(
+            shm_param=SimpleNamespace(tool_call_cache_markers=marker), disable_prompt_cache=False
+        ),
+        shm_req=SimpleNamespace(input_len=2),
+        get_input_token_ids=lambda: np.array([1, 2, 7, 8, 9]),
+    )
+    InferenceContext(radix_cache=tree)._retain_tool_call_prefix(req, node)
+    assert not node.cache_protected
 
 
 @pytest.mark.parametrize("seed", range(8))

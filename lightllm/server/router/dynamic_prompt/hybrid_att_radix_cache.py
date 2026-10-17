@@ -162,7 +162,19 @@ class HybridAttPagedRadixCache:
             int(self.total_token_num * fraction),
             self._discard_node,
             self._add_node,
+            self._fit_retention_prefix,
         )
+
+    @staticmethod
+    def _is_resumable(node):
+        return node.is_big_page_node() or node.small_page_buffer_idx is not None
+
+    def _fit_retention_prefix(self, node, token_budget):
+        while node.parent is not None:
+            if node.node_prefix_total_len <= token_budget and self._is_resumable(node):
+                return node
+            node = node.parent
+        return None
 
     def _discard_node(self, node: HybridAttPagedTreeNode):
         if node.is_leaf():
@@ -616,6 +628,8 @@ class HybridAttPagedRadixCache:
         assert node.small_page_buffer_idx is not None
         self.small_page_buffers.free_state_cache(free_indexes=[node.small_page_buffer_idx])
         node.small_page_buffer_idx = None
+        if self.tool_call_retention is not None and node.cache_protected:
+            self.tool_call_retention.invalidate_checkpoint(node, self._is_resumable)
 
         self._add_node(node)
         return

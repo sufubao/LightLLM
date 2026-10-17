@@ -171,7 +171,9 @@ class InferenceContext:
         if req.finish_status.is_stopped() and not req.sampling_param.disable_prompt_cache:
             markers = req.sampling_param.shm_param.tool_call_cache_markers.to_list()
             if markers:
-                generated = req.get_input_token_ids()[req.shm_req.input_len :]
+                generated = req.get_input_token_ids()[
+                    req.shm_req.input_len : req.shm_req.input_len + req.finish_output_len
+                ]
                 if contains_tool_call(generated, markers):
                     retention.protect(cache_node)
                     return
@@ -646,6 +648,7 @@ class InferReq:
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
+        self.finish_output_len = 0
 
         # 申请 hybrid attention 模型使用的缓存资源
         if g_infer_context.is_hybrid_att_model:
@@ -1040,6 +1043,11 @@ class InferReqUpdatePack:
 
         if extra_post_req_handle_func is not None:
             extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
+
+        if finish_status.is_finished():
+            # Later MTP packs can still advance cur_output_len / KV after EOS.
+            # Cache hints must only inspect the accepted response, like the API.
+            req_obj.finish_output_len = self.output_len
 
         if is_master_in_dp:
             # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息

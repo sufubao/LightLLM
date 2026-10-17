@@ -80,6 +80,39 @@
       "phase": "v10 orchestration before any formal v10 replay",
       "kind": "quarantine gate also rejected excluded diagnostic as a cache-seeding prerequisite",
       "resolution": "Retain the failed controller source/output. Read only the diagnostic complete status and require its invalidity marker for cache extraction; retain quarantine rejection for formal data. Resumed controller seeded10 complete entries from20 recorded sources, verified both service cache mounts and started full unchanged matrix. No formal v10 trial had started."
+    },
+    {
+      "phase": "hybrid primary v10 control startup before heldout",
+      "kind": "intermittent CUDA invalid argument during CPU pinned big-page SSM allocation",
+      "failed_uninstrumented_startups": 2,
+      "failed_launch_blocking_startups": 1,
+      "actual_allocation_shape": [
+        18,
+        48,
+        24,
+        128,
+        128
+      ],
+      "actual_dtype": "float32",
+      "actual_allocation_bytes": 1358954496,
+      "source_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "gpu_group": [
+        4,
+        5
+      ],
+      "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+      "completed_validation_pairs_preserved": 18,
+      "heldout_pairs_started_before_failures": 0,
+      "independent_fp32_probe_bytes": 4831838208,
+      "independent_probe_devices_passed": 2,
+      "instrumented_actual_allocation_ranks_passed": 2,
+      "resolution": "Preserve failed startup logs and experiment records privately. Synchronous CUDA reproduced the same failing allocation; subsequent diagnostic-only allocation tracing succeeded at the same shape on both ranks. A larger independent FP32 probe also succeeded, so no universal allocation-size limit or confirmed root cause is claimed. Stop only owned failed/diagnostic containers and retry the original uninstrumented configuration; require health and warmup before any heldout trial. Diagnostic services never contribute performance data. No cache capacity, state precision, source, seed, scenario, frozen parameter or GPU assignment changed."
+    },
+    {
+      "phase": "hybrid primary v10 continuation orchestration before heldout",
+      "kind": "readiness probe raced Docker container creation",
+      "measured_trials_started": 0,
+      "resolution": "Preserve failed invocation. Readiness now permits the owned live launcher to create its container and fails promptly on actual model-worker startup traceback. This changes orchestration only; all formal comparison gates remain."
     }
   ]
 }

@@ -1,0 +1,22 @@
+{
+  "scope": "Setup/protocol failures are retained in experiment stores and excluded from performance estimates. No request contents or raw logs are published.",
+  "runs": [
+    {
+      "phase": "warmup-v2",
+      "kind": "client prompt construction",
+      "resolution": "Put reference padding in a separate user message; preserve the failed warmup."
+    },
+    {
+      "phase": "hybrid-v4-smoke",
+      "kind": "parser configuration",
+      "resolution": "Use qwen3_coder for Qwen3.5 XML tool calls; subsequent 27B TP2 smokes passed."
+    },
+    {
+      "phase": "validation-outputs-v5",
+      "kind": "ordinary finish-state classification",
+      "requests_in_failed_control_trial": 16,
+      "length_terminations": 1,
+      "resolution": "Classify both stop and length as ordinary. Preserve the failed phase; repeat the complete prototype under v6 and require exact paired outcomes and generated-token counts."
+    }
+  ]
+}

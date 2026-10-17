@@ -9,6 +9,7 @@ reported. Independent controls can override the original tool-content labels.
 import argparse
 import asyncio
 import copy
+import collections
 import hashlib
 import json
 from pathlib import Path
@@ -110,6 +111,10 @@ async def run(args):
             messages = [system]
             began = time.perf_counter()
             waited = 0.0
+            planned_abandon = (
+                int(hashlib.sha256(f"{args.seed}:{name}".encode()).hexdigest(), 16) / (1 << 256) < args.abandon_fraction
+            )
+            previous_was_tool = False
             for turn, row in enumerate(source):
                 target = max(256, min(args.max_prompt_tokens, round(row["input_tokens"] * args.context_scale)))
                 compaction = turn > 0 and row["input_tokens"] < source[turn - 1]["input_tokens"] - 256
@@ -123,15 +128,20 @@ async def run(args):
                         else source[turn - 1].get("next_first_chunk_gap_s", 0)
                     )
                     scaled_wait = original_wait * args.wait_scale
-                    wait = min(args.max_wait, scaled_wait)
+                    injected_wait = max(0, args.min_tool_wait - scaled_wait) if previous_was_tool else 0
+                    wait = min(args.max_wait, scaled_wait + injected_wait)
                     await asyncio.sleep(wait)
                     waited += wait
                 else:
-                    original_wait = scaled_wait = wait = 0
+                    original_wait = scaled_wait = injected_wait = wait = 0
                 want_tool = bool(row["tool_names"])
                 if args.mix == "ordinary":
                     want_tool = False
                 elif args.mix == "all-tools":
+                    want_tool = True
+                elif args.mix == "mixed25":
+                    want_tool = hashlib.sha256(f"{args.seed}:{name}:{row['request']}".encode()).digest()[0] < 64
+                if planned_abandon and turn == 0:
                     want_tool = True
                 instruction = (
                     "Call echo with text hello. Use the tool now."
@@ -187,8 +197,9 @@ async def run(args):
                     "usage": usage,
                     "source_wait_seconds": original_wait,
                     "scaled_wait_seconds": scaled_wait,
+                    "injected_wait_seconds": injected_wait,
                     "wait_seconds": wait,
-                    "wait_capped": wait < scaled_wait,
+                    "wait_capped": wait < scaled_wait + injected_wait,
                     "compaction": compaction,
                     "output_signature": {"content": message.get("content"), "calls": [c["function"] for c in calls]},
                 }
@@ -206,23 +217,37 @@ async def run(args):
                 messages.append(assistant)
                 for call in calls:
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": "hello"})
-            sessions.append({"session": name, "seconds": time.perf_counter() - began, "wait_seconds": waited})
+                previous_was_tool = bool(calls)
+                if planned_abandon and turn == 0:
+                    break
+            sessions.append(
+                {
+                    "session": name,
+                    "seconds": time.perf_counter() - began,
+                    "wait_seconds": waited,
+                    "abandoned": planned_abandon,
+                    "completed_turns": turn + 1,
+                }
+            )
 
         started = time.perf_counter()
         await asyncio.gather(*(one(*session) for session in selected))
         duration = time.perf_counter() - started
     prompt_tokens = sum(r["usage"]["prompt_tokens"] for r in output_rows)
     cached_tokens = sum(r["usage"]["prompt_tokens_details"]["cached_tokens"] for r in output_rows)
+    completed = [s for s in sessions if not s["abandoned"]]
     result = {
         "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "rounds_sha256": hashlib.sha256(args.rounds.read_bytes()).hexdigest(),
         "wall_seconds": duration,
-        "completed_sessions": len(sessions),
-        "sessions_per_second": len(sessions) / duration,
+        "started_sessions": len(sessions),
+        "completed_sessions": len(completed),
+        "abandoned_sessions": len(sessions) - len(completed),
+        "sessions_per_second": len(completed) / duration,
         "session_seconds": {
-            "mean": statistics.mean(s["seconds"] for s in sessions),
-            "p50": percentile([s["seconds"] for s in sessions], 0.5),
-            "p95": percentile([s["seconds"] for s in sessions], 0.95),
+            "mean": statistics.mean(s["seconds"] for s in completed) if completed else None,
+            "p50": percentile([s["seconds"] for s in completed], 0.5),
+            "p95": percentile([s["seconds"] for s in completed], 0.95),
         },
         "requests": len(output_rows),
         "prompt_tokens": prompt_tokens,
@@ -236,6 +261,7 @@ async def run(args):
         },
         "wait_capped_requests": sum(r["wait_capped"] for r in output_rows),
         "unexpected_end_states": failures,
+        "finish_reason_counts": dict(collections.Counter(r["finish_reason"] for r in output_rows)),
         "sessions": sessions,
         "rows": output_rows,
     }
@@ -260,7 +286,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--namespace", default="run", help="Unique per paired trial, identical for both policies")
     parser.add_argument("--split", choices=["validation", "test", "all"], default="validation")
-    parser.add_argument("--mix", choices=["trace", "ordinary", "all-tools"], default="trace")
+    parser.add_argument("--mix", choices=["trace", "ordinary", "all-tools", "mixed25"], default="trace")
+    parser.add_argument("--abandon-fraction", type=float, default=0)
+    parser.add_argument("--min-tool-wait", type=float, default=0)
     parser.add_argument("--context-scale", type=float, default=0.05)
     parser.add_argument("--max-prompt-tokens", type=int, default=12000)
     parser.add_argument("--wait-scale", type=float, default=0.1)

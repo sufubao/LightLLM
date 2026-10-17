@@ -19,6 +19,17 @@ This directory distinguishes three kinds of evidence:
   feed forward into subsequent requests. Original context sizes and waits are
   scaled explicitly; wait caps and compactions are counted. Prompt-token hashes
   permit checking that paired runs received identical token sequences.
+* `run_paired.py`: sequential paired trials with alternating order, archived
+  service manifests, an immutable client snapshot, strict prompt/output checks,
+  and server TTFT/cache metrics correlated by request ID. Comparison stops on
+  errors or mismatches; earlier and failed results remain available.
+
+Replay negative controls include `--mix ordinary`, `--mix mixed25`,
+`--abandon-fraction 0.5` (selected sessions stop after their first tool call),
+and `--min-tool-wait 4 --max-wait 6` (tool waits longer than a short retention
+window). Abandoned chains are reported separately and excluded from completed
+session throughput and latency. The original trace labels and wait scaling are
+still recorded; these overrides are controlled workloads, not original traffic.
 
 All benchmark/evaluation commands must be wrapped in `exp -m "purpose" ...`.
 Save the exact service source revision/checksum, image digest, command line,

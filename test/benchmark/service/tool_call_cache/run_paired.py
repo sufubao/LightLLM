@@ -39,6 +39,9 @@ def main():
     parser.add_argument("--model-dir", default="/models/Qwen3-4B")
     parser.add_argument("--rounds", default="cachewise-analysis-v2.rounds.jsonl")
     parser.add_argument("--exp", default="/mtc/sufubao/shared_home/sufubao/.local/bin/exp")
+    parser.add_argument(
+        "--allow-different-source", action="store_true", help="Explicitly permit the original-base audit"
+    )
     args = parser.parse_args()
     destination = args.root / "results" / args.phase
     destination.mkdir(parents=True, exist_ok=False)
@@ -51,7 +54,26 @@ def main():
             raise RuntimeError(f"service {name} is not running")
         services[label] = data
         shutil.copy2(source, destination / f"{label}-service.json")
+    left, right = services["candidate"], services["control"]
+    for key in ["image_id", "model_config_sha256"]:
+        if left[key] != right[key]:
+            raise ValueError(f"services differ in {key}")
+    for key in [
+        "model_dir",
+        "model_name",
+        "tp",
+        "cache_tokens",
+        "max_req_tokens",
+        "batch_tokens",
+        "max_requests",
+        "disable_cudagraph",
+    ]:
+        if left["configuration"][key] != right["configuration"][key]:
+            raise ValueError(f"services differ in {key}")
+    if left["source_revision"] != right["source_revision"] and not args.allow_different_source:
+        raise ValueError("policy comparison requires identical source; use --allow-different-source for the base audit")
     harness_sha = hashlib.sha256((args.root / "replay.py").read_bytes()).hexdigest()
+    shutil.copy2(args.root / "replay.py", destination / "replay.py")
     (destination / "protocol.json").write_text(
         json.dumps(
             {
@@ -92,7 +114,7 @@ def main():
                     "-v",
                     "/mtc/models:/models:ro",
                     service["image_id"],
-                    "/bench/replay.py",
+                    "/bench/" + str((destination / "replay.py").relative_to(args.root)),
                     "--url",
                     f"http://127.0.0.1:{service['configuration']['port']}",
                     "--rounds",

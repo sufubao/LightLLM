@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--fraction", type=float, default=0.5)
     parser.add_argument("--disable-cudagraph", action="store_true")
     parser.add_argument("--original-base", action="store_true", help="Source predates retention flags; omit them")
+    parser.add_argument("--kernel-cache", type=Path, help="Reuse compiled kernels across service restarts")
     args = parser.parse_args()
     if "EXP_RUN_DIR" not in os.environ or len(args.revision) != 40:
         parser.error("run under exp and supply a full source revision")
@@ -99,6 +100,18 @@ def main():
             parser.error("original base cannot enable retention")
         offset = command.index("--tool_call_cache_retention_seconds")
         del command[offset : offset + 4]
+    if args.kernel_cache is not None:
+        (args.kernel_cache / "flashinfer").mkdir(parents=True, exist_ok=True)
+        (args.kernel_cache / "triton").mkdir(parents=True, exist_ok=True)
+        offset = command.index(args.image)
+        command[offset:offset] = [
+            "-v",
+            f"{args.kernel_cache}:/kernel-cache",
+            "-v",
+            f"{args.kernel_cache / 'flashinfer'}:/root/.cache/flashinfer",
+            "-e",
+            "TRITON_CACHE_DIR=/kernel-cache/triton",
+        ]
     image = json.loads(subprocess.check_output(["docker", "image", "inspect", args.image], text=True))[0]
     hardware = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=index,name,uuid,memory.total,driver_version", "--format=csv"], text=True

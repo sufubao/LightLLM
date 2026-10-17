@@ -62,7 +62,7 @@ def main():
             axis.set_title(title, fontsize=10)
             axis.grid(axis="x", alpha=0.2)
             axis.tick_params(axis="x", labelsize=8, rotation=25)
-            axis.set_xlabel("Larger values favor retention", fontsize=9)
+            axis.set_xlabel("Larger values favor candidate", fontsize=9)
         axes[0].set_yticks(range(len(groups)), labels=labels, fontsize=9)
         axes[0].invert_yaxis()
         fig.suptitle(f"{args.title_prefix}\n{Path(model).name}", fontsize=12)

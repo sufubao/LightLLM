@@ -48,6 +48,10 @@ and `--min-tool-wait 4 --max-wait 6` (tool waits longer than a short retention
 window). Abandoned chains are reported separately and excluded from completed
 session throughput and latency. The original trace labels and wait scaling are
 still recorded; these overrides are controlled workloads, not original traffic.
+Ordinary requests may finish with `stop` or `length`; both receive ordinary
+cache treatment. Their actual finish reasons are counted separately, and paired
+trials must match both the finish reason and generated token count. An unexpected
+tool call in an ordinary workload remains an error.
 
 All benchmark/evaluation commands must be wrapped in `exp -m "purpose" ...`.
 Save the exact service source revision/checksum, image digest, command line,

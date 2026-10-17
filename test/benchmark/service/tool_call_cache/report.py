@@ -45,7 +45,10 @@ def summarize(phases):
             for policy in ["candidate", "control"]:
                 path = phase / f"{trial['case']}-r{trial['repeat']}-{policy}.json"
                 rows = json.loads(path.read_text())["rows"]
-                if any(row["finish_reason"] != row["expected_finish_reason"] for row in rows):
+                if any(
+                    row["finish_reason"] not in row.get("allowed_finish_reasons", [row["expected_finish_reason"]])
+                    for row in rows
+                ):
                     raise ValueError(f"unexpected raw finish state: {path}")
                 if any(row["usage"]["prompt_tokens"] != row["client_prompt_tokens"] for row in rows):
                     raise ValueError(f"raw prompt length mismatch: {path}")

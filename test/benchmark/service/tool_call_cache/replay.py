@@ -191,6 +191,7 @@ async def run(args):
                 message = choice["message"]
                 calls = message.get("tool_calls") or []
                 expected = "tool_calls" if want_tool else "stop"
+                allowed = ["tool_calls"] if want_tool else ["stop", "length"]
                 usage = result["usage"]
                 if usage["prompt_tokens"] != client_tokens:
                     raise RuntimeError(
@@ -210,6 +211,7 @@ async def run(args):
                     "seconds": elapsed,
                     "finish_reason": choice["finish_reason"],
                     "expected_finish_reason": expected,
+                    "allowed_finish_reasons": allowed,
                     "usage": usage,
                     "source_wait_seconds": original_wait,
                     "scaled_wait_seconds": scaled_wait,
@@ -223,8 +225,8 @@ async def run(args):
                 print(
                     json.dumps({k: record[k] for k in ["request_id", "seconds", "finish_reason", "usage"]}), flush=True
                 )
-                if choice["finish_reason"] != expected:
-                    failures.append({"request_id": request_id, "expected": expected, "actual": choice["finish_reason"]})
+                if choice["finish_reason"] not in allowed:
+                    failures.append({"request_id": request_id, "expected": allowed, "actual": choice["finish_reason"]})
                 # Keep the actual response. IDs are opaque; the template ignores
                 # them, while the corresponding tool result retains the ID.
                 assistant = {"role": "assistant", "content": message.get("content") or ""}

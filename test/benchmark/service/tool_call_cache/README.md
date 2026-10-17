@@ -63,6 +63,8 @@ Raw downloaded traces and generated results belong outside the source tree.
    tool-heavy traffic, expired/abandoned continuations and oversized prefixes.
    Check TP=1 and TP>1, ordinary and hybrid attention. Record errors and unexpected
    finish states; failed runs remain visible and are not silently filtered.
+   The provided replay uses closed-loop agent chains: its high-concurrency case
+   tests memory pressure and queueing, not open-loop offered-load overload.
 5. Report cache-hit and newly prefilled tokens, client request latency, session
    completion time and throughput. Correlate server TTFT logs by `X-Request-Id`.
    Check prompt hashes, end states and output signatures between policies before

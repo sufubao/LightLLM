@@ -51,6 +51,12 @@ This directory provides complementary kinds of evidence:
   the result configuration; absolute latency includes its instrumentation cost.
 * `model_provenance.py`: hashes the actual weights and tokenizer files in a
   separate untimed interval, archiving the script and results under `exp`.
+* `plot_results.py`: renders every aggregate group from a numerical public
+  report as standalone SVG/PNG figures, retaining seed-clustered descriptive
+  intervals. It does not pool groups or recompute estimates. Uncached input
+  means API prompt tokens minus cached tokens; it does not count recomputation
+  caused by inference pauses. Use an explicit title to distinguish supplemental
+  prior-source data from final-source comparisons.
 
 Replay negative controls include `--mix ordinary`, `--mix mixed25`,
 `--abandon-fraction 0.5` (selected sessions stop after their first tool call),

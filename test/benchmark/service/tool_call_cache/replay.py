@@ -230,6 +230,7 @@ async def run(args):
                 }
             )
 
+        started_unix = time.time()
         started = time.perf_counter()
         await asyncio.gather(*(one(*session) for session in selected))
         duration = time.perf_counter() - started
@@ -239,6 +240,8 @@ async def run(args):
     result = {
         "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "rounds_sha256": hashlib.sha256(args.rounds.read_bytes()).hexdigest(),
+        "started_unix": started_unix,
+        "finished_unix": time.time(),
         "wall_seconds": duration,
         "started_sessions": len(sessions),
         "completed_sessions": len(completed),

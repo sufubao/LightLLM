@@ -32,6 +32,12 @@ def summarize(phases):
         trials = json.loads((phase / "summary.json").read_text())
         if progress.get("status") != "complete" or len(trials) != len(protocol["cases"]) * protocol["repeats"]:
             raise ValueError(f"incomplete phase cannot enter final report: {phase}")
+        if protocol.get("gpu_monitor_interval_seconds"):
+            observations = [json.loads(line) for line in (phase / "gpu-observations.jsonl").read_text().splitlines()]
+            if not observations or any(
+                row.get("monitor_error") or row.get("foreign_on_trial_gpus") for row in observations
+            ):
+                raise ValueError(f"GPU isolation not verified: {phase}")
         candidate = json.loads((phase / "candidate-service.json").read_text())
         control = json.loads((phase / "control-service.json").read_text())
         for trial in trials:

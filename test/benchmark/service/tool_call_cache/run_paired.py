@@ -9,6 +9,61 @@ import shutil
 import statistics
 import subprocess
 import time
+import threading
+
+
+def monitor_gpus(services, destination):
+    """Retain host load observations and reject shared experiment GPUs."""
+    gpu_ids = {gpu for service in services.values() for gpu in service["configuration"]["gpu"].split(",")}
+    uuid_lines = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"], text=True
+    ).splitlines()
+    uuids = {uuid.strip() for line in uuid_lines for index, uuid in [line.split(",")] if index.strip() in gpu_ids}
+    allowed_pids = set()
+    for service in services.values():
+        rows = subprocess.check_output(
+            ["docker", "top", service["configuration"]["name"], "-eo", "pid"], text=True
+        ).splitlines()
+        allowed_pids.update(int(row.strip()) for row in rows[1:] if row.strip())
+    errors = []
+    stop = threading.Event()
+
+    def poll():
+        with (destination / "gpu-observations.jsonl").open("x") as output:
+            while not stop.is_set():
+                try:
+                    apps = subprocess.check_output(
+                        ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader"],
+                        text=True,
+                        timeout=10,
+                    ).splitlines()
+                    foreign = []
+                    for row in apps:
+                        uuid, pid, _ = [part.strip() for part in row.split(",")]
+                        if uuid in uuids and int(pid) not in allowed_pids:
+                            foreign.append({"gpu_uuid": uuid, "pid": int(pid)})
+                    load = subprocess.check_output(
+                        [
+                            "nvidia-smi",
+                            "--query-gpu=index,utilization.gpu,power.draw,memory.used",
+                            "--format=csv,noheader",
+                        ],
+                        text=True,
+                        timeout=10,
+                    ).splitlines()
+                    record = {"time_unix": time.time(), "apps": apps, "load": load, "foreign_on_trial_gpus": foreign}
+                    if foreign:
+                        errors.append(record)
+                except Exception as exc:
+                    record = {"time_unix": time.time(), "monitor_error": str(exc)}
+                    errors.append(record)
+                output.write(json.dumps(record) + "\n")
+                output.flush()
+                stop.wait(2)
+
+    worker = threading.Thread(target=poll, daemon=True)
+    worker.start()
+    return errors, stop, worker
 
 
 def manifest(name):
@@ -98,6 +153,7 @@ def main():
                 "repeats": args.repeats,
                 "harness_sha256": harness_sha,
                 "paired_runner_sha256": hashlib.sha256((destination / "run_paired.py").read_bytes()).hexdigest(),
+                "gpu_monitor_interval_seconds": 2,
                 "cache_isolation": "none" if args.no_reset else "expire preferences, then independent capacity flood",
                 "reset_sha256": (
                     None if args.no_reset else hashlib.sha256((destination / "reset_cache.py").read_bytes()).hexdigest()
@@ -109,6 +165,7 @@ def main():
         + "\n"
     )
     summaries = []
+    gpu_errors, gpu_stop, gpu_worker = monitor_gpus(services, destination)
     last_done = {label: time.monotonic() for label in services}
     for case in cases:
         for repeat in range(args.repeats):
@@ -116,6 +173,8 @@ def main():
             outputs = {}
             order = ["control", "candidate"] if repeat % 2 == 0 else ["candidate", "control"]
             for label in order:
+                if gpu_errors:
+                    raise RuntimeError(f"GPU isolation could not be verified; retain observations in {destination}")
                 service = services[label]
                 output = destination / f"{case['name']}-r{repeat}-{label}.json"
                 if not args.no_reset:
@@ -197,6 +256,10 @@ def main():
                 with output.with_suffix(".log").open("w") as log:
                     completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
                 last_done[label] = time.monotonic()
+                if gpu_errors:
+                    raise RuntimeError(
+                        f"GPU interference or monitoring failure; retain trial and observations: {output}"
+                    )
                 if completed.returncode:
                     raise RuntimeError(f"trial failed, preserve logs: {output.with_suffix('.log')}")
                 outputs[label] = json.loads(output.read_text())
@@ -252,6 +315,10 @@ def main():
                 "mean": statistics.mean(values),
                 "p95": sorted(values)[int((len(values) - 1) * 0.95)],
             }
+    gpu_stop.set()
+    gpu_worker.join(timeout=25)
+    if gpu_worker.is_alive() or gpu_errors:
+        raise RuntimeError(f"GPU isolation could not be verified; retain observations in {destination}")
     (destination / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
     (destination / "progress.json").write_text(
         json.dumps({"status": "complete", "paired_trials": len(summaries)}) + "\n"

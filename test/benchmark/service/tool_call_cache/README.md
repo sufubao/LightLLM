@@ -22,7 +22,9 @@ This directory provides complementary kinds of evidence:
 * `run_paired.py`: sequential paired trials with alternating order, archived
   service manifests, an immutable client snapshot, strict prompt/output checks,
   and server TTFT/cache metrics correlated by request ID. Comparison stops on
-  errors or mismatches; earlier and failed results remain available.
+  errors or mismatches; earlier and failed results remain available. Continuous
+  GPU process/load observations reject foreign processes on either experiment
+  GPU while retaining visibility into activity elsewhere on the shared host.
 * `reset_cache.py`: untimed, exp-recorded isolation before each trial. Wait for
   prior preferences to expire, then fill more than KV capacity with independent
   ordinary completions. This removes prior trial contexts without enabling RL

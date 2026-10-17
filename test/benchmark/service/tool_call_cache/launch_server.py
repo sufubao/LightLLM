@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--disable-cudagraph", action="store_true")
     parser.add_argument("--original-base", action="store_true", help="Source predates retention flags; omit them")
     parser.add_argument("--kernel-cache", type=Path, help="Reuse compiled kernels across service restarts")
+    parser.add_argument("--tilelang-cache", type=Path, help="Reuse TileLang kernels across service restarts")
     parser.add_argument("--linear-att-page-block-num", type=int)
     parser.add_argument("--prefill-queue-strategy", choices=["auto", "default", "promote_shortest", "hrrn"])
     parser.add_argument("--output-constraint-mode", choices=["none", "xgrammar"])
@@ -158,6 +159,10 @@ def main():
             "-e",
             "TRITON_CACHE_DIR=/kernel-cache/triton",
         ]
+    if args.tilelang_cache is not None:
+        args.tilelang_cache.mkdir(parents=True, exist_ok=True)
+        offset = command.index(args.image)
+        command[offset:offset] = ["-v", f"{args.tilelang_cache}:/root/.tilelang"]
     image = json.loads(subprocess.check_output(["docker", "image", "inspect", args.image], text=True))[0]
     hardware = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=index,name,uuid,memory.total,driver_version", "--format=csv"], text=True

@@ -140,6 +140,7 @@ def main():
         "--allow-different-source", action="store_true", help="Explicitly permit the original-base audit"
     )
     parser.add_argument("--no-reset", action="store_true", help="Warmup/exploration only: retain prior cache contents")
+    parser.add_argument("--reject-timed-tilelang-compilation", action="store_true")
     args = parser.parse_args()
     destination = args.root / "results" / args.phase
     destination.mkdir(parents=True, exist_ok=False)
@@ -198,6 +199,12 @@ def main():
                 "harness_sha256": harness_sha,
                 "paired_runner_sha256": hashlib.sha256((destination / "run_paired.py").read_bytes()).hexdigest(),
                 "gpu_monitor_interval_seconds": 2,
+                "reject_timed_tilelang_compilation": args.reject_timed_tilelang_compilation,
+                "compilation_guard_sha256": (
+                    hashlib.sha256((args.root / "compile_guard.py").read_bytes()).hexdigest()
+                    if args.reject_timed_tilelang_compilation
+                    else None
+                ),
                 "thermal_monitoring": "active flags and cumulative counter deltas on experiment GPUs",
                 "cache_isolation": "none" if args.no_reset else "expire preferences, then independent capacity flood",
                 "reset_sha256": (
@@ -210,6 +217,11 @@ def main():
         + "\n"
     )
     summaries = []
+    compilation_audits = []
+    if args.reject_timed_tilelang_compilation:
+        from compile_guard import audit_trial, contaminated
+
+        shutil.copy2(args.root / "compile_guard.py", destination / "compile_guard.py")
     gpu_errors, gpu_stop, gpu_worker = monitor_gpus(services, destination)
     last_done = {label: time.monotonic() for label in services}
     for case in cases:
@@ -324,6 +336,26 @@ def main():
                 summary[label] = {k: v for k, v in result.items() if k not in ["rows", "sessions"]}
             summaries.append(summary)
             (destination / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
+            if args.reject_timed_tilelang_compilation:
+                logs = {
+                    label: subprocess.check_output(
+                        ["docker", "logs", services[label]["configuration"]["name"]],
+                        text=True,
+                        stderr=subprocess.STDOUT,
+                    )
+                    for label in ("candidate", "control")
+                }
+                audit = audit_trial(summary, logs)
+                compilation_audits.append(audit)
+                (destination / "jit-audit.json").write_text(
+                    json.dumps({"status": "in_progress", "trials": compilation_audits}, indent=2) + "\n"
+                )
+                if contaminated(audit):
+                    (destination / "invalidity.json").write_text(
+                        json.dumps({"reason": "logged TileLang compilation overlaps measured replay", "trial": audit})
+                        + "\n"
+                    )
+                    raise RuntimeError("Timed compilation detected; preserve phase and warm kernels before retrying")
             print(
                 json.dumps(
                     {
@@ -365,6 +397,10 @@ def main():
     if gpu_worker.is_alive() or gpu_errors:
         raise RuntimeError(f"GPU isolation could not be verified; retain observations in {destination}")
     (destination / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
+    if args.reject_timed_tilelang_compilation:
+        (destination / "jit-audit.json").write_text(
+            json.dumps({"status": "complete", "trials": compilation_audits}, indent=2) + "\n"
+        )
     (destination / "progress.json").write_text(
         json.dumps({"status": "complete", "paired_trials": len(summaries)}) + "\n"
     )

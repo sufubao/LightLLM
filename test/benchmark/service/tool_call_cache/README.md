@@ -92,6 +92,16 @@ Raw downloaded traces and generated results belong outside the source tree.
    CUDA graph settings, load, client code and warmup identical. Exclude compilation
    and warmup from measured results. Do not run timed trials while another server
    is starting or warming up on the host.
+   For hybrid FlashQLA, persist TileLang kernels with `--tilelang-cache` on
+   `launch_server.py` and use `--reject-timed-tilelang-compilation` on
+   `run_paired.py`. Representative warmup alone can miss kernel variants selected
+   by batch occupancy or context parallelism. The guard checks both policies'
+   actual UTC replay intervals against logged compiler begin/end events and
+   rejects the phase if they overlap. `compile_guard.py` independently rechecks
+   archived logs, including wrapper intervals for controlled continuations.
+   Its guarantee covers logged TileLang compilation, not every possible runtime
+   compiler. Keep rejected attempts visible and warm missing variants outside
+   measurement before repeating both policies.
 3. Select sessions/windows with a fixed seed. Tune settings on the validation
    partition only; report held-out test partitions. Alternate trial order and
    exchange policy/GPU assignments to control hardware and temporal differences.

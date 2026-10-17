@@ -1,4 +1,5 @@
 import importlib.util
+import copy
 import json
 from pathlib import Path
 
@@ -9,6 +10,38 @@ path = Path(__file__).resolve().parents[4] / "test/benchmark/service/tool_call_c
 spec = importlib.util.spec_from_file_location("tool_call_report", path)
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
+
+
+@pytest.mark.parametrize("failure", ["missing", "incomplete", "policy", "clock", "pair", "compilation"])
+def test_report_rejects_unproven_compilation_isolation(tmp_path, failure):
+    trial = {
+        "case": "trace",
+        "repeat": 0,
+        "candidate": {"started_unix": 10, "finished_unix": 20},
+        "control": {"started_unix": 30, "finished_unix": 40},
+    }
+    policies = {label: {**trial[label], "overlapping_compilations": []} for label in ("candidate", "control")}
+    audit = {"status": "complete", "trials": [{"case": "trace", "repeat": 0, "policies": copy.deepcopy(policies)}]}
+    for name, data in {
+        "progress.json": {"status": "complete"},
+        "protocol.json": {"cases": [{"name": "trace"}], "repeats": 1, "reject_timed_tilelang_compilation": True},
+        "summary.json": [trial],
+    }.items():
+        (tmp_path / name).write_text(json.dumps(data))
+    if failure == "incomplete":
+        audit["status"] = "in_progress"
+    elif failure == "policy":
+        audit["trials"][0]["policies"].pop("control")
+    elif failure == "clock":
+        audit["trials"][0]["policies"]["candidate"]["started_unix"] = 11
+    elif failure == "pair":
+        audit["trials"][0]["repeat"] = 1
+    elif failure == "compilation":
+        audit["trials"][0]["policies"]["candidate"]["overlapping_compilations"] = [{"started_unix": 12}]
+    if failure != "missing":
+        (tmp_path / "jit-audit.json").write_text(json.dumps(audit))
+    with pytest.raises(ValueError, match="compilation"):
+        report.summarize([tmp_path])
 
 
 def test_quarantined_hardware_phase_cannot_enter_performance_report(tmp_path):

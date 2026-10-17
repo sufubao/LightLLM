@@ -34,6 +34,25 @@ def summarize(phases):
         trials = json.loads((phase / "summary.json").read_text())
         if progress.get("status") != "complete" or len(trials) != len(protocol["cases"]) * protocol["repeats"]:
             raise ValueError(f"incomplete phase cannot enter final report: {phase}")
+        if protocol.get("reject_timed_tilelang_compilation"):
+            if not (phase / "jit-audit.json").exists():
+                raise ValueError(f"compilation isolation record missing: {phase}")
+            audit = json.loads((phase / "jit-audit.json").read_text())
+            if audit.get("status") != "complete" or len(audit["trials"]) != len(trials):
+                raise ValueError(f"compilation isolation not verified: {phase}")
+            if any(set(r["policies"]) != {"candidate", "control"} for r in audit["trials"]):
+                raise ValueError(f"compilation audit omits a policy: {phase}")
+            if any(
+                r["policies"][label][key] != trial[label][key]
+                for r, trial in zip(audit["trials"], trials)
+                for label in ("candidate", "control")
+                for key in ("started_unix", "finished_unix")
+            ):
+                raise ValueError(f"compilation audit covers different intervals: {phase}")
+            if [(r["case"], r["repeat"]) for r in audit["trials"]] != [(r["case"], r["repeat"]) for r in trials] or any(
+                p["overlapping_compilations"] for r in audit["trials"] for p in r["policies"].values()
+            ):
+                raise ValueError(f"timed compilation cannot enter final report: {phase}")
         if protocol.get("gpu_monitor_interval_seconds"):
             observations = [json.loads(line) for line in (phase / "gpu-observations.jsonl").read_text().splitlines()]
             if not observations or any(

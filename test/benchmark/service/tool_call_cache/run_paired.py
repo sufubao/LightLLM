@@ -153,8 +153,8 @@ def main():
         services[label] = data
         shutil.copy2(source, destination / f"{label}-service.json")
     left, right = services["candidate"], services["control"]
-    for key in ["image_id", "model_config_sha256"]:
-        if left[key] != right[key]:
+    for key in ["image_id", "model_config_sha256", "python_dependency_sha256"]:
+        if left.get(key) != right.get(key):
             raise ValueError(f"services differ in {key}")
     for key in [
         "model_dir",
@@ -173,6 +173,8 @@ def main():
         "--linear_att_page_block_num",
         "--llm_prefill_att_backend",
         "--llm_decode_att_backend",
+        "--prefill_queue_strategy",
+        "--output_constraint_mode",
     ]:
         values = [
             service["command"][service["command"].index(flag) + 1] if flag in service["command"] else None

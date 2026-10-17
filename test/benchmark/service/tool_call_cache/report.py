@@ -86,6 +86,7 @@ def summarize(phases):
                 "cache_isolation": protocol.get("cache_isolation", "none"),
                 "image_id": candidate["image_id"],
                 "model_config_sha256": candidate["model_config_sha256"],
+                "python_dependency_sha256": candidate.get("python_dependency_sha256", {}),
                 "service_configuration": {
                     k: config.get(k)
                     for k in ["tp", "max_req_tokens", "batch_tokens", "max_requests", "disable_cudagraph"]
@@ -99,6 +100,8 @@ def summarize(phases):
                         "--linear_att_page_block_num",
                         "--llm_prefill_att_backend",
                         "--llm_decode_att_backend",
+                        "--prefill_queue_strategy",
+                        "--output_constraint_mode",
                     ]
                 },
             }
@@ -248,6 +251,7 @@ def public_summary(result):
                 "backend_flags",
             ]
         }
+        safe["workload"]["python_dependency_sha256"] = workload.get("python_dependency_sha256", {})
         safe["workload"]["options"] = {key: workload["options"][key] for key in options if key in workload["options"]}
         public["groups"].append(safe)
         for pair in group["raw_pairs"]:

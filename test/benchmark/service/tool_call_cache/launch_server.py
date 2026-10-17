@@ -35,6 +35,9 @@ def main():
     parser.add_argument("--original-base", action="store_true", help="Source predates retention flags; omit them")
     parser.add_argument("--kernel-cache", type=Path, help="Reuse compiled kernels across service restarts")
     parser.add_argument("--linear-att-page-block-num", type=int)
+    parser.add_argument("--prefill-queue-strategy", choices=["auto", "default", "promote_shortest", "hrrn"])
+    parser.add_argument("--output-constraint-mode", choices=["none", "xgrammar"])
+    parser.add_argument("--python-deps", type=Path, help="Read-only, preinstalled runtime dependency overlay")
     args = parser.parse_args()
     if "EXP_RUN_DIR" not in os.environ or len(args.revision) != 40:
         parser.error("run under exp and supply a full source revision")
@@ -97,6 +100,21 @@ def main():
     ]
     if args.disable_cudagraph:
         command.append("--disable_cudagraph")
+    if args.prefill_queue_strategy is not None:
+        command.extend(["--prefill_queue_strategy", args.prefill_queue_strategy])
+    if args.output_constraint_mode is not None:
+        command.extend(["--output_constraint_mode", args.output_constraint_mode])
+    dependency_hashes = {}
+    if args.python_deps is not None:
+        dependency_hashes = {
+            str(path.relative_to(args.python_deps)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(args.python_deps.rglob("*"))
+            if path.is_file()
+        }
+        if not dependency_hashes:
+            parser.error("runtime dependency overlay is empty")
+        offset = command.index(args.image)
+        command[offset:offset] = ["-v", f"{args.python_deps}:/deps:ro", "-e", "PYTHONPATH=/work:/deps"]
     if args.linear_att_page_block_num is not None:
         command.extend(["--linear_att_page_block_num", str(args.linear_att_page_block_num)])
     if args.original_base:
@@ -126,6 +144,7 @@ def main():
         "image_digests": image["RepoDigests"],
         "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "model_config_sha256": hashlib.sha256((Path(args.model_dir) / "config.json").read_bytes()).hexdigest(),
+        "python_dependency_sha256": dependency_hashes,
         "hardware": hardware,
         "command": command,
     }

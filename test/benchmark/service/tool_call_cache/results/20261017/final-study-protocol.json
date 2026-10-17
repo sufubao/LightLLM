@@ -8,7 +8,10 @@
     "xgrammar": "0.2.8",
     "installation": "Separate read-only dependency overlay on the pinned existing image; no image built or published. Per-file hashes enter service manifests.",
     "prefill_queue_strategy": "default",
-    "output_constraint_mode": "xgrammar"
+    "output_constraint_mode": "xgrammar",
+    "log_level": "debug",
+    "apache-tvm-ffi": "0.1.11",
+    "telemetry_note": "Explicit equal debug logging required after excluded v8 warmup revealed upstream timing logs moved from info to debug. No final-source validation or heldout trial had started. Latency includes logging instrumentation; raw logs remain private."
   },
   "host": "m35",
   "gpu_model": "NVIDIA H200",

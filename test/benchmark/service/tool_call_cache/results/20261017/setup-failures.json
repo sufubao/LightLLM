@@ -25,6 +25,13 @@
       "observed_gpu6_sm_clock_mhz": 345,
       "other_experiment_gpu_sm_clock_mhz": 1980,
       "resolution": "Quarantine the entire timing phase and its excluded warmup; reject it in report generation. Avoid GPUs2/6 for recovered studies and require zero thermal-event counter increases on every selected GPU."
+    },
+    {
+      "phase": "warmup-normal-short-v8",
+      "kind": "upstream request timing telemetry moved from info to debug",
+      "paired_requests": 96,
+      "input_output_finish_token_mismatches": 0,
+      "resolution": "Keep the excluded warmup and its failure. Both end-to-end tool/stream/schema smokes passed. Before any final-source measured trial, configure the same explicit debug log level on candidate, control and unchanged baseline; archive the setting and include instrumentation cost in interpretation."
     }
   ]
 }

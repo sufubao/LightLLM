@@ -70,7 +70,16 @@
         "control trace-c8 seed42",
         "candidate trace-c16 seed43"
       ],
-      "resolution": "Preserve and quarantine both v9 hybrid validation phases. Stop only the owned selection controller; allow the current phase to finish as excluded diagnostics. Persist completed trusted TileLang kernel cache from the pinned image, restart full unchanged hybrid matrix with per-pair logged-compilation rejection plus independent archived-log audit before selecting parameters. Do not pool cold attempts or use their positive/negative timing differences as cache benefits. Normal-model results unchanged."
+      "resolution": "Preserve and quarantine both v9 hybrid validation phases. Stop only the owned selection controller; allow the current phase to finish as excluded diagnostics. Persist completed trusted TileLang kernel cache from the pinned image, restart full unchanged hybrid matrix with per-pair logged-compilation rejection plus independent archived-log audit before selecting parameters. Do not pool cold attempts or use their positive/negative timing differences as cache benefits. Normal-model results unchanged.",
+      "completed_long_pairs": 9,
+      "long_pairs_with_measured_compilation": 1,
+      "selected_complete_kernel_cache_entries": 10,
+      "recorded_kernel_source_entries": 20
+    },
+    {
+      "phase": "v10 orchestration before any formal v10 replay",
+      "kind": "quarantine gate also rejected excluded diagnostic as a cache-seeding prerequisite",
+      "resolution": "Retain the failed controller source/output. Read only the diagnostic complete status and require its invalidity marker for cache extraction; retain quarantine rejection for formal data. Resumed controller seeded10 complete entries from20 recorded sources, verified both service cache mounts and started full unchanged matrix. No formal v10 trial had started."
     }
   ]
 }

@@ -15,10 +15,6 @@ from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
 
 
-class _InferState(SimpleNamespace):
-    """Weak-referenceable owner kept alive by each test, like InferStateInfo."""
-
-
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
 def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     ssm_states = torch.zeros((1, 1, 2, 2), dtype=cache_dtype)
@@ -35,11 +31,13 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
         _rearrange_mixed_qkv=lambda mixed: (q, q, q),
         prefill_kernel=lambda *args, **kwargs: (None, final_state),
     )
-    infer_state = _InferState(
-        b1_cu_q_seq_len=torch.tensor([0, 1], dtype=torch.int32),
-        b_ready_cache_len=0,
+    state = gdn.LinearAttPrefillAttState(
+        backend=backend,
+        infer_state=SimpleNamespace(
+            b1_cu_q_seq_len=torch.tensor([0, 1], dtype=torch.int32),
+            b_ready_cache_len=0,
+        ),
     )
-    state = gdn.LinearAttPrefillAttState(backend=backend, infer_state=infer_state)
     state.b_conv_buffer_idx = torch.tensor([0], dtype=torch.int64)
     state.b_ssm_buffer_idx = torch.tensor([0], dtype=torch.int64)
     layer_weight = SimpleNamespace(
@@ -67,7 +65,7 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
     )
-    infer_state = _InferState(
+    infer_state = SimpleNamespace(
         batch_size=b_req_idx.shape[0],
         b_req_idx=b_req_idx,
         b_mtp_index=torch.zeros_like(b_req_idx),
@@ -76,19 +74,18 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
             req_to_mtp_state_index=req_to_mtp_state_index,
         ),
     )
-    state = gdn.LinearAttDecodeAttState(
+    return gdn.LinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,
             uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
         ),
         infer_state=infer_state,
     )
-    return state, infer_state
 
 
 def test_decode_state_initializes_normal_layout():
     b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
-    state, infer_state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
+    state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
 
     state.init_state()
 
@@ -101,7 +98,7 @@ def test_decode_state_initializes_normal_layout():
 def test_decode_state_initializes_fixed_mtp_layout():
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
-    state, infer_state = _create_decode_state(
+    state = _create_decode_state(
         draft_step=2,
         dynamic_layout=False,
         b_req_idx=b_req_idx,
@@ -132,7 +129,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
         return expected_cu_q_seq_len, expected_conv_buffer_idx, expected_num_accepted_tokens
 
     monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build_params)
-    state, infer_state = _create_decode_state(
+    state = _create_decode_state(
         draft_step=2,
         dynamic_layout=True,
         b_req_idx=b_req_idx,

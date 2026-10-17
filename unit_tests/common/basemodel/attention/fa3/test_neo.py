@@ -8,10 +8,6 @@ import torch
 from lightllm.common.basemodel.attention.fa3 import fp, neo
 
 
-class _InferState(SimpleNamespace):
-    """Weak-referenceable owner kept alive for the attention call."""
-
-
 def _load_neo(monkeypatch, attention_func):
     interface = None
     if attention_func is not None:
@@ -74,7 +70,7 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
             list(range(3 * page_size, 4 * page_size)) + list(range(page_size, 2 * page_size)),
         ]
     )
-    infer_state = _InferState(
+    infer_state = SimpleNamespace(
         batch_size=2,
         max_kv_seq_len=2 * page_size,
         max_q_seq_len=2,

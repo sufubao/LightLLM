@@ -199,7 +199,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
         recurrent_state=recurrent_state,
         HOLD_REQUEST_ID=3,
         get_mamba_cache=lambda layer: (conv, ssm),
-        linear_config=SimpleNamespace(full_attention_interval=4),
+        linear_config=SimpleNamespace(get_linear_layer_index=lambda layer: 0),
     )
     if mode != "native":
         from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache

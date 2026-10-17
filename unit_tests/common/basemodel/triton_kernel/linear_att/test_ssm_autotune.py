@@ -337,7 +337,7 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         assert config == configs[index]
         ref = make_inputs(mode, dtype, "cuda", projection_mode=projection, kda=kda)["cache"]
         ref.state.copy_(initial)
-        ref.run_config = config
+        ref.run_config = dict(config)
         ref._config_is_fixed = True
 
         def forward(target):
@@ -351,15 +351,19 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         state = SimpleNamespace(
             hidden_collector=SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector()),
             prompt_logics=None,
-            recurrent_state_context=RecurrentStateContext(config),
+            recurrent_state_context=RecurrentStateContext.from_run_config(config),
             logits_row_stride=1,
         )
         output = TpPartBaseModel._create_model_output(
             None, PostLayerOutput(logits=outputs[0].view(count * 4, -1)), state
         )
         output = TpPartBaseModel._create_unpad_decode_model_output(None, output, len(ids) * 4)
-        assert output.recurrent_state_context._run_config is config
+        assert dict(output.recurrent_state_context.config) == config
         buckets.append((graph, outputs, output, ref, args, reqs, cu, ids))
+    # Published contexts and captured launches must survive later changes to
+    # the tuner's dictionaries, including when two graphs replay alternately.
+    for config in configs:
+        config.update(BV=128, num_warps=4, num_stages=3)
     cache.state.copy_(initial)
     if mode == "replay":
         cache.cursors.zero_()

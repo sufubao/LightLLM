@@ -71,6 +71,8 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def write_to_shm(self, req_manager):
+        # RecurrentState contains only IPC-safe state/operator configuration;
+        # worker execution resources must remain outside this shared object.
         self.recurrent_state = req_manager.recurrent_state
         # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
         # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本

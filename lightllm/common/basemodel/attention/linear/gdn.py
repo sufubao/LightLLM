@@ -1,5 +1,6 @@
 import dataclasses
 import torch
+from lightllm.common.recurrent_state_types import RecurrentStateContext
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
@@ -257,7 +258,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        if self.backend.req_manager.recurrent_state.updates is not None:
+        if self.backend.req_manager.recurrent_state.update_backend is not None:
             self.b_ssm_buffer_idx = self.b_conv_buffer_idx
             return
         att_batch_size = self.b_conv_buffer_idx.shape[0]
@@ -347,18 +348,17 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
-        recurrent_state = backend.req_manager.recurrent_state
-        if recurrent_state.updates is not None:
-            layer = (
-                layer_weight.layer_num_
-                - layer_weight.layer_num_ // backend.req_manager.linear_config.full_attention_interval
-            )
+        updater = backend.req_manager.recurrent_state.update_backend
+        if updater is not None:
+            layer = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
             if layer == 0:
-                self.infer_state.recurrent_state_context = recurrent_state.decode_context(*args)
+                self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
+                    updater.get_run_config(*args)
+                )
             return (
-                recurrent_state.forward_updates(
-                    layer, *args, self.b_conv_buffer_idx, context=self.infer_state.recurrent_state_context
+                updater.forward(
+                    layer, *args, self.b_conv_buffer_idx, run_config=self.infer_state.recurrent_state_context.config
                 ),
                 z,
             )
@@ -407,21 +407,20 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        recurrent_state = backend.req_manager.recurrent_state
-        if recurrent_state.updates is not None:
-            layer = (
-                layer_weight.layer_num_
-                - layer_weight.layer_num_ // backend.req_manager.linear_config.full_attention_interval
-            )
+        updater = backend.req_manager.recurrent_state.update_backend
+        if updater is not None:
+            layer = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
             if layer == 0:
-                self.infer_state.recurrent_state_context = recurrent_state.decode_context(*args, cu_seqlens_q)
-            return recurrent_state.forward_updates(
+                self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
+                    updater.get_run_config(*args, cu_seqlens_q)
+                )
+            return updater.forward(
                 layer,
                 *args,
                 self.b_conv_buffer_idx,
                 cu_seqlens_q,
-                context=self.infer_state.recurrent_state_context,
+                run_config=self.infer_state.recurrent_state_context.config,
             )
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,

@@ -7,7 +7,7 @@ import torch
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 if TYPE_CHECKING:
-    from lightllm.common.recurrent_state import RecurrentStateContext
+    from lightllm.common.recurrent_state_types import RecurrentStateContext
 
 
 @dataclass

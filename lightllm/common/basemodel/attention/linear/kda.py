@@ -8,6 +8,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 import torch
+from lightllm.common.recurrent_state_types import RecurrentStateContext
 
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
@@ -45,8 +46,6 @@ class KDALinearAttBackend(BaseAttBackend):
         self.conv_kernel_size = config["short_conv_kernel_size"]
         self.lower_bound = config.get("gate_lower_bound", -5.0)
         self.mtp_step = model.args.mtp_step
-        if model.req_manager.recurrent_state.updates is not None:
-            model.req_manager.recurrent_state.updates.lower_bound = self.lower_bound
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return KDAPrefillAttState(backend=self, infer_state=infer_state)
@@ -184,7 +183,7 @@ class KDADecodeAttState(BaseDecodeAttState):
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        if self.infer_state.req_manager.recurrent_state.updates is not None:
+        if self.infer_state.req_manager.recurrent_state.update_backend is not None:
             self.b_ssm_buffer_idx = self.b_conv_buffer_idx
             return
         att_batch_size = self.b_conv_buffer_idx.shape[0]
@@ -232,9 +231,9 @@ class KDADecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
-        recurrent_state = self.infer_state.req_manager.recurrent_state
-        if recurrent_state.updates is not None:
-            layer = layer_num - layer_num // self.infer_state.req_manager.linear_config.full_attention_interval
+        updater = self.infer_state.req_manager.recurrent_state.update_backend
+        if updater is not None:
+            layer = self.infer_state.req_manager.linear_config.get_linear_layer_index(layer_num)
             args = (
                 q,
                 k,
@@ -245,15 +244,15 @@ class KDADecodeAttState(BaseDecodeAttState):
                 layer_weight.linear_dt_bias.weight,
             )
             if layer == 0:
-                self.infer_state.recurrent_state_context = recurrent_state.decode_context(
-                    *args, self.b1_mtp_cu_q_seq_len
+                self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
+                    updater.get_run_config(*args, self.b1_mtp_cu_q_seq_len)
                 )
-            return recurrent_state.forward_updates(
+            return updater.forward(
                 layer,
                 *args,
                 self.b_conv_buffer_idx,
                 self.b1_mtp_cu_q_seq_len,
-                context=self.infer_state.recurrent_state_context,
+                run_config=self.infer_state.recurrent_state_context.config,
             )
         output, _ = fused_recurrent_kda(
             q=q,

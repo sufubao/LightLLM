@@ -5,23 +5,16 @@ not allocate request IDs, choose prefix boundaries, or synchronize streams.
 Attention backends retain responsibility for recurrent computation.
 """
 
-from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
 from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheConfig
+from lightllm.common.recurrent_state_types import RecurrentStateContext, SSMUpdateBackend
 
-
-@dataclass(frozen=True)
-class RecurrentStateContext:
-    """Commit information for one forward/graph, passed unchanged by the runner.
-
-    Compact reconstruction must use the verify kernel's reduction layout.
-    Keeping it per forward also permits overlapping graphs with different layouts.
-    """
-
-    _run_config: Optional[dict] = None
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache as _ReplaySSMCache
+    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache as _CompactSSMCache
 
 
 class RecurrentStateSnapshot(NamedTuple):
@@ -30,6 +23,16 @@ class RecurrentStateSnapshot(NamedTuple):
 
 
 class RecurrentState:
+    """Own request state and its lifecycle, without dispatching attention.
+
+    PD currently shares this object through CUDA IPC as part of the memory
+    manager. Keep its fields limited to tensors, cache operators, and pickleable
+    static configuration. Graphs, streams, callbacks, batch contexts, and pinned
+    CPU checkpoint pools belong to their existing worker/runner owners. Adding
+    such resources requires an explicit transport view rather than serializing
+    them implicitly with this object.
+    """
+
     def __init__(self, max_request_num, linear_config: LinearAttCacheConfig, args, *, kda=False, device="cuda"):
         self.linear_config = linear_config
         self.mtp_step = args.mtp_step
@@ -51,7 +54,7 @@ class RecurrentState:
             layer_num=linear_config.linear_layer_num,
             device=device,
         )
-        self.updates = None
+        self.updates: Optional[Union["_ReplaySSMCache", "_CompactSSMCache"]] = None
         if args.ssm_state_mode == "replay":
             from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
 
@@ -62,6 +65,7 @@ class RecurrentState:
                 linear_config.conv_state_dtype,
                 num_key_heads=linear_config.num_linear_k_heads,
                 kda=kda,
+                lower_bound=linear_config.gate_lower_bound,
                 projection_mode=args.ssm_replay_config.get("compute_mode", "inline"),
                 fold_method=args.ssm_replay_config.get("fold_method", "raw"),
             )
@@ -74,7 +78,13 @@ class RecurrentState:
                 linear_config.conv_state_dtype,
                 num_key_heads=linear_config.num_linear_k_heads,
                 kda=kda,
+                lower_bound=linear_config.gate_lower_bound,
             )
+
+    @property
+    def update_backend(self) -> Optional[SSMUpdateBackend]:
+        """Optional compact/replay execution backend for attention to call."""
+        return self.updates
 
     def _clear_positions(self, req_idx):
         if self.updates is not None:
@@ -102,13 +112,15 @@ class RecurrentState:
                 # guaranteed token, including when forward is graph-replayed.
                 self.updates.accept_updates(reqs)
 
-    def decode_context(self, *args):
-        return RecurrentStateContext(self.updates.get_run_config(*args))
-
-    def forward_updates(self, layer, *args, context):
-        return self.updates.forward(layer, *args, run_config=context._run_config)
-
-    def commit(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width, batches=None):
+    def commit(
+        self,
+        b_req_mtp_start_loc,
+        b_req_idx,
+        b_mtp_index,
+        accepted_index,
+        verify_width,
+        batches: Optional[Sequence[Tuple[int, Optional[RecurrentStateContext]]]] = None,
+    ):
         """Commit accepted prefixes without requiring full-state materialization.
 
         ``batches`` partitions logical requests in the same order as the MTP
@@ -143,7 +155,7 @@ class RecurrentState:
                 self.updates.accept_updates(
                     reqs[start : start + size],
                     self.accepted_index,
-                    run_config=context._run_config if context is not None else None,
+                    run_config=context.config if context is not None else None,
                 )
             start += size
 
@@ -218,6 +230,5 @@ class RecurrentState:
         ssm.copy_(snapshot.ssm, non_blocking=True)
 
     def layer_buffers(self, layer_idx_in_all):
-        assert 0 <= layer_idx_in_all < self.linear_config.all_layer_num
-        layer = layer_idx_in_all - layer_idx_in_all // self.linear_config.full_attention_interval
+        layer = self.linear_config.get_linear_layer_index(layer_idx_in_all)
         return self.conv_state.buffer[layer], self.ssm_state.buffer[layer]

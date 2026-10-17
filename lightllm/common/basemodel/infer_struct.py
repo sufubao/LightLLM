@@ -14,7 +14,7 @@ from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
 
 if TYPE_CHECKING:
-    from lightllm.common.recurrent_state import RecurrentStateContext
+    from lightllm.common.recurrent_state_types import RecurrentStateContext
 
 
 class InferStateInfo:

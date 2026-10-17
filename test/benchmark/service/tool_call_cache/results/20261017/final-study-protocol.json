@@ -114,7 +114,11 @@
       "return": "Actual generated tool result and next tool instruction",
       "retention_seconds": 120,
       "fraction": 0.25,
-      "expected_retained_tokens": 32768
+      "expected_retained_tokens": 32768,
+      "prefix_words": 10000,
+      "cpu_preflight_prompt_tokens": 50276,
+      "max_request_tokens": 65536,
+      "construction_note": "Corrected before any hybrid experiment: actual tokenizer maps15000 numeric words to75276 tokens, beyond65536.10000 words produce50276 tokens, preserving the intended oversized-but-valid request and32768 checkpoint. CPU preflight uses transformers4.57.1; actual serving usage is checked during the probe."
     }
   },
   "case_sha256": {

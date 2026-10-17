@@ -44,6 +44,17 @@
       "kind": "requested TCP port failed upstream strict bind validation after retiring prior candidate",
       "preserved_complete_short_window_pairs": 9,
       "resolution": "Confirmed launcher exited with address-in-use error and later verified port bindability; no other process stopped. Add an untimed bounded prelaunch bindability wait, tested with an occupied socket and its subsequent release. Resume only the unstarted long-window stage; preserve completed short-window results and failed launcher records."
+    },
+    {
+      "phase": "planned hybrid partial-checkpoint context, before any execution",
+      "kind": "CPU tokenizer preflight caught an invalid context-length estimate",
+      "initial_numeric_words": 15000,
+      "initial_prompt_tokens": 75276,
+      "request_limit_tokens": 65536,
+      "corrected_numeric_words": 10000,
+      "corrected_cpu_prompt_tokens": 50276,
+      "retained_checkpoint_target_tokens": 32768,
+      "resolution": "Correct only the unstarted construction parameter; preserve budget, churn, source, seeds and comparison gates. No measured hybrid trial discarded or retuned. Independently check actual server input bounds during the controlled probe."
     }
   ]
 }

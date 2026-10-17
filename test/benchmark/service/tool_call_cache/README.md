@@ -17,6 +17,10 @@ This directory provides complementary kinds of evidence:
   `--return-mode continuation` instead sends the actual generated tool result
   and another tool instruction after the same cache pressure, exercising the
   agent loop. Opaque call IDs are normalized consistently across paired requests.
+  Size numeric filler with the actual model tokenizer: a four-digit word can
+  occupy five tokens including its separator. Check the resulting prompt against
+  both the retention budget and the request-length limit before running an
+  oversized-prefix probe. Actual server usage remains the final size check.
 * `replay.py`: closed-loop, trace-shaped load against a real inference server.
   The released text is redacted, so contexts are synthetic. Actual model outputs
   feed forward into subsequent requests. Original context sizes and waits are

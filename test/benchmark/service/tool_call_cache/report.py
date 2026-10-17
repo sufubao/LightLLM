@@ -6,6 +6,7 @@ across hardware crossover phases form one cluster. Preserve every raw pair.
 
 import argparse
 import collections
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -24,6 +25,7 @@ def confidence(values, seed=0):
 
 def summarize(phases):
     groups = collections.defaultdict(list)
+    workloads = {}
     for phase in phases:
         progress = json.loads((phase / "progress.json").read_text())
         protocol = json.loads((phase / "protocol.json").read_text())
@@ -52,6 +54,30 @@ def summarize(phases):
             if trial["candidate"]["unexpected_end_states"] or trial["control"]["unexpected_end_states"]:
                 raise ValueError(f"invalid end states in {phase}")
             config = candidate["configuration"]
+            workload = {
+                "options": next(case["options"] for case in protocol["cases"] if case["name"] == trial["case"]),
+                "harness_sha256": protocol["harness_sha256"],
+                "cache_isolation": protocol.get("cache_isolation", "none"),
+                "image_id": candidate["image_id"],
+                "model_config_sha256": candidate["model_config_sha256"],
+                "service_configuration": {
+                    k: config.get(k)
+                    for k in ["tp", "max_req_tokens", "batch_tokens", "max_requests", "disable_cudagraph"]
+                },
+                "backend_flags": {
+                    flag: candidate["command"][candidate["command"].index(flag) + 1]
+                    if flag in candidate["command"]
+                    else None
+                    for flag in [
+                        "--tool_call_parser",
+                        "--linear_att_page_block_num",
+                        "--llm_prefill_att_backend",
+                        "--llm_decode_att_backend",
+                    ]
+                },
+            }
+            fingerprint = hashlib.sha256(json.dumps(workload, sort_keys=True).encode()).hexdigest()
+            workloads[fingerprint] = workload
             key = (
                 config["model_dir"],
                 candidate["source_revision"],
@@ -60,6 +86,7 @@ def summarize(phases):
                 config["retention"],
                 config["fraction"],
                 trial["case"],
+                fingerprint,
             )
             groups[key].append({"phase": phase.name, "trial": trial})
     result = []
@@ -73,12 +100,22 @@ def summarize(phases):
                 "log_mean_request_speedup": math.log(
                     control["request_seconds"]["mean"] / candidate["request_seconds"]["mean"]
                 ),
+                "log_p95_request_speedup": math.log(
+                    control["request_seconds"]["p95"] / candidate["request_seconds"]["p95"]
+                ),
                 "cache_hit_gain_pp": 100 * (candidate["cache_hit_ratio"] - control["cache_hit_ratio"]),
                 "prefill_reduction_percent": 100 * (1 - candidate["prefilled_tokens"] / control["prefilled_tokens"]),
             }
             if "server_ttft_ms" in candidate and "server_ttft_ms" in control:
                 metrics["log_mean_ttft_speedup"] = math.log(
                     control["server_ttft_ms"]["mean"] / candidate["server_ttft_ms"]["mean"]
+                )
+                metrics["log_p95_ttft_speedup"] = math.log(
+                    control["server_ttft_ms"]["p95"] / candidate["server_ttft_ms"]["p95"]
+                )
+            if candidate["session_seconds"]["mean"] and control["session_seconds"]["mean"]:
+                metrics["log_mean_session_speedup"] = math.log(
+                    control["session_seconds"]["mean"] / candidate["session_seconds"]["mean"]
                 )
             per_seed[candidate["configuration"]["seed"]].append(metrics)
         clustered = {
@@ -93,6 +130,8 @@ def summarize(phases):
             "retention_seconds": key[4],
             "fraction": key[5],
             "case": key[6],
+            "workload_sha256": key[7],
+            "workload": workloads[key[7]],
             "pairs": len(pairs),
             "independent_seeds": len(per_seed),
             "metrics": {},

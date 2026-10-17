@@ -30,6 +30,9 @@ This directory provides complementary kinds of evidence:
   errors or mismatches; earlier and failed results remain available. Continuous
   GPU process/load observations reject foreign processes on either experiment
   GPU while retaining visibility into activity elsewhere on the shared host.
+  Temperature, SM/memory clocks and thermal-event counters are recorded too;
+  active thermal slowdown or an increase in those counters invalidates the
+  comparison, including brief throttling between monitoring samples.
 * `reset_cache.py`: untimed, exp-recorded isolation before each trial. Wait for
   prior preferences to expire, then fill more than KV capacity with independent
   ordinary completions. This removes prior trial contexts without enabling RL

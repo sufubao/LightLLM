@@ -11,6 +11,13 @@ report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
 
 
+def test_quarantined_hardware_phase_cannot_enter_performance_report(tmp_path):
+    (tmp_path / "invalidity.json").write_text(json.dumps({"reason": "thermal slowdown"}))
+    (tmp_path / "progress.json").write_text(json.dumps({"status": "complete"}))
+    with pytest.raises(ValueError, match="invalidated phase"):
+        report.summarize([tmp_path])
+
+
 def test_public_export_omits_payloads_and_private_configuration():
     secret = "NEVER_PUBLISH_REQUEST_CONTENT"
     policy = {"configuration": {"seed": 42, "url": secret}, "wall_seconds": 1.0, "messages": secret}

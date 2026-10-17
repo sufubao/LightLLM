@@ -13,6 +13,26 @@ import time
 import threading
 
 
+def thermal_events(load_lines, gpu_ids, baseline):
+    """Catch thermal bursts between samples using cumulative event counters."""
+    events = []
+    for line in load_lines:
+        fields = [part.strip() for part in line.split(",")]
+        index = fields[0]
+        if index not in gpu_ids:
+            continue
+        counters = tuple(int(value.split()[0]) for value in fields[9:11])
+        if len(counters) != 2:
+            raise ValueError("thermal counters are unavailable")
+        initial = baseline.setdefault(index, counters)
+        if any(current < previous for current, previous in zip(counters, initial)):
+            raise ValueError("thermal event counters reset during the experiment")
+        deltas = [max(0, current - previous) for current, previous in zip(counters, initial)]
+        if any(value.lower() == "active" for value in fields[7:9]) or any(deltas):
+            events.append({"gpu": index, "temperature": fields[4], "sm_clock": fields[5], "counter_deltas_us": deltas})
+    return events
+
+
 def monitor_gpus(services, destination):
     """Retain host load observations and reject shared experiment GPUs."""
     gpu_ids = {gpu.strip() for service in services.values() for gpu in service["configuration"]["gpu"].split(",")}
@@ -29,6 +49,7 @@ def monitor_gpus(services, destination):
         ).splitlines()
         allowed_pids.update(int(row.strip()) for row in rows[1:] if row.strip())
     errors = []
+    thermal_baseline = {}
     stop = threading.Event()
 
     def poll():
@@ -48,20 +69,25 @@ def monitor_gpus(services, destination):
                     load = subprocess.check_output(
                         [
                             "nvidia-smi",
-                            "--query-gpu=index,utilization.gpu,power.draw,memory.used",
+                            "--query-gpu=index,utilization.gpu,power.draw,memory.used,temperature.gpu,"
+                            "clocks.current.sm,clocks.current.memory,clocks_event_reasons.sw_thermal_slowdown,"
+                            "clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons_counters.sw_thermal_slowdown,"
+                            "clocks_event_reasons_counters.hw_thermal_slowdown",
                             "--format=csv,noheader",
                         ],
                         text=True,
                         timeout=10,
                     ).splitlines()
+                    thermal = thermal_events(load, gpu_ids, thermal_baseline)
                     record = {
                         "time_unix": time.time(),
                         "apps": apps,
                         "load": load,
                         "host_load_average": os.getloadavg(),
                         "foreign_on_trial_gpus": foreign,
+                        "thermal_violations": thermal,
                     }
-                    if foreign:
+                    if foreign or thermal:
                         errors.append(record)
                 except Exception as exc:
                     record = {"time_unix": time.time(), "monitor_error": str(exc)}
@@ -163,6 +189,7 @@ def main():
                 "harness_sha256": harness_sha,
                 "paired_runner_sha256": hashlib.sha256((destination / "run_paired.py").read_bytes()).hexdigest(),
                 "gpu_monitor_interval_seconds": 2,
+                "thermal_monitoring": "active flags and cumulative counter deltas on experiment GPUs",
                 "cache_isolation": "none" if args.no_reset else "expire preferences, then independent capacity flood",
                 "reset_sha256": (
                     None if args.no_reset else hashlib.sha256((destination / "reset_cache.py").read_bytes()).hexdigest()

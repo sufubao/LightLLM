@@ -15,6 +15,58 @@ _fa3_mark = pytest.mark.skipif(
 )
 
 
+def test_fa3_failure_computes_fallback_on_same_invocation(monkeypatch):
+    calls = []
+    q = torch.zeros(2, 1, 4)
+    out = torch.full_like(q, -123)
+    cu = torch.tensor([0, 2], dtype=torch.int32)
+
+    def fail_fa3(q, k, v, o, cu_seqlens, max_seqlen):
+        calls.append("fa3")
+        o[0].fill_(99)  # A backend may fail after partially writing output.
+        raise RuntimeError("shape-dependent FA3 failure")
+
+    def fallback(q, k, v, o, cu_seqlens, max_seqlen):
+        calls.append("triton")
+        o.fill_(7)
+
+    monkeypatch.setattr(flashattention_nopad, "_flash_attn_v3_available", True)
+    monkeypatch.setattr(flashattention_nopad, "is_hopper", lambda: True)
+    monkeypatch.setattr(flashattention_nopad, "flash_attention_v3_fwd", fail_fa3, raising=False)
+    monkeypatch.setattr(flashattention_nopad, "_flash_attention_triton_fwd", fallback)
+    flash_attention_fwd(q, q, q, out, cu, 2)
+    assert calls == ["fa3", "triton"]
+    assert torch.equal(out, torch.full_like(q, 7))
+    assert not flashattention_nopad._flash_attn_v3_available
+
+    # Later calls should use the disabled-backend path without retrying FA3.
+    out.fill_(-123)
+    flash_attention_fwd(q, q, q, out, cu, 2)
+    assert calls == ["fa3", "triton", "triton"]
+    assert torch.equal(out, torch.full_like(q, 7))
+
+
+def test_fa3_success_does_not_run_fallback(monkeypatch):
+    q = torch.zeros(2, 1, 4)
+    out = torch.full_like(q, -123)
+    cu = torch.tensor([0, 2], dtype=torch.int32)
+
+    def fa3(q, k, v, o, cu_seqlens, max_seqlen):
+        o.fill_(9)
+
+    monkeypatch.setattr(flashattention_nopad, "_flash_attn_v3_available", True)
+    monkeypatch.setattr(flashattention_nopad, "is_hopper", lambda: True)
+    monkeypatch.setattr(flashattention_nopad, "flash_attention_v3_fwd", fa3, raising=False)
+    monkeypatch.setattr(
+        flashattention_nopad,
+        "_flash_attention_triton_fwd",
+        lambda *args: pytest.fail("a successful FA3 call must not run fallback"),
+    )
+    flash_attention_fwd(q, q, q, out, cu, 2)
+    assert torch.equal(out, torch.full_like(q, 9))
+    assert flashattention_nopad._flash_attn_v3_available
+
+
 def reference_attention_varlen(q, k, v, cu):
     """
     q, k, v : (total_len, n_head, D)

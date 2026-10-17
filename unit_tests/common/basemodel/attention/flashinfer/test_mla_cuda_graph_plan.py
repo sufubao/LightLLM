@@ -10,6 +10,10 @@ from lightllm.common.basemodel.attention.flashinfer.mla import (  # noqa: E402
 )
 
 
+class _InferState(SimpleNamespace):
+    """Weak-referenceable owner held separately from its attention state."""
+
+
 def _make_wrapper(
     q_indptr,
     kv_indptr_buf,
@@ -123,9 +127,10 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
         init_short=True,
     )
     backend = SimpleNamespace(tp_q_head_num=num_heads, infer_page_size=page_size)
+    graph_infer_state = _InferState(batch_size=batch_size, b_seq_len=graph_wrapper._kv_len_arr_buf)
     graph_state = MlaFlashInferDecodeAttState(
         backend=backend,
-        infer_state=SimpleNamespace(batch_size=batch_size, b_seq_len=graph_wrapper._kv_len_arr_buf),
+        infer_state=graph_infer_state,
         kv_starts=graph_wrapper._kv_indptr_buf,
         kv_indices=graph_wrapper._kv_indices_buf,
         decode_wrapper=graph_wrapper,
@@ -143,11 +148,10 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
         replay_lens = torch.tensor(replay_lengths, dtype=torch.int32, device="cuda")
         replay_indptr = torch.zeros_like(kv_indptr)
         replay_indptr[1:] = torch.cumsum((replay_lens + page_size - 1) // page_size, dim=0)
+        infer_state = _InferState(batch_size=batch_size, b_seq_len=replay_lens, max_kv_seq_len=max(replay_lengths))
         new_state = MlaFlashInferDecodeAttState(
             backend=backend,
-            infer_state=SimpleNamespace(
-                batch_size=batch_size, b_seq_len=replay_lens, max_kv_seq_len=max(replay_lengths)
-            ),
+            infer_state=infer_state,
             kv_starts=replay_indptr,
             kv_indices=kv_indices,
         )

@@ -22,6 +22,8 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
+from lightllm.server.httpserver.grammar import create_output_grammar_compiler
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -50,6 +52,9 @@ class HttpServerManagerForPDMaster:
         self.pd_manager = PDManager(args)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
+        # 活跃子请求的对外 ID 集合，跨 P/D 分段保持不变。
+        # 定点停止时移除 ID，生成循环恢复后据此停止输出并清理当前分段，不影响其他子请求。
+        self.active_req_ids: set[int] = set()
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
@@ -66,6 +71,7 @@ class HttpServerManagerForPDMaster:
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -107,16 +113,14 @@ class HttpServerManagerForPDMaster:
             pass
         return
 
-    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
-        kwargs = {} if kwargs is None else kwargs
+    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
+        kwargs = {"add_special_tokens": sampling_params.add_special_tokens, **(kwargs or {})}
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
-        img_count = 0
         audio_tokens = 0
         audio_count = 0
         for img in multimodal_params.images:
-            img_count += 1
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
             token_num = self.tokenizer.get_image_token_length(img)
             if token_num > self.args.max_image_token_count:
                 err_msg = (
@@ -129,9 +133,10 @@ class HttpServerManagerForPDMaster:
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
-        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
+        # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
+        return len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
@@ -142,7 +147,18 @@ class HttpServerManagerForPDMaster:
         """PD Master 请求准入的预留接口，当前不执行限流。"""
         return
 
-    async def generate(
+    def generate(
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+    ):
+        """统一包裹各 choice 的 stop 匹配，状态覆盖所有 P/D 分段。"""
+        generator = self._generate(prompt, sampling_params, multimodal_params, request)
+        return wrap_stop_match_stream(self, generator, sampling_params, prompt)
+
+    async def _generate(
         self,
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
@@ -156,13 +172,14 @@ class HttpServerManagerForPDMaster:
         if was_idle:
             self.latest_success_infer_time = time.time()
         try:
-            async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
+            generator = self._generate_choices(prompt, sampling_params, multimodal_params, request)
+            async with aclosing(generator):
                 async for result in generator:
                     yield result
         finally:
             self.running_request_count -= 1
 
-    async def _generate(
+    async def _generate_choices(
         self,
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
@@ -175,7 +192,8 @@ class HttpServerManagerForPDMaster:
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
         input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
-        fake_prompt_ids = [0 for _ in range(input_token_num)]
+        # Length validation only checks emptiness and len(); no token list is needed.
+        fake_prompt_ids = range(input_token_num)
         from lightllm.server.httpserver.manager import HttpServerManager
 
         await HttpServerManager._check_and_repair_length(
@@ -211,11 +229,12 @@ class HttpServerManagerForPDMaster:
             )
 
         request_finished_successfully = True
-        async for result in self._merge_choice_generators(generators):
-            finish_status = result[3]
-            if finish_status.is_error_finished():
-                request_finished_successfully = False
-            yield result
+        async with aclosing(self._merge_choice_generators(generators)) as generator:
+            async for result in generator:
+                finish_status = result[3]
+                if finish_status.is_error_finished():
+                    request_finished_successfully = False
+                yield result
         if request_finished_successfully:
             self.metric_client.counter_inc("lightllm_request_success")
         return
@@ -230,7 +249,7 @@ class HttpServerManagerForPDMaster:
         origin_request_id: int,
         input_token_num: int,
     ):
-        """节点繁忙时重新选择 P/D 节点，并在配置的探测周期内重试。"""
+        """处理节点繁忙错误；配置正数探测周期时重新选择 P/D 节点并重试。"""
         retry_start_time = time.monotonic()
         has_yielded_result = False
 
@@ -294,6 +313,7 @@ class HttpServerManagerForPDMaster:
         p_node = None
         d_node = None
         pending_prefill_load_chars = None
+        self.active_req_ids.add(origin_request_id)
 
         try:
             p_node, d_node, selection_extra_info = await self.select_p_d_node(
@@ -327,7 +347,7 @@ class HttpServerManagerForPDMaster:
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
             # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
-            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的 block_prompt 长度。
+            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的输入长度。
             prompt_tokens = sys.maxsize
 
             # Decode 节点容量不足时会用专用状态结束当前分段。
@@ -336,13 +356,15 @@ class HttpServerManagerForPDMaster:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
+                logger.debug(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
-                # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
-                # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧
-                # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
-                # 紧张导致分段续跑失败。
-                sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
+                # high_priority_request 只影响 HTTP 资源申请和 Router 等待队列：首段仅在
+                # 输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍有效时提升；
+                # 第二段及后续分段统一提升，避免因临时资源紧张导致分段续跑失败。
+                sampling_params.high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
+                # infer_high_priority 是 PD 内部通信字段，不接受外部请求设置。
+                # 仅第二段及后续分段在推理进程中优先排队。
+                sampling_params.infer_high_priority = -1 if segment_index > 0 else 0
                 # 仅在 Master 开启限流时下发资源等待超时。续跑分段已经产生了部分结果，
                 # 使用独立配置的等待时间，提高请求最终完成的成功率。
                 if self.enable_pd_node_self_request_limit:
@@ -355,6 +377,23 @@ class HttpServerManagerForPDMaster:
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
                 block_prompt = prompt + "".join(history_gen_token_strs)
                 pending_prefill_load_chars = len(block_prompt)
+                sampling_params.constraint_out_params.pd_previous_output_len = 0
+                if history_gen_token_strs and sampling_params.constraint_out_params.has_constraint():
+                    block_token_num = await asyncio.to_thread(
+                        self.tokens, block_prompt, multimodal_params, sampling_params
+                    )
+                    # 原始输入长度已在准入时计算；长度差作为重新编码后的历史输出长度。
+                    # TODO: 暂不处理 PD 分段续跑时的跨边界分词合并；该问题主要出现在 /generate
+                    # 原始字符串 prompt 的极少数边界，例如末尾空格与历史 JSON 开头 {" 合并。
+                    # 长度差可能漏掉历史前缀或包含 prompt 内容，导致语法恢复失败或输出不符合约束；
+                    # 仅影响当前请求，matcher 拒绝 token 会记录错误并结束请求，不会导致服务崩溃。
+                    # OpenAI Chat 的标准模板通常通过独立角色/思考分隔 token 和稳定换行保护边界，
+                    # 当前已验证模板下基本不会出现；使用原始 prompt 的 /v1/completions 仍有同类风险。
+                    # 后续需要严格支持时，应按真实输出 token 或完整历史文本恢复状态。
+                    # 分词边界合并可能使差值为负，按 0 处理，避免非法的重放长度。
+                    sampling_params.constraint_out_params.pd_previous_output_len = max(
+                        0, block_token_num - input_token_num
+                    )
                 p_node.dispatched_prompt_chars += pending_prefill_load_chars
                 p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(
@@ -368,6 +407,14 @@ class HttpServerManagerForPDMaster:
                 )
                 raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
+                    # 应用侧匹配到 stop 后，stop_request 会移除该子请求 ID。
+                    # 恢复生成时丢弃后续输出，abort 当前 P/D 分段并结束该子请求，避免容量不足时继续续跑；
+                    # 外层 finally 负责清理请求记录和节点负载，不影响其他子请求。
+                    if origin_request_id not in self.active_req_ids:
+                        await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
+                        # 关闭分段生成器，执行其 finally 中的总结日志和指标记录。
+                        await results_generator.aclose()
+                        return
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
 
@@ -422,6 +469,7 @@ class HttpServerManagerForPDMaster:
             raise e
 
         finally:
+            self.active_req_ids.discard(origin_request_id)
             if p_node is not None and pending_prefill_load_chars is not None:
                 p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - pending_prefill_load_chars)
                 p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
@@ -539,7 +587,7 @@ class HttpServerManagerForPDMaster:
         req_status.raise_if_error()
 
         prompt_ids = prefill_prompt_ids_event.prompt_ids
-        logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
+        logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(
@@ -662,61 +710,72 @@ class HttpServerManagerForPDMaster:
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
-        async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
-            p_node, d_node, prompt, sampling_params, multimodal_params, request
-        ):
-            if await request.is_disconnected():
-                raise ClientDisconnected(
-                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+        try:
+            async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
+                p_node, d_node, prompt, sampling_params, multimodal_params, request
+            ):
+                if await request.is_disconnected():
+                    raise ClientDisconnected(
+                        group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                    )
+
+                prompt_tokens = metadata["prompt_tokens"]
+                out_token_counter += 1
+                prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))
+                sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+                sub_req_id_to_mtp_verify_step_num[sub_req_id] = metadata.get("mtp_verify_step_num", 0)
+                if is_first_token:
+                    first_token_cost_ms = (time.time() - start_time) * 1000
+                    is_first_token = False
+                    self.first_time_costs.add(first_token_cost_ms)
+
+                self.latest_success_infer_time = time.time()
+                yield sub_req_id, out_str, metadata, finish_status
+                if finish_status.is_finished():
+                    unfinished_count -= 1
+                if unfinished_count == 0:
+                    break
+
+        finally:
+            # 分段可能因 stop、容量切换或取消而提前关闭，已有输出也需要记录总结。
+            if out_token_counter:
+                total_cost_time_ms = (time.time() - start_time) * 1000
+                mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
+                self.per_token_costs.add(mean_per_token_cost_time_ms)
+                headers = request.headers if request is not None else {}
+                x_request_id = headers.get("X-Request-Id", "")
+                x_session_id = headers.get("X-Session-Id", "")
+                prompt_cache_ratio = prompt_cache_len / max(prompt_tokens, 1)
+                mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
+                if mtp_total_verify_steps <= 0:
+                    mtp_total_verify_steps = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+                mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
+                format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
+                logger.info(
+                    f"X-Request-Id:{x_request_id} "
+                    f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
+                    f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
+                    f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
+                    f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
+                    f"prompt_token_num:{prompt_tokens} "
+                    f"prompt_cache_len:{prompt_cache_len} "
+                    f"prompt_cache_ratio:{prompt_cache_ratio} "
+                    f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                 )
-
-            prompt_tokens = metadata["prompt_tokens"]
-            out_token_counter += 1
-            prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))
-            sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
-            sub_req_id_to_mtp_verify_step_num[sub_req_id] = metadata.get("mtp_verify_step_num", 0)
-            if is_first_token:
-                first_token_cost_ms = (time.time() - start_time) * 1000
-                is_first_token = False
-                self.first_time_costs.add(first_token_cost_ms)
-
-            self.latest_success_infer_time = time.time()
-            yield sub_req_id, out_str, metadata, finish_status
-            if finish_status.is_finished():
-                unfinished_count -= 1
-            if unfinished_count == 0:
-                break
-
-        total_cost_time_ms = (time.time() - start_time) * 1000
-        mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
-        self.per_token_costs.add(mean_per_token_cost_time_ms)
-        x_request_id = request.headers.get("X-Request-Id", "")
-        x_session_id = request.headers.get("X-Session-Id", "")
-        prompt_cache_ratio = prompt_cache_len / prompt_tokens
-        mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
-        if mtp_total_verify_steps <= 0:
-            mtp_total_verify_steps = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
-        mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
-        format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
-            f"X-Request-Id:{x_request_id} "
-            f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
-            f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
-            f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
-            f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
-            f"prompt_token_num:{prompt_tokens} "
-            f"prompt_cache_len:{prompt_cache_len} "
-            f"prompt_cache_ratio:{prompt_cache_ratio} "
-            f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
-        )
-        self.metric_client.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms / 1000.0)
-        self.metric_client.histogram_observe(
-            "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
-        )
-        self.metric_client.histogram_observe("lightllm_request_first_token_duration", first_token_cost_ms / 1000.0)
-        self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
-        self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
+                self.metric_client.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms / 1000.0)
+                self.metric_client.histogram_observe(
+                    "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
+                )
+                self.metric_client.histogram_observe(
+                    "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
+                )
+                self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
+                self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
         return
+
+    async def stop_request(self, request_id: int):
+        """标记指定子请求停止，由生成循环恢复后 abort 当前分段并清理资源。"""
+        self.active_req_ids.discard(request_id)
 
     async def abort(
         self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None

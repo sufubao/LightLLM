@@ -282,7 +282,7 @@ def test_compact_markers_round_trip_and_do_not_become_stop_sequences():
     copy = SamplingParams()
     copy.init(None, **params.to_origin_dict())
     assert copy.tool_call_cache_markers.to_list() == [[8, 9], [10]]
-    assert copy.stop_sequences.to_list() == [[11]]
+    assert copy.stop_sequences.to_token_ids_list() == [[11]]
     copy.init(None)
     assert copy.tool_call_cache_markers.to_list() == []
 
@@ -441,6 +441,7 @@ def test_later_speculative_packs_keep_kv_updates_but_preserve_first_finish_bound
         shm_req=shm,
         finish_status=status,
         finish_output_len=0,
+        output_constraint=None,
         set_next_gen_token_id=lambda token, logprob, length, rank: accepted.append((token, length)),
         update_finish_status=(lambda **kwargs: None) if callback_finishes else finish,
     )
@@ -452,6 +453,37 @@ def test_later_speculative_packs_keep_kv_updates_but_preserve_first_finish_bound
     if is_master:
         assert shm.finish_token_index == 5
         assert shm.shm_cur_output_len == 2
+
+
+@pytest.mark.parametrize("is_master", [False, True])
+@pytest.mark.parametrize("grammar_error", [False, True])
+def test_constraint_completion_preserves_the_accepted_cache_boundary(is_master, grammar_error):
+    from lightllm.server.core.objs import FinishStatus
+    from lightllm.server.router.model_infer.infer_batch import InferReqUpdatePack
+
+    committed = []
+    constraint = SimpleNamespace(error=None, is_terminated=lambda: True)
+
+    def commit(token):
+        committed.append(token)
+        if grammar_error:
+            constraint.error = "invalid sampled token"
+
+    constraint.commit = commit
+    req = SimpleNamespace(
+        shm_req=SimpleNamespace(input_len=4),
+        finish_status=FinishStatus(),
+        finish_output_len=0,
+        output_constraint=constraint,
+        set_next_gen_token_id=lambda *args, **kwargs: None,
+        update_finish_status=lambda **kwargs: None,
+    )
+    InferReqUpdatePack(req, 2).handle(7, 0.0, 0, [], is_master)
+    InferReqUpdatePack(req, 3).handle(8, 0.0, 0, [], is_master)
+    assert committed == [7]
+    assert req.finish_output_len == 2
+    expected = FinishStatus.FINISHED_ERROR if grammar_error else FinishStatus.FINISHED_STOP
+    assert req.finish_status.status == expected
 
 
 @pytest.mark.parametrize("seed", range(8))

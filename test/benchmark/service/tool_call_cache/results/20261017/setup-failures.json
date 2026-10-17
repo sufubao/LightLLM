@@ -38,6 +38,12 @@
       "kind": "orchestration helper path renamed without staging a matching file",
       "measured_validation_or_heldout_trials_started": 0,
       "resolution": "Preserve the terminal driver and failed invocation records. Correct the helper path and resume on the same healthy services with unchanged source/runtime/scenarios. Both JSON-schema checks and the subsequent matched96-request warmup passed, including request-correlated TTFT/cache verification."
+    },
+    {
+      "phase": "normal-long-v9 service startup before any long-window warmup",
+      "kind": "requested TCP port failed upstream strict bind validation after retiring prior candidate",
+      "preserved_complete_short_window_pairs": 9,
+      "resolution": "Confirmed launcher exited with address-in-use error and later verified port bindability; no other process stopped. Add an untimed bounded prelaunch bindability wait, tested with an occupied socket and its subsequent release. Resume only the unstarted long-window stage; preserve completed short-window results and failed launcher records."
     }
   ]
 }

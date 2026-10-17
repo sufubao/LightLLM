@@ -5,12 +5,35 @@ and a copy of this launcher. Model files and the source snapshot are read-only.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
+import time
+
+
+def wait_for_port(port, timeout=180):
+    """Let a retired service release its TCP endpoint before strict startup checks."""
+    deadline = time.monotonic() + timeout
+    announced = False
+    while True:
+        with socket.socket() as probe:
+            try:
+                probe.bind(("", port))
+                return
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"port {port} is still occupied; no process was stopped") from exc
+        if not announced:
+            print(f"Waiting for port {port} to become bindable before service startup (untimed)", flush=True)
+            announced = True
+        time.sleep(0.5)
 
 
 def main():
@@ -152,6 +175,7 @@ def main():
     (record / "service-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     shutil.copy2(__file__, record / "launch_server.py")
     print(json.dumps(manifest, indent=2), flush=True)
+    wait_for_port(args.port)
     raise SystemExit(subprocess.call(command))
 
 

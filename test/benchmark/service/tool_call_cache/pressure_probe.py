@@ -29,6 +29,7 @@ def post(base, endpoint, body):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
+    parser.add_argument("--model", default="tool-cache-qwen4b")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
@@ -58,7 +59,7 @@ def main():
             else "Say OK. Do not call any tools."
         )
         body = {
-            "model": "tool-cache-qwen4b",
+            "model": args.model,
             "messages": [{"role": "user", "content": filler + "\n" + instruction}],
             "tools": tools,
             "temperature": 0,
@@ -78,7 +79,7 @@ def main():
                 args.url,
                 "/v1/completions",
                 {
-                    "model": "tool-cache-qwen4b",
+                    "model": args.model,
                     "prompt": prompt,
                     "max_tokens": 1,
                     "temperature": 0,

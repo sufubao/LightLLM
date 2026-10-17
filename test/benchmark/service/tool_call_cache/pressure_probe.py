@@ -7,6 +7,7 @@ result continuation correctness. Run both policies with identical arguments.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -31,6 +32,26 @@ def signature(response):
     return {"content": message.get("content"), "calls": [call["function"] for call in message.get("tool_calls") or []]}
 
 
+def continuation_body(body, response):
+    """Use actual tool results, keeping opaque call IDs deterministic in pairs."""
+    result = copy.deepcopy(body)
+    message = response["choices"][0]["message"]
+    calls = copy.deepcopy(message.get("tool_calls") or [])
+    if not calls:
+        raise ValueError("a tool-result continuation requires an actual tool call")
+    tool_results = []
+    for index, call in enumerate(calls):
+        arguments = json.loads(call["function"]["arguments"])
+        if call["function"]["name"] != "echo" or not isinstance(arguments.get("text"), str):
+            raise ValueError("unexpected echo invocation")
+        call["id"] = f"pressure_call_{index}"
+        tool_results.append({"role": "tool", "tool_call_id": call["id"], "content": arguments["text"]})
+    result["messages"].append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
+    result["messages"].extend(tool_results)
+    result["messages"].append({"role": "user", "content": "Call echo with text hello. Use the tool now."})
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
@@ -43,7 +64,10 @@ def main():
     parser.add_argument("--churn-tokens", type=int, default=8192)
     parser.add_argument("--wait-seconds", type=float, default=0)
     parser.add_argument("--kind", choices=["tool", "normal", "length"], default="tool")
+    parser.add_argument("--return-mode", choices=["repeat", "continuation"], default="repeat")
     args = parser.parse_args()
+    if args.return_mode == "continuation" and args.kind != "tool":
+        parser.error("tool-result continuation requires --kind tool")
     tools = [
         {
             "type": "function",
@@ -91,13 +115,15 @@ def main():
                 },
             )
             churn.append({"seconds": elapsed, "usage": response["usage"]})
-        returned, return_s = post(args.url, "/v1/chat/completions", body)
+        return_body = continuation_body(body, initial) if args.return_mode == "continuation" else body
+        returned, return_s = post(args.url, "/v1/chat/completions", return_body)
         if returned["choices"][0]["finish_reason"] != expected:
             raise RuntimeError(f"unexpected return end state: {returned}")
         results.append(
             {
                 "repeat": repeat,
                 "request_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
+                "return_request_sha256": hashlib.sha256(json.dumps(return_body, sort_keys=True).encode()).hexdigest(),
                 "initial_seconds": initial_s,
                 "initial_usage": initial["usage"],
                 "initial_finish_reason": initial["choices"][0]["finish_reason"],

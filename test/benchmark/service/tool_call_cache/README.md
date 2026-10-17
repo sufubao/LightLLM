@@ -14,6 +14,9 @@ This directory provides complementary kinds of evidence:
   and independent, one-token completion requests that fill the cache. Repeating
   the original prompt isolates eviction from chat-history reserialization. This
   is not a production throughput result.
+  `--return-mode continuation` instead sends the actual generated tool result
+  and another tool instruction after the same cache pressure, exercising the
+  agent loop. Opaque call IDs are normalized consistently across paired requests.
 * `replay.py`: closed-loop, trace-shaped load against a real inference server.
   The released text is redacted, so contexts are synthetic. Actual model outputs
   feed forward into subsequent requests. Original context sizes and waits are

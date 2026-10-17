@@ -149,7 +149,22 @@ class RadixCache:
             int(self.total_token_num * fraction),
             self.evict_tree_set.discard,
             lambda node: self.evict_tree_set.add(node) if node.is_leaf() else None,
+            self._fit_retention_prefix,
         )
+
+    def _fit_retention_prefix(self, node, token_budget):
+        limit = token_budget // self.page_size * self.page_size
+        if limit == 0:
+            return None
+        while node.parent is not None and node.parent.node_prefix_total_len >= limit:
+            node = node.parent
+        if node.node_prefix_total_len <= limit:
+            return node
+        self.evict_tree_set.discard(node)
+        prefix = node.split_node(limit - node.parent.node_prefix_total_len)
+        if node.is_leaf():
+            self.evict_tree_set.add(node)
+        return prefix
 
     def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:

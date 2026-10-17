@@ -10,7 +10,7 @@ import numpy as np
 
 
 class ToolCallCacheRetention:
-    def __init__(self, duration, token_budget, discard_node, add_node):
+    def __init__(self, duration, token_budget, discard_node, add_node, fit_prefix=None):
         if duration <= 0 or token_budget < 0:
             raise ValueError("retention duration must be positive and token budget nonnegative")
         self.duration = duration
@@ -19,6 +19,7 @@ class ToolCallCacheRetention:
         self.protected_tokens = 0
         self._discard_node = discard_node
         self._add_node = add_node
+        self._fit_prefix = fit_prefix
         self._leases = {}
         self._expiry = SortedDict()
         self._sequence = 0
@@ -29,8 +30,17 @@ class ToolCallCacheRetention:
             self._remove(self._expiry.peekitem(0)[1])
 
     def protect(self, node):
-        if node is None or node.node_prefix_total_len > self.token_budget:
+        if node is None:
             return
+        if node.node_prefix_total_len > self.token_budget:
+            if self._fit_prefix is not None:
+                node = self._fit_prefix(node, self.token_budget)
+            else:
+                # Hybrid state can only resume at an existing checkpoint.
+                while node is not None and node.node_prefix_total_len > self.token_budget:
+                    node = node.parent
+            if node is None:
+                return
         # Protect ancestors as well: evicting a tail must not expose a still
         # useful prefix to immediate eviction. Shared ancestors count only once.
         path = []

@@ -71,7 +71,8 @@ branches. Abort/error and pauses do not revoke other requests' preferences.
 
 The token detector is advisory, independent of API parsing: quoted or malformed
 tool markers may receive a preference without changing the response. Prefixes
-larger than the configured budget fall back to ordinary eviction. Preferences
+larger than the budget retain a page-aligned partial prefix; hybrid attention
+uses the largest existing resumable checkpoint within budget. Preferences
 include shared ancestors, count shared KV only once, expire without refreshing
 recency, and never acquire references or prevent pressure-driven reclamation.
 Hybrid recurrent-state eviction follows the same preference but still reclaims

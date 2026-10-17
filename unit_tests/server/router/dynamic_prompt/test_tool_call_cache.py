@@ -77,7 +77,60 @@ def test_budget_and_oversized_prefix():
     oversized = insert(tree, list(range(100, 121)))
     tree.tool_call_retention.protect(oversized)
     assert not oversized.cache_protected
-    assert tree.tool_call_retention.protected_tokens <= 20
+    assert oversized.parent.cache_protected
+    assert tree.tool_call_retention.protected_tokens == 20
+
+
+@pytest.mark.parametrize("page_size", [1, 2, 4])
+def test_oversized_context_keeps_a_page_aligned_partial_prefix(page_size):
+    tree = RadixCache(20, 0, page_size=page_size)
+    tree.enable_tool_call_retention(10, 0.25)
+    original = list(range(12))
+    tail = insert(tree, original)
+    tree.tool_call_retention.protect(tail)
+    kept = 5 // page_size * page_size
+    assert tree.tool_call_retention.protected_tokens == kept
+    insert(tree, list(range(30, 38)))
+    tree.evict(12, lambda _: None)
+    _, matched, _ = tree.match_prefix(torch.tensor(original), update_refs=False)
+    assert matched == kept
+    tree.evict_tree_set._check()
+
+
+def test_partial_prefix_split_preserves_active_request_references():
+    tree = RadixCache(20, 0)
+    tree.enable_tool_call_retention(10, 0.25)
+    original = torch.arange(12)
+    tree.insert(original)
+    active, _, _ = tree.match_prefix(original, update_refs=True)
+    tree.tool_call_retention.protect(active)
+    assert active.node_prefix_total_len == 12
+    assert active.ref_counter == active.parent.ref_counter == 1
+    assert tree.get_refed_tokens_num() == 12
+    tree.dec_node_ref_counter(active)
+    assert tree.get_refed_tokens_num() == 0
+    tree.evict(7, lambda _: None)
+    _, matched, values = tree.match_prefix(original, update_refs=False)
+    assert matched == 5
+    assert values.tolist() == list(range(5))
+
+
+def test_oversized_hybrid_prefix_uses_existing_resumable_checkpoint():
+    buffers = SimpleNamespace(free_state_cache=lambda *args, **kwargs: None)
+    tree = HybridAttPagedRadixCache(20, 0, 2, 2, SimpleNamespace(big_page_buffers=buffers), buffers)
+    tree.enable_tool_call_retention(10, 0.25)
+    _, tail = tree.insert(
+        torch.arange(12),
+        block_hashs=[11, 22, 33, 44, 55, 66],
+        block_state_idxs=[None] * 6,
+        len_to_big_page_id=SortedDict({4: 100, 8: 101, 12: 102}),
+    )
+    tree.tool_call_retention.protect(tail)
+    assert not tail.cache_protected
+    assert not tail.parent.cache_protected
+    assert tail.parent.parent.cache_protected
+    assert tail.parent.parent.big_page_buffer_idx == 100
+    assert tree.tool_call_retention.protected_tokens == 4
 
 
 @pytest.mark.parametrize("split_by_insert", [False, True])

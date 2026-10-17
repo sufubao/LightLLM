@@ -143,11 +143,25 @@ async def run(args):
                     want_tool = hashlib.sha256(f"{args.seed}:{name}:{row['request']}".encode()).digest()[0] < 64
                 if planned_abandon and turn == 0:
                     want_tool = True
+                output_target = (
+                    max(1, min(args.max_output_target, round(row["output_tokens"] * args.output_scale)))
+                    if args.output_scale > 0
+                    else 0
+                )
                 instruction = (
                     "Call echo with text hello. Use the tool now."
                     if want_tool
                     else "Reply with only OK. Do not call any tools."
                 )
+                if output_target:
+                    if want_tool:
+                        argument = " ".join(["hello"] * max(1, output_target - 24))
+                        instruction = f'Call echo with text set to this exact string: "{argument}". Use the tool now.'
+                    else:
+                        answer = " ".join(["OK"] * output_target)
+                        instruction = (
+                            f'Reply with exactly this text, without quotes: "{answer}". Do not call any tools.'
+                        )
                 prompt_hash, client_tokens = await asyncio.to_thread(prepare, tokenizer, messages, instruction, target)
                 if client_tokens > args.max_prompt_tokens + 128:
                     messages = [system]
@@ -161,7 +175,7 @@ async def run(args):
                     "messages": messages,
                     "tools": TOOLS,
                     "temperature": 0,
-                    "max_tokens": 128,
+                    "max_tokens": max(128, output_target + 128),
                     "chat_template_kwargs": {"enable_thinking": False},
                 }
                 started = time.perf_counter()
@@ -186,6 +200,8 @@ async def run(args):
                     "request_id": request_id,
                     "source_request": row["request"],
                     "source_input_tokens": row["input_tokens"],
+                    "source_output_tokens": row["output_tokens"],
+                    "target_output_tokens": output_target,
                     "target_prompt_tokens": target,
                     "session": name,
                     "turn": turn,
@@ -216,7 +232,10 @@ async def run(args):
                     assistant["tool_calls"] = calls
                 messages.append(assistant)
                 for call in calls:
-                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": "hello"})
+                    arguments = json.loads(call["function"]["arguments"])
+                    if call["function"]["name"] != "echo" or not isinstance(arguments.get("text"), str):
+                        raise RuntimeError(f"invalid echo invocation: {request_id} {call}")
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": arguments["text"]})
                 previous_was_tool = bool(calls)
                 if planned_abandon and turn == 0:
                     break
@@ -257,6 +276,10 @@ async def run(args):
         "cached_tokens": cached_tokens,
         "cache_hit_ratio": cached_tokens / prompt_tokens,
         "prefilled_tokens": prompt_tokens - cached_tokens,
+        "output_tokens": sum(r["usage"]["completion_tokens"] for r in output_rows),
+        "output_target_capped_requests": sum(
+            r["source_output_tokens"] * args.output_scale > args.max_output_target for r in output_rows
+        ),
         "request_seconds": {
             "mean": statistics.mean(r["seconds"] for r in output_rows),
             "p50": percentile([r["seconds"] for r in output_rows], 0.5),
@@ -290,6 +313,13 @@ def main():
     parser.add_argument("--namespace", default="run", help="Unique per paired trial, identical for both policies")
     parser.add_argument("--split", choices=["validation", "test", "all"], default="validation")
     parser.add_argument("--mix", choices=["trace", "ordinary", "all-tools", "mixed25"], default="trace")
+    parser.add_argument(
+        "--output-scale",
+        type=float,
+        default=0,
+        help="Optional source-shaped output target; zero uses short echo/OK. Actual outputs are measured.",
+    )
+    parser.add_argument("--max-output-target", type=int, default=512)
     parser.add_argument("--abandon-fraction", type=float, default=0)
     parser.add_argument("--min-tool-wait", type=float, default=0)
     parser.add_argument("--context-scale", type=float, default=0.05)

@@ -18,7 +18,12 @@ This directory provides complementary kinds of evidence:
   The released text is redacted, so contexts are synthetic. Actual model outputs
   feed forward into subsequent requests. Original context sizes and waits are
   scaled explicitly; wait caps and compactions are counted. Prompt-token hashes
-  permit checking that paired runs received identical token sequences.
+  permit checking that paired runs received identical token sequences. The
+  default uses short echo/OK outputs and does not preserve original output
+  lengths. `--output-scale 0.5 --max-output-target 256` adds explicitly capped,
+  source-shaped output targets; the model's actual lengths are measured and
+  paired, not assumed to match those targets. Echo results feed the actual
+  generated arguments back into the conversation.
 * `run_paired.py`: sequential paired trials with alternating order, archived
   service manifests, an immutable client snapshot, strict prompt/output checks,
   and server TTFT/cache metrics correlated by request ID. Comparison stops on

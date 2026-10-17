@@ -2,7 +2,6 @@
   "models": [
     {
       "model": "Qwen3-4B",
-      "source_revision": "2c54d5a09e7e92d4f5126b92a5a457448c9593e6",
       "files": [
         {
           "name": "config.json",
@@ -59,11 +58,11 @@
           "bytes": 2776833,
           "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
         }
-      ]
+      ],
+      "recorded_source_revision": "2c54d5a09e7e92d4f5126b92a5a457448c9593e6"
     },
     {
       "model": "Qwen3.5-27B",
-      "source_revision": "a3ca5719420477ab4390cf6262d6de65e8871c37",
       "files": [
         {
           "name": "chat_template.jinja",
@@ -170,7 +169,9 @@
           "bytes": 6722759,
           "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
         }
-      ]
+      ],
+      "recorded_source_revision": "a3ca5719420477ab4390cf6262d6de65e8871c37"
     }
-  ]
+  ],
+  "identity": "Actual weight/tokenizer file hashes identify the tested files; repository/download revisions are recorded provenance."
 }

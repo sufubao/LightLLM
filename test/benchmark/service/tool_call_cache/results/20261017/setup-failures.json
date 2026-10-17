@@ -113,6 +113,38 @@
       "kind": "readiness probe raced Docker container creation",
       "measured_trials_started": 0,
       "resolution": "Preserve failed invocation. Readiness now permits the owned live launcher to create its container and fails promptly on actual model-worker startup traceback. This changes orchestration only; all formal comparison gates remain."
+    },
+    {
+      "phase": "controlled hybrid v10 startup after complete heldout",
+      "kind": "CPU pinned big-page SSM allocation again returned CUDA invalid argument before inference",
+      "failed_uninstrumented_startups": 2,
+      "source_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+      "physical_gpu_indices": [
+        4,
+        5
+      ],
+      "state_dtype": "float32",
+      "pinned_ssm_shape": [
+        18,
+        48,
+        24,
+        128,
+        128
+      ],
+      "pinned_ssm_bytes": 1358954496,
+      "heldout_paired_trials_preserved": 54,
+      "controlled_trials_started_before_failures": 0,
+      "isolated_diagnostic_modes": [
+        "plain_model_sized_gpu_occupancy",
+        "nccl_flashinfer_model_sized_gpu_occupancy"
+      ],
+      "diagnostic_ranks_per_mode": 2,
+      "diagnostic_gpu_bytes_per_rank": 36507222016,
+      "diagnostic_pinned_ssm_bytes_per_rank": 1358954496,
+      "diagnostic_allocation_and_copy_verified": true,
+      "unchanged_configuration_recovery_health_passed": true,
+      "resolution": "Preserve both terminal startup records and raw logs privately. Both isolated allocation paths succeeded on both ranks, including real NCCL/FlashInfer communication, so the full startup trigger remains unconfirmed. Stop only verified failed own services, retain the healthy control, and resume only the three unstarted controlled probes at identical source/image, FP32 state, cache capacity, GPU group, TTL120 and fraction0.25. The post-diagnostic original configuration passed health. No diagnostic service contributes performance results; all54 completed heldout comparisons remain unchanged."
     }
   ]
 }

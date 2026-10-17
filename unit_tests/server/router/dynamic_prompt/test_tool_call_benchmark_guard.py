@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -35,3 +37,40 @@ def test_counter_reset_invalidates_hardware_observation():
     paired.thermal_events([sample()], {"0"}, baseline)
     with pytest.raises(ValueError, match="counters reset"):
         paired.thermal_events([sample(software=0)], {"0"}, baseline)
+
+
+def test_final_sample_detects_a_thermal_burst_at_the_end_of_the_workload(monkeypatch, tmp_path):
+    first_sample = threading.Event()
+    release_sample = threading.Event()
+    late_burst = {"active": False}
+
+    def query(command, **kwargs):
+        if command[0] == "docker":
+            return "PID\n10\n"
+        if command[1] == "--query-gpu=index,uuid":
+            return "0, GPU0\n"
+        if command[1].startswith("--query-compute-apps"):
+            return "GPU0, 10, 40000 MiB\n"
+        counter = 101 if late_burst["active"] else 100
+        if not first_sample.is_set():
+            first_sample.set()
+            assert release_sample.wait(5)
+        return sample(software=counter) + "\n"
+
+    monkeypatch.setattr(paired.subprocess, "check_output", query)
+    services = {"candidate": {"configuration": {"gpu": "0", "name": "test"}}}
+    errors, stop, worker = paired.monitor_gpus(services, tmp_path)
+    try:
+        assert first_sample.wait(5)
+        late_burst["active"] = True
+        stop.set()
+        release_sample.set()
+        worker.join(25)
+        assert not worker.is_alive()
+        assert any(row.get("thermal_violations") for row in errors)
+        rows = [json.loads(line) for line in (tmp_path / "gpu-observations.jsonl").read_text().splitlines()]
+        assert len(rows) >= 2
+    finally:
+        stop.set()
+        release_sample.set()
+        worker.join(25)

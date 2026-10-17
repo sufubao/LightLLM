@@ -54,7 +54,8 @@ def monitor_gpus(services, destination):
 
     def poll():
         with (destination / "gpu-observations.jsonl").open("x") as output:
-            while not stop.is_set():
+            final_sample = False
+            while True:
                 try:
                     apps = subprocess.check_output(
                         ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader"],
@@ -95,7 +96,11 @@ def monitor_gpus(services, destination):
                     errors.append(record)
                 output.write(json.dumps(record) + "\n")
                 output.flush()
-                stop.wait(2)
+                if final_sample:
+                    break
+                # Always sample once after the parent finishes the workload;
+                # a thermal burst at the last request must not escape detection.
+                final_sample = stop.wait(2)
 
     worker = threading.Thread(target=poll, daemon=True)
     worker.start()

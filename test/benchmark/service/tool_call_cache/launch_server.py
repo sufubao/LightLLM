@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--retention", type=float, default=0)
     parser.add_argument("--fraction", type=float, default=0.5)
     parser.add_argument("--disable-cudagraph", action="store_true")
+    parser.add_argument("--original-base", action="store_true", help="Source predates retention flags; omit them")
     args = parser.parse_args()
     if "EXP_RUN_DIR" not in os.environ or len(args.revision) != 40:
         parser.error("run under exp and supply a full source revision")
@@ -84,6 +85,8 @@ def main():
         str(args.fraction),
         "--llm_prefill_att_backend",
         "triton",
+        "--disable_vision",
+        "--disable_audio",
         "--graph_max_batch_size",
         str(args.max_requests),
         "--graph_max_len_in_batch",
@@ -91,6 +94,11 @@ def main():
     ]
     if args.disable_cudagraph:
         command.append("--disable_cudagraph")
+    if args.original_base:
+        if args.retention:
+            parser.error("original base cannot enable retention")
+        offset = command.index("--tool_call_cache_retention_seconds")
+        del command[offset : offset + 4]
     image = json.loads(subprocess.check_output(["docker", "image", "inspect", args.image], text=True))[0]
     hardware = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=index,name,uuid,memory.total,driver_version", "--format=csv"], text=True

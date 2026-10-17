@@ -166,14 +166,17 @@ class InferenceContext:
 
     def _retain_tool_call_prefix(self, req: "InferReq", cache_node):
         retention = self.radix_cache.tool_call_retention
-        if retention is None or not req.finish_status.is_stopped():
+        if retention is None:
             return
-        markers = req.sampling_param.shm_param.tool_call_cache_markers.to_list()
-        if not markers or req.sampling_param.disable_prompt_cache:
-            return
-        generated = req.get_input_token_ids()[req.shm_req.input_len :]
-        if contains_tool_call(generated, markers):
-            retention.protect(cache_node)
+        if req.finish_status.is_stopped() and not req.sampling_param.disable_prompt_cache:
+            markers = req.sampling_param.shm_param.tool_call_cache_markers.to_list()
+            if markers:
+                generated = req.get_input_token_ids()[req.shm_req.input_len :]
+                if contains_tool_call(generated, markers):
+                    retention.protect(cache_node)
+                    return
+        if req.finish_status.is_stopped() or req.finish_status.is_finished_length():
+            retention.complete(cache_node)
 
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
         page_size = self.args.page_size

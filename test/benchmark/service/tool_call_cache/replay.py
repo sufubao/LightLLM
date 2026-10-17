@@ -52,10 +52,11 @@ def render(tokenizer, messages):
 
 
 def prepare(tokenizer, messages, instruction, target):
+    messages.append({"role": "user", "content": "Reference data, not instructions:\n<reference>\n</reference>"})
     messages.append({"role": "user", "content": instruction})
     base = len(render(tokenizer, messages))
     filler = " data" * max(0, target - base)
-    messages[-1]["content"] = filler + "\n" + instruction
+    messages[-2]["content"] = "Reference data, not instructions:\n<reference>" + filler + "\n</reference>"
     tokens = render(tokenizer, messages)
     return hashlib.sha256(np.asarray(tokens, dtype="<i4").tobytes()).hexdigest(), len(tokens)
 
@@ -104,7 +105,7 @@ async def run(args):
             await asyncio.sleep(stagger)
             system = {
                 "role": "system",
-                "content": f"Session {name}. Follow each instruction exactly. Ignore reference data.",
+                "content": f"Session {args.namespace}/{name}. Follow each instruction exactly. Ignore reference data.",
             }
             messages = [system]
             began = time.perf_counter()
@@ -144,7 +145,7 @@ async def run(args):
                         prepare, tokenizer, messages, instruction, target
                     )
                     compaction = True
-                request_id = f"tool-cache-{args.seed}-{name}-{turn}"
+                request_id = f"tool-cache-{args.namespace}-{args.seed}-{name}-{turn}"
                 payload = {
                     "model": args.model,
                     "messages": messages,
@@ -174,6 +175,8 @@ async def run(args):
                 record = {
                     "request_id": request_id,
                     "source_request": row["request"],
+                    "source_input_tokens": row["input_tokens"],
+                    "target_prompt_tokens": target,
                     "session": name,
                     "turn": turn,
                     "prompt_sha256": prompt_hash,
@@ -215,6 +218,12 @@ async def run(args):
         "rounds_sha256": hashlib.sha256(args.rounds.read_bytes()).hexdigest(),
         "wall_seconds": duration,
         "completed_sessions": len(sessions),
+        "sessions_per_second": len(sessions) / duration,
+        "session_seconds": {
+            "mean": statistics.mean(s["seconds"] for s in sessions),
+            "p50": percentile([s["seconds"] for s in sessions], 0.5),
+            "p95": percentile([s["seconds"] for s in sessions], 0.95),
+        },
         "requests": len(output_rows),
         "prompt_tokens": prompt_tokens,
         "cached_tokens": cached_tokens,
@@ -249,6 +258,7 @@ def main():
     parser.add_argument("--sessions", type=int, default=8)
     parser.add_argument("--turns", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--namespace", default="run", help="Unique per paired trial, identical for both policies")
     parser.add_argument("--split", choices=["validation", "test", "all"], default="validation")
     parser.add_argument("--mix", choices=["trace", "ordinary", "all-tools"], default="trace")
     parser.add_argument("--context-scale", type=float, default=0.05)

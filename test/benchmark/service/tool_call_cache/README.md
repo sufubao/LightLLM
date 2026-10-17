@@ -54,6 +54,9 @@ enables temporary eviction preferences after normally stopped generations that
 contain the configured parser's tool-start marker. Only tool-enabled chat
 requests supply that marker. `length`, abort/error and paused requests receive
 no new preference. The default duration of zero preserves ordinary eviction.
+An ordinary stop or length-limited continuation also revokes stale preferences
+along its completed branch, while preserving ancestors shared by other protected
+branches. Abort/error and pauses do not revoke other requests' preferences.
 
 The token detector is advisory, independent of API parsing: quoted or malformed
 tool markers may receive a preference without changing the response. Prefixes

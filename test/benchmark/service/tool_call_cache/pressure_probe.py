@@ -32,7 +32,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--prefix-words", type=int, default=4096)
+    parser.add_argument("--prefix-words", type=int, default=1024)
     parser.add_argument("--churn-requests", type=int, default=6)
     parser.add_argument("--churn-tokens", type=int, default=8192)
     parser.add_argument("--wait-seconds", type=float, default=0)
@@ -69,6 +69,8 @@ def main():
         expected = {"tool": "tool_calls", "normal": "stop", "length": "length"}[args.kind]
         if initial["choices"][0]["finish_reason"] != expected:
             raise RuntimeError(f"unexpected end state: {initial}")
+        if args.wait_seconds:
+            time.sleep(args.wait_seconds)
         churn = []
         for _ in range(args.churn_requests):
             prompt = [rng.randrange(100, 140000) for _ in range(args.churn_tokens)]
@@ -83,8 +85,6 @@ def main():
                 },
             )
             churn.append({"seconds": elapsed, "usage": response["usage"]})
-        if args.wait_seconds:
-            time.sleep(args.wait_seconds)
         returned, return_s = post(args.url, "/v1/chat/completions", body)
         if returned["choices"][0]["finish_reason"] != expected:
             raise RuntimeError(f"unexpected return end state: {returned}")

@@ -134,6 +134,25 @@ def test_budget_counts_structurally_retained_ancestors():
     assert tree.tool_call_retention.protected_tokens == 10
 
 
+def test_final_answer_revokes_stale_tool_prefix_but_preserves_other_branches():
+    tree = cache()
+    left = insert(tree, [1, 2, 3, 4])
+    right = insert(tree, [1, 2, 5, 6])
+    retention = tree.tool_call_retention
+    retention.protect(left)
+    retention.protect(right)
+    final = insert(tree, [1, 2, 3, 4, 7, 8])
+    retention.complete(final)
+    assert not left.cache_protected
+    assert right.cache_protected
+    assert right.parent.cache_protected
+    assert retention.protected_tokens == 4
+    tree.evict_tree_set._check()
+    retention.complete(right)
+    assert retention.protected_tokens == 0
+    tree.evict_tree_set._check()
+
+
 def test_hybrid_retains_both_kv_and_state_without_pinning():
     freed = []
     buffers = SimpleNamespace(
@@ -247,6 +266,8 @@ def test_randomized_split_expiry_eviction_and_rank_agreement(seed):
             node = insert(tree, tokens)
             if protect:
                 retention.protect(node)
+            else:
+                retention.complete(node)
             shared, _, _ = tree.match_prefix(torch.tensor(tokens[:4]), update_refs=True)
             if shared is not None:
                 tree.dec_node_ref_counter(shared)

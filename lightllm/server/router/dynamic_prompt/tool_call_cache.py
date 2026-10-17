@@ -58,6 +58,19 @@ class ToolCallCacheRetention:
         node.cache_protected = False
         node.cache_retention = None
 
+    def complete(self, node):
+        """Revoke stale preferences after a continuation answers or hits length.
+
+        Stop at a shared ancestor with another protected branch. Its prefix is
+        still useful to that branch's outstanding tool-result continuation.
+        """
+        while node is not None and node.parent is not None:
+            if any(child.cache_protected for child in node.children.values()):
+                break
+            if node.cache_protected:
+                self._remove(node)
+            node = node.parent
+
     def split(self, node, parent):
         """Transfer a compressed radix edge's lease without changing its size."""
         entry = self._leases.get(node)

@@ -98,10 +98,10 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     slot = cache.alloc_one_state_cache()
     source_req = SimpleNamespace(req_idx=0)
     req.init_hybrid_attention_state(source_req)
-    req.req_to_conv_state.buffer[:, 0].normal_()
-    req.req_to_ssm_state.buffer[:, 0].normal_()
-    conv = req.req_to_conv_state.buffer[:, 0, ..., :3].clone()
-    updates = req.ssm_update_cache
+    req.recurrent_state.conv_state.buffer[:, 0].normal_()
+    req.recurrent_state.ssm_state.buffer[:, 0].normal_()
+    conv = req.recurrent_state.conv_state.buffer[:, 0, ..., :3].clone()
+    updates = req.recurrent_state.updates
     if updates is not None:
         # Save an accepted suffix, not merely an already folded checkpoint.
         heads, dim = config.num_linear_v_heads, config.head_linear_k_dim
@@ -120,16 +120,16 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         updates.accept_updates(ids, accepted)
         ssm = updates.snapshot_accepted_state(0).clone()
         if mtp_step:
-            req.req_to_mtp_state_index[2] = mtp_step
+            req.recurrent_state.accepted_index[2] = mtp_step
     else:
-        ssm = req.req_to_ssm_state.buffer[:, 0].clone()
+        ssm = req.recurrent_state.ssm_state.buffer[:, 0].clone()
     if small_page:
         req.save_state(0, slot, cache)
     else:
         req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot])
     torch.cuda.synchronize()
-    req.req_to_conv_state.buffer[:, 0].zero_()
-    req.req_to_ssm_state.buffer[:, 0].zero_()
+    req.recurrent_state.conv_state.buffer[:, 0].zero_()
+    req.recurrent_state.ssm_state.buffer[:, 0].zero_()
     req.req_to_indexer_tail.buffer.normal_()
     unchanged = req.req_to_indexer_tail.buffer[:, [0, 1, 3]].clone()
     dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
@@ -143,17 +143,19 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         if mode == "replay":
             assert updates.cursors[2] == 0
         if mtp_step:
-            assert req.req_to_mtp_state_index[2] == 0
-    assert torch.equal(req.req_to_conv_state.buffer[:, 2, ..., :3], conv)
-    assert torch.equal(req.req_to_ssm_state.buffer[:, 2 * req.ssm_slots_per_req], ssm)
+            assert req.recurrent_state.accepted_index[2] == 0
+    assert torch.equal(req.recurrent_state.conv_state.buffer[:, 2, ..., :3], conv)
+    assert torch.equal(req.recurrent_state.ssm_state.buffer[:, 2 * req.recurrent_state.slots_per_req], ssm)
     # Both page sizes are aligned to complete pools. Restoring a prefix must
     # discard stale tail values from a previously allocated request slot.
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     req.req_to_indexer_tail.buffer[:, 2].normal_()
     req.init_hybrid_attention_state(dest_req)
-    assert not req.req_to_conv_state.buffer[:, 2].any()
-    assert not req.req_to_ssm_state.buffer[:, 2 * req.ssm_slots_per_req : 3 * req.ssm_slots_per_req].any()
+    assert not req.recurrent_state.conv_state.buffer[:, 2].any()
+    assert not req.recurrent_state.ssm_state.buffer[
+        :, 2 * req.recurrent_state.slots_per_req : 3 * req.recurrent_state.slots_per_req
+    ].any()
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     # KV moves carry MLA latents and pooled FP8 bytes; raw keys/gates only

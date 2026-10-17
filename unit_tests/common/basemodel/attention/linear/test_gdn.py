@@ -10,6 +10,7 @@ import lightllm.common.basemodel.attention.create_linear_utils as linear_create_
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
+from lightllm.common.recurrent_state import RecurrentState
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
@@ -69,9 +70,10 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
     )
     # Only CPU metadata is needed for these layout tests.
     req_manager = object.__new__(ReqManagerForMamba)
+    req_manager.recurrent_state = object.__new__(RecurrentState)
     req_manager.HOLD_REQUEST_ID = req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1
-    req_manager.req_to_mtp_state_index = req_to_mtp_state_index
-    req_manager.ssm_update_cache = None
+    req_manager.recurrent_state.accepted_index = req_to_mtp_state_index
+    req_manager.recurrent_state.updates = None
     infer_state = SimpleNamespace(
         batch_size=b_req_idx.shape[0],
         b_req_idx=b_req_idx,
@@ -178,7 +180,7 @@ def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
         assert actual_reqs is reqs and actual_cu is cu
         return positions
 
-    state.backend.req_manager.ssm_update_cache = SimpleNamespace(
+    state.backend.req_manager.recurrent_state.updates = SimpleNamespace(
         prepare_decode=prepare_decode,
         accept_updates=lambda *args: pytest.fail("speculative updates must wait for acceptance"),
     )

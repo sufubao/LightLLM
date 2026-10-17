@@ -5,6 +5,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplayS
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
+from lightllm.common.recurrent_state import RecurrentState
 from lightllm.common.req_manager.linear_att import ReqManagerForMamba
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -32,8 +33,9 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         for cls in [ReplaySSMCache, ReplaySSMCache]
     ]
     manager = object.__new__(ReqManagerForMamba)
-    manager.ssm_update_cache = caches[1]
-    manager.req_to_mtp_state_index = torch.zeros(5, device="cuda", dtype=torch.int32)
+    manager.recurrent_state = object.__new__(RecurrentState)
+    manager.recurrent_state.updates = caches[1]
+    manager.recurrent_state.accepted_index = torch.zeros(5, device="cuda", dtype=torch.int32)
     rows = torch.full((12,), 4, device="cuda", dtype=torch.int32)
     mtp = torch.zeros_like(rows)
     flags = torch.zeros_like(rows)
@@ -71,7 +73,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         return ids, lengths, counts, logical
 
     def metadata(cache):
-        cu, reqs, _ = build_dynamic_mtp_linear_att_state_params(rows, mtp, manager.req_to_mtp_state_index, 4)
+        cu, reqs, _ = build_dynamic_mtp_linear_att_state_params(rows, mtp, manager.recurrent_state.accepted_index, 4)
         return cu, reqs, cache.prepare_decode(reqs, cu)
 
     def forward_accept(index, cu, reqs):
@@ -90,7 +92,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         forward_accept(index, cu, reqs)
         cache.state.copy_(initial)
         cache.cursors.zero_()
-        manager.req_to_mtp_state_index.zero_()
+        manager.recurrent_state.accepted_index.zero_()
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             if capture_metadata:
@@ -102,7 +104,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
     for cache in caches:
         cache.state.copy_(initial)
         cache.cursors.zero_()
-    manager.req_to_mtp_state_index.zero_()
+    manager.recurrent_state.accepted_index.zero_()
     folds = 0
     for iteration in range(32):
         ids, lengths, counts, logical = inputs(iteration)
@@ -126,7 +128,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         torch.testing.assert_close(
             caches[1].state.float(), caches[0].state.float(), atol=0.002, rtol=torch.finfo(dtype).eps
         )
-        table = manager.req_to_mtp_state_index.cpu().tolist()
+        table = manager.recurrent_state.accepted_index.cpu().tolist()
         for req, count in zip(ids, counts):
             assert table[req] == count - 1
         assert table[2] == table[4] == 0

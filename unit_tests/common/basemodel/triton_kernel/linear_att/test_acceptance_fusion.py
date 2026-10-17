@@ -3,6 +3,7 @@ import torch
 import triton
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
+from lightllm.common.recurrent_state import RecurrentState
 from lightllm.common.req_manager.linear_att import ReqManagerForMamba
 
 
@@ -25,14 +26,15 @@ def make(n, width):
     cache.capacity = max(4, triton.next_power_of_2(width))
     cache.verify_width = width
     manager = ReqManagerForMamba.__new__(ReqManagerForMamba)
-    manager.req_to_mtp_state_index = tensor([-9] * (hold + 1))
-    manager.ssm_update_cache = cache
+    manager.recurrent_state = object.__new__(RecurrentState)
+    manager.recurrent_state.accepted_index = tensor([-9] * (hold + 1))
+    manager.recurrent_state.updates = cache
     return manager, args, (ids, lengths, starts)
 
 
 def old(m, args):
-    update(m.req_to_mtp_state_index, *args)
-    m.ssm_update_cache.accept_updates(args[1][args[0].long()], m.req_to_mtp_state_index)
+    update(m.recurrent_state.accepted_index, *args)
+    m.recurrent_state.updates.accept_updates(args[1][args[0].long()], m.recurrent_state.accepted_index)
 
 
 def new(m, args):
@@ -53,19 +55,19 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 new(m, args)
-            expected_index = [-9] * len(m.req_to_mtp_state_index)
+            expected_index = [-9] * len(m.recurrent_state.accepted_index)
             expected_cursor = [7] * len(expected_index)
-            m.req_to_mtp_state_index.fill_(-9)
-            ref.req_to_mtp_state_index.fill_(-9)
-            m.ssm_update_cache.cursors.fill_(7)
-            ref.ssm_update_cache.cursors.fill_(7)
+            m.recurrent_state.accepted_index.fill_(-9)
+            ref.recurrent_state.accepted_index.fill_(-9)
+            m.recurrent_state.updates.cursors.fill_(7)
+            ref.recurrent_state.updates.cursors.fill_(7)
             for step in range(24):
                 mask = []
                 for i, (r, l) in enumerate(zip(ids, lengths)):
                     count = (step + i) % (l + 1)
                     mask.extend([1] * count + [0] * (l - count))
                     expected_index[r] = count - 1
-                    if r != m.ssm_update_cache.hold:
+                    if r != m.recurrent_state.updates.hold:
                         expected_cursor[r] += count if width > 1 else 1
                 args[3].copy_(torch.tensor(mask, device="cuda", dtype=torch.int32))
                 old(ref, args)
@@ -73,15 +75,15 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                     graph.replay()
                 else:
                     new(m, args)
-                assert torch.equal(m.req_to_mtp_state_index, ref.req_to_mtp_state_index)
-                assert torch.equal(m.ssm_update_cache.cursors, ref.ssm_update_cache.cursors)
-                assert m.req_to_mtp_state_index.tolist() == expected_index
-                assert m.ssm_update_cache.cursors.tolist() == expected_cursor
+                assert torch.equal(m.recurrent_state.accepted_index, ref.recurrent_state.accepted_index)
+                assert torch.equal(m.recurrent_state.updates.cursors, ref.recurrent_state.updates.cursors)
+                assert m.recurrent_state.accepted_index.tolist() == expected_index
+                assert m.recurrent_state.updates.cursors.tolist() == expected_cursor
                 checks += 1
             # Native optional-pointer path and manager dispatch leave metadata-only cache absent.
-            m.ssm_update_cache = None
+            m.recurrent_state.updates = None
             new(m, args)
-            assert m.req_to_mtp_state_index.tolist() == expected_index
+            assert m.recurrent_state.accepted_index.tolist() == expected_index
 
     # Non-Replay caches must still receive the accepted request IDs and indexes.
     class CompactProbe:
@@ -90,10 +92,10 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
 
     m, args, (ids, _, _) = make(7, 4)
     probe = CompactProbe()
-    m.ssm_update_cache = probe
+    m.recurrent_state.updates = probe
     new(m, args)
     assert probe.seen[0].tolist() == ids
-    assert torch.equal(probe.seen[1], m.req_to_mtp_state_index)
+    assert torch.equal(probe.seen[1], m.recurrent_state.accepted_index)
     print("ACCEPT_EQUIVALENCE_CHECKS=" + str(checks), flush=True)
 
 
@@ -118,8 +120,9 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, projec
     managers = []
     for cache in caches:
         manager = ReqManagerForMamba.__new__(ReqManagerForMamba)
-        manager.ssm_update_cache = cache
-        manager.req_to_mtp_state_index = torch.zeros(8, dtype=torch.int32, device="cuda")
+        manager.recurrent_state = object.__new__(RecurrentState)
+        manager.recurrent_state.updates = cache
+        manager.recurrent_state.accepted_index = torch.zeros(8, dtype=torch.int32, device="cuda")
         managers.append(manager)
     reqs = torch.full((4,), 7, dtype=torch.int32, device="cuda")
     cu = torch.tensor([0, 3, 6, 9, 12], dtype=torch.int32, device="cuda")
@@ -178,7 +181,7 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, projec
             assert torch.equal(left, right)
         assert torch.equal(caches[0].state, caches[1].state)
         assert torch.equal(caches[0].cursors, caches[1].cursors)
-        assert torch.equal(managers[0].req_to_mtp_state_index, managers[1].req_to_mtp_state_index)
+        assert torch.equal(managers[0].recurrent_state.accepted_index, managers[1].recurrent_state.accepted_index)
         if iteration % 7 == 0:
             assert torch.equal(caches[0].snapshot_accepted_state(3), caches[1].snapshot_accepted_state(3))
         if iteration % 11 == 10:
@@ -187,9 +190,9 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, projec
             assert torch.equal(caches[0].state, caches[1].state)
         if iteration == 19:
             for manager in managers:
-                manager.ssm_update_cache.clear_history(1)
-                manager.ssm_update_cache.state[:, 1].zero_()
-                manager.req_to_mtp_state_index[1] = 0
+                manager.recurrent_state.updates.clear_history(1)
+                manager.recurrent_state.updates.state[:, 1].zero_()
+                manager.recurrent_state.accepted_index[1] = 0
     for cache in caches:
         cache.merge_accepted_updates(reqs[:3])
     assert torch.equal(caches[0].state, caches[1].state)

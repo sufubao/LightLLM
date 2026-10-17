@@ -1,10 +1,13 @@
 import copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+
+if TYPE_CHECKING:
+    from lightllm.common.recurrent_state import RecurrentStateContext
 
 
 @dataclass
@@ -207,8 +210,8 @@ class ModelOutput:
     # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
     logits_token_ids: Optional[torch.Tensor] = None
 
-    # Layout selected by this verify graph; preserved when logits are unpadded.
-    ssm_run_config: Optional[dict] = None
+    # Opaque commit context for this forward/graph; preserved when unpadding.
+    recurrent_state_context: Optional["RecurrentStateContext"] = None
     # Number of physical decode rows represented by each selected logits row.
     logits_row_stride: int = 1
 

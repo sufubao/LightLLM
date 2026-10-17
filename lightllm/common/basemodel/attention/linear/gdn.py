@@ -120,9 +120,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * self.backend.req_manager.ssm_slots_per_req
-        if self.backend.req_manager.ssm_update_cache is not None:
-            self.backend.req_manager.ssm_update_cache.merge_accepted_updates(self.infer_state.b_req_idx)
+        self.b_ssm_buffer_idx = self.backend.req_manager.recurrent_state.prepare_prefill(self.infer_state.b_req_idx)
         return
 
     def prefill_att(
@@ -217,11 +215,9 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state(draft_step + 1)
         else:
             self._init_fixed_mtp_decode_state(draft_step)
-        ssm_updates = self.backend.req_manager.ssm_update_cache
-        if ssm_updates is not None:
-            ssm_updates.prepare_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
-            if draft_step == 0:
-                ssm_updates.accept_updates(self.b_conv_buffer_idx)
+        self.backend.req_manager.recurrent_state.prepare_decode(
+            self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len, single_token=draft_step == 0
+        )
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -235,7 +231,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         ) = build_dynamic_mtp_linear_att_state_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.backend.req_manager.req_to_mtp_state_index,
+            req_to_mtp_state_index=self.backend.req_manager.recurrent_state.accepted_index,
             hold_req_id=self.backend.req_manager.HOLD_REQUEST_ID,
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
@@ -257,11 +253,11 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = self.backend.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
+        self.b_num_accepted_tokens = self.backend.req_manager.recurrent_state.accepted_index[self.b_conv_buffer_idx] + 1
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        if self.backend.req_manager.ssm_update_cache is not None:
+        if self.backend.req_manager.recurrent_state.updates is not None:
             self.b_ssm_buffer_idx = self.b_conv_buffer_idx
             return
         att_batch_size = self.b_conv_buffer_idx.shape[0]
@@ -351,17 +347,19 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
-        ssm_updates = backend.req_manager.ssm_update_cache
-        if ssm_updates is not None:
+        recurrent_state = backend.req_manager.recurrent_state
+        if recurrent_state.updates is not None:
             layer = (
                 layer_weight.layer_num_
                 - layer_weight.layer_num_ // backend.req_manager.linear_config.full_attention_interval
             )
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
             if layer == 0:
-                self.infer_state.ssm_run_config = ssm_updates.get_run_config(*args)
+                self.infer_state.recurrent_state_context = recurrent_state.decode_context(*args)
             return (
-                ssm_updates.forward(layer, *args, self.b_conv_buffer_idx, run_config=self.infer_state.ssm_run_config),
+                recurrent_state.forward_updates(
+                    layer, *args, self.b_conv_buffer_idx, context=self.infer_state.recurrent_state_context
+                ),
                 z,
             )
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
@@ -409,21 +407,21 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        ssm_updates = backend.req_manager.ssm_update_cache
-        if ssm_updates is not None:
+        recurrent_state = backend.req_manager.recurrent_state
+        if recurrent_state.updates is not None:
             layer = (
                 layer_weight.layer_num_
                 - layer_weight.layer_num_ // backend.req_manager.linear_config.full_attention_interval
             )
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
             if layer == 0:
-                self.infer_state.ssm_run_config = ssm_updates.get_run_config(*args, cu_seqlens_q)
-            return ssm_updates.forward(
+                self.infer_state.recurrent_state_context = recurrent_state.decode_context(*args, cu_seqlens_q)
+            return recurrent_state.forward_updates(
                 layer,
                 *args,
                 self.b_conv_buffer_idx,
                 cu_seqlens_q,
-                run_config=self.infer_state.ssm_run_config,
+                context=self.infer_state.recurrent_state_context,
             )
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,

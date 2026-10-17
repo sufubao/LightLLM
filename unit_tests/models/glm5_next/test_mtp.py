@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from lightllm.common.recurrent_state import RecurrentState
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 
@@ -190,12 +191,14 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
         uses_dynamic_spec_verify_layout=lambda: dynamic,
         split_qkv=lambda x: x.split(hidden, -1),
     )
+    recurrent_state = object.__new__(RecurrentState)
+    recurrent_state.accepted_index = accepted_offsets
+    recurrent_state.updates = None
+    recurrent_state.slots_per_req = width
     manager = SimpleNamespace(
-        req_to_mtp_state_index=accepted_offsets,
+        recurrent_state=recurrent_state,
         HOLD_REQUEST_ID=3,
         get_mamba_cache=lambda layer: (conv, ssm),
-        ssm_update_cache=None,
-        ssm_slots_per_req=width,
         linear_config=SimpleNamespace(full_attention_interval=4),
     )
     if mode != "native":
@@ -205,11 +208,11 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
         indexes = torch.arange(4, device="cuda") * width + accepted_offsets
         ssm = ssm[indexes].clone()
         before_verify = ssm.clone()
-        manager.ssm_slots_per_req = 1
+        manager.recurrent_state.slots_per_req = 1
         if mode == "replay":
-            manager.ssm_update_cache = ReplaySSMCache(ssm.unsqueeze(0), 8, width, kda=True)
+            manager.recurrent_state.updates = ReplaySSMCache(ssm.unsqueeze(0), 8, width, kda=True)
         else:
-            manager.ssm_update_cache = CompactSSMCache(ssm.unsqueeze(0), width, torch.bfloat16, kda=True)
+            manager.recurrent_state.updates = CompactSSMCache(ssm.unsqueeze(0), width, torch.bfloat16, kda=True)
     infer = SimpleNamespace(
         batch_size=tokens,
         b_req_idx=torch.tensor(request_rows, device="cuda", dtype=torch.int32),
@@ -243,8 +246,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
         for req, length in zip(requests, lengths):
             accepted[req] = min(length, 2) - 1
         if mtp_step:
-            manager.ssm_update_cache.accept_updates(state.b_conv_buffer_idx, accepted)
-        manager.ssm_update_cache.merge_accepted_updates(state.b_conv_buffer_idx)
+            manager.recurrent_state.updates.accept_updates(state.b_conv_buffer_idx, accepted)
+        manager.recurrent_state.updates.merge_accepted_updates(state.b_conv_buffer_idx)
         for req in requests:
             torch.testing.assert_close(ssm[req], expected_ssm[req * width + accepted[req]], atol=2e-3, rtol=1e-2)
     if dynamic and mtp_step:
@@ -309,9 +312,10 @@ def test_kda_prefill_materializes_accepted_history_and_uses_single_state_slot(mo
         (None, native_conv, native_ssm, width),
         (updates, conv, checkpoint[0], 1),
     ]:
-        manager = SimpleNamespace(
-            ssm_update_cache=cache, ssm_slots_per_req=slots, get_mamba_cache=lambda layer: (conv_pool, ssm_pool)
-        )
+        recurrent_state = object.__new__(RecurrentState)
+        recurrent_state.updates = cache
+        recurrent_state.slots_per_req = slots
+        manager = SimpleNamespace(recurrent_state=recurrent_state, get_mamba_cache=lambda layer: (conv_pool, ssm_pool))
         infer = SimpleNamespace(
             b_req_idx=ids,
             b_ready_cache_len=ids.new_tensor([2]),

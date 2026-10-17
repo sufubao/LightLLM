@@ -7,6 +7,7 @@ import torch
 from lightllm.common.basemodel.triton_kernel.linear_att import ssm_autotune as tuning
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
+from lightllm.common.recurrent_state import RecurrentState, RecurrentStateContext
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.common import kernel_config as kernel_config_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
@@ -318,8 +319,9 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
     configs = [{"BV": 8, "num_warps": 1, "num_stages": 1}, {"BV": 32, "num_warps": 2, "num_stages": 1}]
     monkeypatch.setattr(tuning, "select_config", lambda *args: configs[args[2].shape[1] > 8])
     manager = object.__new__(ReqManagerForMamba)
-    manager.ssm_update_cache = cache
-    manager.req_to_mtp_state_index = torch.zeros(9, dtype=torch.int32, device="cuda")
+    manager.recurrent_state = object.__new__(RecurrentState)
+    manager.recurrent_state.updates = cache
+    manager.recurrent_state.accepted_index = torch.zeros(9, dtype=torch.int32, device="cuda")
     buckets = []
     for index, ids in enumerate(([0], [1, 3])):
         # The physical verify buckets include HOLD, but acceptance is unpadded.
@@ -349,14 +351,14 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         state = SimpleNamespace(
             hidden_collector=SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector()),
             prompt_logics=None,
-            ssm_run_config=config,
+            recurrent_state_context=RecurrentStateContext(config),
             logits_row_stride=1,
         )
         output = TpPartBaseModel._create_model_output(
             None, PostLayerOutput(logits=outputs[0].view(count * 4, -1)), state
         )
         output = TpPartBaseModel._create_unpad_decode_model_output(None, output, len(ids) * 4)
-        assert output.ssm_run_config is config
+        assert output.recurrent_state_context._run_config is config
         buckets.append((graph, outputs, output, ref, args, reqs, cu, ids))
     cache.state.copy_(initial)
     if mode == "replay":
@@ -382,10 +384,10 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
             mtp,
             flags,
             4,
-            ssm_accept_batches=tuple((len(b[-1]), b[2].ssm_run_config) for b in buckets),
+            recurrent_state_batches=tuple((len(b[-1]), b[2].recurrent_state_context) for b in buckets),
         )
         for _, _, _, ref, _, reqs, _, ids in buckets:
-            ref.accept_updates(reqs[:-1], manager.req_to_mtp_state_index)
+            ref.accept_updates(reqs[:-1], manager.recurrent_state.accepted_index)
             torch.testing.assert_close(cache.state[:, ids], ref.state[:, ids], atol=0, rtol=0)
             if mode == "replay":
                 assert torch.equal(cache.cursors[ids], ref.cursors[ids])

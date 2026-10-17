@@ -485,6 +485,7 @@ def test_autotune_candidates_match_recurrence(dtype, run_config, mode):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeypatch, dtype):
     from types import SimpleNamespace
+    from lightllm.common.recurrent_state import RecurrentState
     from lightllm.common.req_manager.linear_att import ReqManagerForMamba
     from lightllm.common.state_cache_manager import LinearAttCacheManager, LayerCache
     from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextLinearAttPageHelper
@@ -493,6 +494,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
     state_rtol = 2e-5 if dtype == torch.float32 else torch.finfo(dtype).eps
     # Real save/restore and PD helpers, with just the unrelated allocator omitted.
     manager = object.__new__(ReqManagerForMamba)
+    manager.recurrent_state = object.__new__(RecurrentState)
     config = SimpleNamespace(
         linear_layer_num=2,
         conv_state_dtype=torch.bfloat16,
@@ -509,23 +511,24 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
         conv_kernel_size=4,
     )
     manager.linear_config = config
+    manager.recurrent_state.linear_config = config
     manager.mtp_step = 2
-    manager.ssm_slots_per_req = 1
-    manager.req_to_mtp_state_index = torch.zeros(4, device="cuda", dtype=torch.int32)
-    manager.req_to_mtp_state_index[1] = 1
-    manager.req_to_conv_state = LayerCache(4, torch.bfloat16, (192, 5), 2, "cuda")
-    manager.req_to_conv_state.buffer.copy_(torch.randn_like(manager.req_to_conv_state.buffer))
-    manager.req_to_ssm_state = LayerCache(4, dtype, (2, 32, 64), 2, "cuda")
-    manager.req_to_ssm_state.buffer.zero_()
-    manager.ssm_update_cache = ReplaySSMCache(manager.req_to_ssm_state.buffer, 16, 3)
-    cache = manager.ssm_update_cache
+    manager.recurrent_state.slots_per_req = 1
+    manager.recurrent_state.accepted_index = torch.zeros(4, device="cuda", dtype=torch.int32)
+    manager.recurrent_state.accepted_index[1] = 1
+    manager.recurrent_state.conv_state = LayerCache(4, torch.bfloat16, (192, 5), 2, "cuda")
+    manager.recurrent_state.conv_state.buffer.copy_(torch.randn_like(manager.recurrent_state.conv_state.buffer))
+    manager.recurrent_state.ssm_state = LayerCache(4, dtype, (2, 32, 64), 2, "cuda")
+    manager.recurrent_state.ssm_state.buffer.zero_()
+    manager.recurrent_state.updates = ReplaySSMCache(manager.recurrent_state.ssm_state.buffer, 16, 3)
+    cache = manager.recurrent_state.updates
     cache.raw_keys.normal_()
     cache.raw_values.normal_()
     cache.gates.uniform_(-0.1, -0.01)
     cache.betas.uniform_(0.1, 0.9)
     cache.cursors[1] = 2
-    active_before = manager.req_to_ssm_state.buffer[:, 1].clone()
-    expected = manager.req_to_ssm_state.buffer[:, 1].float().clone()
+    active_before = manager.recurrent_state.ssm_state.buffer[:, 1].clone()
+    expected = manager.recurrent_state.ssm_state.buffer[:, 1].float().clone()
     for i in range(2):
         key = cache.raw_keys[:, 1, :, i].float()
         key /= (key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
@@ -535,7 +538,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
         )
         expected += key[..., None] * delta[..., None, :]
     expected = expected.to(dtype)
-    conv_expected = manager.req_to_conv_state.buffer[:, 1, :, 1:4].clone()
+    conv_expected = manager.recurrent_state.conv_state.buffer[:, 1, :, 1:4].clone()
     cpu_cache = LinearAttCacheManager(2, config)
     manager.mem_manager = SimpleNamespace(big_page_buffers=cpu_cache)
     reqs = torch.tensor([1], device="cuda", dtype=torch.int32)
@@ -551,25 +554,21 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
     # a tolerance for FP32 reduction differences crossing BF16 rounding points.
     torch.testing.assert_close(state_saved, materialized.cpu(), rtol=0, atol=0)
     torch.testing.assert_close(conv_saved, conv_expected.cpu(), rtol=0, atol=0)
-    torch.testing.assert_close(manager.req_to_ssm_state.buffer[:, 1], active_before, rtol=0, atol=0)
+    torch.testing.assert_close(manager.recurrent_state.ssm_state.buffer[:, 1], active_before, rtol=0, atol=0)
     assert cache.cursors[1].item() == 2
     cache.cursors[2] = 13  # stale history from a previous owner must disappear
     manager.restore_state(SimpleNamespace(req_idx=2), cpu_cache, 0)
     assert cache.cursors[2].item() == 0
-    assert manager.req_to_mtp_state_index[2].item() == 0
-    torch.testing.assert_close(manager.req_to_ssm_state.buffer[:, 2], materialized, rtol=0, atol=0)
-    torch.testing.assert_close(manager.req_to_conv_state.buffer[:, 2, :, :3], conv_expected, rtol=0, atol=0)
+    assert manager.recurrent_state.accepted_index[2].item() == 0
+    torch.testing.assert_close(manager.recurrent_state.ssm_state.buffer[:, 2], materialized, rtol=0, atol=0)
+    torch.testing.assert_close(manager.recurrent_state.conv_state.buffer[:, 2, :, :3], conv_expected, rtol=0, atol=0)
 
     import lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager as memory_module
 
     monkeypatch.setattr(memory_module, "get_env_start_args", lambda: SimpleNamespace(mtp_step=2))
     mem = SimpleNamespace(
         linear_config=config,
-        req_to_conv_state=manager.req_to_conv_state,
-        req_to_ssm_state=manager.req_to_ssm_state,
-        ssm_update_cache=cache,
-        ssm_slots_per_req=1,
-        req_to_mtp_state_index=manager.req_to_mtp_state_index,
+        recurrent_state=manager.recurrent_state,
     )
     helper = Qwen3NextLinearAttPageHelper(mem)
     # A second pending suffix exercises PD export, independently of CPU save.
@@ -591,17 +590,17 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
     ssm_page = torch.empty(helper.ssm_shape, device="cuda", dtype=dtype)
     helper._write_one_rank(mem, 0, 1, conv_page, ssm_page)
     torch.testing.assert_close(ssm_page, expected, rtol=state_rtol, atol=2e-5)
-    torch.testing.assert_close(manager.req_to_ssm_state.buffer[:, 1], active_before, rtol=0, atol=0)
+    torch.testing.assert_close(manager.recurrent_state.ssm_state.buffer[:, 1], active_before, rtol=0, atol=0)
     assert cache.cursors[1].item() == 1
     cache.cursors[2] = 7
-    manager.req_to_mtp_state_index[2] = 2
+    manager.recurrent_state.accepted_index[2] = 2
     helper._read_one_rank(mem, 0, 2, conv_page, ssm_page)
-    torch.testing.assert_close(manager.req_to_ssm_state.buffer[:, 2], ssm_page, rtol=0, atol=0)
-    torch.testing.assert_close(manager.req_to_conv_state.buffer[:, 2, :, :3], conv_expected, rtol=0, atol=0)
-    assert cache.cursors[2].item() == manager.req_to_mtp_state_index[2].item() == 0
+    torch.testing.assert_close(manager.recurrent_state.ssm_state.buffer[:, 2], ssm_page, rtol=0, atol=0)
+    torch.testing.assert_close(manager.recurrent_state.conv_state.buffer[:, 2, :, :3], conv_expected, rtol=0, atol=0)
+    assert cache.cursors[2].item() == manager.recurrent_state.accepted_index[2].item() == 0
     manager.init_hybrid_attention_state(SimpleNamespace(req_idx=2))
-    assert torch.count_nonzero(manager.req_to_ssm_state.buffer[:, 2]).item() == 0
-    assert torch.count_nonzero(manager.req_to_conv_state.buffer[:, 2]).item() == 0
+    assert torch.count_nonzero(manager.recurrent_state.ssm_state.buffer[:, 2]).item() == 0
+    assert torch.count_nonzero(manager.recurrent_state.conv_state.buffer[:, 2]).item() == 0
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

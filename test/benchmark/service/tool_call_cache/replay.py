@@ -145,7 +145,7 @@ async def run(args):
                     want_tool = True
                 output_target = (
                     max(1, min(args.max_output_target, round(row["output_tokens"] * args.output_scale)))
-                    if args.output_scale > 0
+                    if args.output_scale > 0 and row["output_tokens"] > 0
                     else 0
                 )
                 instruction = (
@@ -155,10 +155,10 @@ async def run(args):
                 )
                 if output_target:
                     if want_tool:
-                        argument = " ".join(["hello"] * max(1, output_target - 24))
+                        argument = " ".join(str(index) for index in range(max(1, (output_target - 24) // 2)))
                         instruction = f'Call echo with text set to this exact string: "{argument}". Use the tool now.'
                     else:
-                        answer = " ".join(["OK"] * output_target)
+                        answer = " ".join(str(index) for index in range(max(1, output_target // 2)))
                         instruction = (
                             f'Reply with exactly this text, without quotes: "{answer}". Do not call any tools.'
                         )

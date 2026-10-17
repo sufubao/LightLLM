@@ -87,6 +87,7 @@ def main():
     if left["source_revision"] != right["source_revision"] and not args.allow_different_source:
         raise ValueError("policy comparison requires identical source; use --allow-different-source for the base audit")
     harness_sha = hashlib.sha256((args.root / "replay.py").read_bytes()).hexdigest()
+    shutil.copy2(__file__, destination / "run_paired.py")
     shutil.copy2(args.root / "replay.py", destination / "replay.py")
     if not args.no_reset:
         shutil.copy2(args.root / "reset_cache.py", destination / "reset_cache.py")
@@ -96,6 +97,7 @@ def main():
                 "cases": cases,
                 "repeats": args.repeats,
                 "harness_sha256": harness_sha,
+                "paired_runner_sha256": hashlib.sha256((destination / "run_paired.py").read_bytes()).hexdigest(),
                 "cache_isolation": "none" if args.no_reset else "expire preferences, then independent capacity flood",
                 "reset_sha256": (
                     None if args.no_reset else hashlib.sha256((destination / "reset_cache.py").read_bytes()).hexdigest()

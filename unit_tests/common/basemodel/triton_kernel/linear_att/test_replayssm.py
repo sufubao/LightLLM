@@ -24,6 +24,63 @@ def reference(q, k, v, a, b, a_log, bias, state, kda=False, lower_bound=-5.0):
     return torch.einsum("...kv,...k->...v", state, q), state
 
 
+@pytest.mark.parametrize("capacity", [4, 8])
+@pytest.mark.parametrize("bv", [8, 32], ids=["small_bv_fallback", "precomputed"])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state_dtype, kda):
+    state = torch.zeros(1, 2, 1, 128, 128, dtype=state_dtype, device="cuda")
+    cache = ReplaySSMCache(
+        state,
+        capacity,
+        2,
+        torch.float16,
+        num_key_heads=1,
+        kda=kda,
+        projection_mode="precompute",
+        run_config={"BV": bv, "num_warps": 1},
+    )
+    reqs = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    cu = torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda")
+    accepted = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
+    q = torch.zeros(1, 4, 1, 128, dtype=torch.float16, device="cuda")
+    q[0, :2, 0, 0] = 1
+    k = torch.zeros_like(q)
+    k[0, 0, 0, 0] = -0.25
+    k[0, 1, 0, 0] = 1
+    v = torch.zeros_like(q)
+    v[0, :2, 0, 0] = 60000
+    a = torch.full((4, 128 if kda else 1), -20, dtype=torch.float16, device="cuda")
+    b = torch.full((4, 1), 20, dtype=torch.float16, device="cuda")
+    alog = torch.zeros(1, device="cuda")
+    bias = torch.zeros(128 if kda else 1, device="cuda")
+    expected_state = state[0, 0].float().clone()
+    for round_idx in range(2):
+        cache.prepare_decode(reqs, cu)
+        # The second round must consume the first round's accepted history.
+        # For capacity 4 the next span exactly fills it, so no fold should hide
+        # an overflowed derived correction by reconstructing from raw inputs.
+        assert cache.cursors[0].item() == 2 * round_idx
+        assert not state.any()
+        actual = cache.forward(0, q, k, v, a, b, alog, bias, reqs, cu)
+        expected = []
+        for token in range(2):
+            output, expected_state = reference(
+                q[0, token], k[0, token], v[0, token], a[token], b[token], alog, bias, expected_state, kda=kda
+            )
+            expected.append(output)
+        assert torch.isfinite(expected_state).all()
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual[0, :2].float(), torch.stack(expected), atol=4, rtol=1e-3)
+        cache.accept_updates(reqs, accepted)
+    # The correction is larger than FP16 can represent even though the
+    # recurrent state, inputs, and attention outputs are all finite.
+    assert cache.deltas[0, 0, 0, 1, 0].item() > torch.finfo(torch.float16).max
+    assert torch.isfinite(cache.deltas[0, 0, :, :4]).all()
+    assert cache.cursors[1].item() == 0
+    torch.testing.assert_close(cache.snapshot_accepted_state(0)[0].float(), expected_state, atol=128, rtol=0.01)
+
+
 @pytest.mark.parametrize("capacity", [16, 32, 64])
 @pytest.mark.parametrize("width", [1, 3, 5, 16])
 @pytest.mark.parametrize("dims", [(32, 64), (128, 128)])

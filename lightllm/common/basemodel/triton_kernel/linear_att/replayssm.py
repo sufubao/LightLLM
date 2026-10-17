@@ -627,9 +627,15 @@ class ReplaySSMCache:
         self.forward_cursors = torch.zeros_like(self.cursors)
         # Alternate halves on fold so CTAs cannot overwrite history another
         # V tile is still reading. Cursor packs phase (2*L) and count (0..L).
+        # Derived corrections can exceed the activation/state range even when
+        # the recurrence stays finite. Only BF16 has enough exponent range for
+        # the short-history narrowing optimization; FP16 must retain FP32.
         history_dtype = (
             activation_dtype
-            if verify_width > 1 and projection_mode == "precompute" and capacity <= 8
+            if activation_dtype == torch.bfloat16
+            and verify_width > 1
+            and projection_mode == "precompute"
+            and capacity <= 8
             else torch.float32
         )
         key_shape = (layers, slots, self.num_key_heads, 2 * capacity, k)

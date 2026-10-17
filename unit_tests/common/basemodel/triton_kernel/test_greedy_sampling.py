@@ -65,6 +65,7 @@ def test_full_sampler_with_penalties_invalid_ids_and_random_sampling(monkeypatch
     vocab, batch = 4101, 4
     manager = SimpleNamespace(
         penalty_counter_mode="gpu_counter",
+        req_to_bitmask_enabled=None,
         vocab_size=vocab,
         req_to_presence_penalty=torch.full((batch,), 0.0 if identity else 0.5, device="cuda"),
         req_to_frequency_penalty=torch.full((batch,), 0.0 if identity else 0.1, device="cuda"),

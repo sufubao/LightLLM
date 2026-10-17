@@ -17,6 +17,14 @@
       "requests_in_failed_control_trial": 16,
       "length_terminations": 1,
       "resolution": "Classify both stop and length as ordinary. Preserve the failed phase; repeat the complete prototype under v6 and require exact paired outcomes and generated-token counts."
+    },
+    {
+      "phase": "validation-hybrid-long-v6",
+      "kind": "hardware thermal-frequency asymmetry",
+      "observed_gpu6_temperature_c": 86,
+      "observed_gpu6_sm_clock_mhz": 345,
+      "other_experiment_gpu_sm_clock_mhz": 1980,
+      "resolution": "Quarantine the entire timing phase and its excluded warmup; reject it in report generation. Avoid GPUs2/6 for recovered studies and require zero thermal-event counter increases on every selected GPU."
     }
   ]
 }

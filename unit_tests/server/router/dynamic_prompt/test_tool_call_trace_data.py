@@ -61,3 +61,29 @@ def test_overlapping_rounds_are_explicitly_marked():
     rows = [row("assistant", 1, "r1"), row("assistant", 2, "r2"), row("assistant", 3, "r1")]
     rounds = trace_data.extract_rounds(rows)
     assert rounds[0]["next_round_overlaps"]
+
+
+def test_direct_finish_reason_analysis_preserves_missing_labels_and_fast_length_followups():
+    def observation(reason, gap, **extra):
+        return {
+            "observed_finish_reason": reason,
+            "session": "s",
+            "next_first_chunk_gap_s": gap,
+            "next_input_ready_gap_s": gap,
+            **extra,
+        }
+
+    rows = [
+        observation("tool_use", 0.2),
+        observation("tool_use", 0, next_round_overlaps=True),
+        observation("end_turn", 90),
+        observation("max_tokens", 0.5),
+        observation(None, 0.01, tool_names=["Bash"]),
+    ]
+    result = trace_data.observed_finish_reason_analysis(rows)
+    assert result["missing_original_finish_reason"] == 1
+    assert result["groups"]["tool_use"]["rounds"] == 2
+    assert result["groups"]["tool_use"]["first_chunk_gap_seconds"]["n"] == 1
+    assert result["groups"]["tool_use"]["input_readiness_gap_seconds"]["p50"] == 0.2
+    assert result["groups"]["length_known"]["input_readiness_gap_seconds"]["p50"] == 0.5
+    assert result["groups"]["ordinary_known"]["rounds"] == 1

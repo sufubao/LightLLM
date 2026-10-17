@@ -118,6 +118,54 @@ def distribution(values):
     }
 
 
+def observed_finish_reason_analysis(rounds):
+    """Analyze original labels separately; never fill missing ones from content."""
+    groups = {}
+    for label, reasons in [
+        ("tool_use", {"tool_use"}),
+        ("end_turn", {"end_turn"}),
+        ("stop_sequence", {"stop_sequence"}),
+        ("length_known", {"max_tokens", "length"}),
+        ("ordinary_known", {"end_turn", "stop_sequence"}),
+    ]:
+        selected = [row for row in rounds if row.get("observed_finish_reason") in reasons]
+        gaps = [
+            row["next_first_chunk_gap_s"]
+            for row in selected
+            if "next_first_chunk_gap_s" in row and not row.get("next_round_overlaps", False)
+        ]
+        ready = [
+            row["next_input_ready_gap_s"]
+            for row in selected
+            if row.get("next_input_ready_gap_s") is not None and not row.get("next_round_overlaps", False)
+        ]
+        groups[label] = {
+            "rounds": len(selected),
+            "sessions": len({row["session"] for row in selected}),
+            "no_observed_followup": sum("next_first_chunk_gap_s" not in row for row in selected),
+            "overlaps_excluded": sum(row.get("next_round_overlaps", False) for row in selected),
+            "first_chunk_gap_seconds": distribution(gaps),
+            "input_readiness_gap_seconds": distribution(ready),
+            "fraction_within_seconds_given_observed_followup": {
+                str(t): sum(g <= t for g in gaps) / len(gaps) if gaps else None for t in [1, 5, 10, 30, 60, 300]
+            },
+            "input_ready_fraction_within_seconds_given_observed_ready": {
+                str(t): sum(g <= t for g in ready) / len(ready) if ready else None for t in [1, 5, 10, 30, 60, 300]
+            },
+        }
+    return {
+        "all_rounds": len(rounds),
+        "missing_original_finish_reason": sum(row.get("observed_finish_reason") is None for row in rounds),
+        "groups": groups,
+        "limitations": [
+            "Most original reasons are missing; missingness is not assumed random.",
+            "Final observations are censored; fractions are conditional on observed nonoverlapping followups.",
+            "Input readiness and first response chunks are different bounds, not exact HTTP arrivals.",
+            "Length terminations are reported separately; the data do not justify treating them as end_turn.",
+        ],
+    }
+
+
 def analyze(directory, output):
     provenance = json.loads((directory / "provenance.json").read_text())
     rounds = []
@@ -153,6 +201,7 @@ def analyze(directory, output):
         "missing_original_finish_reason": sum(r["observed_finish_reason"] is None for r in rounds),
         "input_tokens": distribution([r["input_tokens"] for r in rounds]),
         "groups": groups,
+        "original_finish_reason_analysis": observed_finish_reason_analysis(rounds),
         "limitations": [
             "Tool-content labels are inferred independently of original API finish reasons.",
             "Final observations are censored; missing followup does not prove no future request.",

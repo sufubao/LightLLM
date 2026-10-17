@@ -26,6 +26,11 @@ def post(base, endpoint, body):
     return result, time.perf_counter() - started
 
 
+def signature(response):
+    message = response["choices"][0]["message"]
+    return {"content": message.get("content"), "calls": [call["function"] for call in message.get("tool_calls") or []]}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
@@ -95,8 +100,12 @@ def main():
                 "request_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
                 "initial_seconds": initial_s,
                 "initial_usage": initial["usage"],
+                "initial_finish_reason": initial["choices"][0]["finish_reason"],
+                "initial_output_signature": signature(initial),
                 "return_seconds": return_s,
                 "return_usage": returned["usage"],
+                "return_finish_reason": returned["choices"][0]["finish_reason"],
+                "return_output_signature": signature(returned),
                 "churn": churn,
             }
         )

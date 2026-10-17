@@ -35,6 +35,12 @@ This directory provides complementary kinds of evidence:
   ordinary completions. This removes prior trial contexts without enabling RL
   mode (which changes token-rank inference work). Reset requests do not enter
   replay latency/throughput metrics. `--no-reset` is for warmup/exploration only.
+* `report.py`: independently verifies raw pairs and generated token counts before
+  computing seed-clustered uncertainty. `--public-output FILE` exports an
+  explicit whitelist of aggregate/per-trial metrics and configuration; request
+  contents, responses and raw server logs stay in the experiment store.
+* `model_provenance.py`: hashes the actual weights and tokenizer files in a
+  separate untimed interval, archiving the script and results under `exp`.
 
 Replay negative controls include `--mix ordinary`, `--mix mixed25`,
 `--abandon-fraction 0.5` (selected sessions stop after their first tool call),

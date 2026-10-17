@@ -170,10 +170,103 @@ def summarize(phases):
     return result
 
 
+def public_summary(result):
+    """Export whitelisted metrics; never copy request rows, contents or logs."""
+    public = {
+        "method": result["method"],
+        "limitations": result["limitations"],
+        "artifact_scope": "Aggregate and per-trial performance metrics; no request/response contents or raw logs.",
+        "groups": [],
+        "trials": [],
+    }
+    metrics = [
+        "wall_seconds",
+        "started_sessions",
+        "completed_sessions",
+        "abandoned_sessions",
+        "sessions_per_second",
+        "session_seconds",
+        "requests",
+        "prompt_tokens",
+        "cached_tokens",
+        "cache_hit_ratio",
+        "prefilled_tokens",
+        "output_tokens",
+        "request_seconds",
+        "wait_capped_requests",
+        "output_target_capped_requests",
+        "finish_reason_counts",
+        "server_ttft_ms",
+    ]
+    options = [
+        "sessions",
+        "turns",
+        "split",
+        "mix",
+        "context_scale",
+        "max_prompt_tokens",
+        "output_scale",
+        "max_output_target",
+        "wait_scale",
+        "max_wait",
+        "start_jitter",
+        "abandon_fraction",
+        "min_tool_wait",
+    ]
+    for group in result["groups"]:
+        safe = {
+            key: group[key]
+            for key in [
+                "candidate_revision",
+                "control_revision",
+                "cache_tokens",
+                "retention_seconds",
+                "fraction",
+                "case",
+                "pairs",
+                "independent_seeds",
+                "metrics",
+                "workload_sha256",
+            ]
+        }
+        safe["model"] = Path(group["model"]).name
+        workload = group["workload"]
+        safe["workload"] = {
+            key: workload[key]
+            for key in [
+                "harness_sha256",
+                "cache_isolation",
+                "image_id",
+                "model_config_sha256",
+                "service_configuration",
+                "backend_flags",
+            ]
+        }
+        safe["workload"]["options"] = {key: workload["options"][key] for key in options if key in workload["options"]}
+        public["groups"].append(safe)
+        for pair in group["raw_pairs"]:
+            trial = pair["trial"]
+            entry = {
+                "phase": pair["phase"],
+                "case": trial["case"],
+                "repeat": trial["repeat"],
+                "order": trial["order"],
+                "mismatch_count": len(trial["mismatches"]),
+                "seed": trial["candidate"]["configuration"]["seed"],
+            }
+            for policy in ["candidate", "control"]:
+                entry[policy] = {key: trial[policy][key] for key in metrics if key in trial[policy]}
+            public["trials"].append(entry)
+    return public
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("phases", type=Path, nargs="+")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--public-output", type=Path, help="Optional whitelisted numerical export, without request contents"
+    )
     args = parser.parse_args()
     result = {
         "method": "Paired ratios; 95% descriptive bootstrap intervals clustered by workload seed; 10000 resamples.",
@@ -182,6 +275,9 @@ def main():
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
+    if args.public_output:
+        args.public_output.parent.mkdir(parents=True, exist_ok=True)
+        args.public_output.write_text(json.dumps(public_summary(result), indent=2) + "\n")
     lines = [
         "| Model | Case | TTL | Pairs / seeds | Wall speedup | Cache gain (pp) | Prefill reduction |",
         "|---|---|---:|---:|---:|---:|---:|",

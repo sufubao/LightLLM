@@ -380,6 +380,8 @@ class InferenceContext:
                 f"mem manager can alloc token num {self.req_manager.mem_manager.allocator.can_use_mem_size}\n"
                 f"mem manager total size {self.req_manager.mem_manager.allocator.size}\n"
             )
+            if self.radix_cache.tool_call_retention is not None:
+                logger.debug(f"tool_call_cache_stats {self.radix_cache.tool_call_retention.get_stats()}")
 
         return
 

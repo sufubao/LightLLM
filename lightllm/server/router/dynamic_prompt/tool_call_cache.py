@@ -22,14 +22,33 @@ class ToolCallCacheRetention:
         self._fit_prefix = fit_prefix
         self._leases = {}
         self._expiry = SortedDict()
+        # Only protected endpoints compete for budget. An ancestor is shared
+        # storage, not an independently evictable continuation.
+        self._frontier = SortedDict()
         self._sequence = 0
+        self._stats = dict.fromkeys(
+            (
+                "tool_stops",
+                "consumed_tokens",
+                "budget_tokens",
+                "expired_tokens",
+                "evicted_tokens",
+                "completed_tokens",
+                "checkpoint_tokens",
+            ),
+            0,
+        )
+
+    def get_stats(self):
+        return {**self._stats, "protected_tokens": self.protected_tokens, "waiting_endpoints": len(self._frontier)}
 
     def advance_clock(self, now):
         self.clock = max(self.clock, now)
         while self._expiry and self._expiry.peekitem(0)[0][0] <= self.clock:
-            self._remove(self._expiry.peekitem(0)[1])
+            self._remove(self._expiry.peekitem(0)[1], "expired_tokens")
 
     def protect(self, node):
+        self._stats["tool_stops"] += 1
         if node is None:
             return
         if node.node_prefix_total_len > self.token_budget:
@@ -49,26 +68,64 @@ class ToolCallCacheRetention:
             node = node.parent
         for node in reversed(path):
             self._set(node, self.clock + self.duration)
-        while self.protected_tokens > self.token_budget:
-            # A protected descendant also retains all its ancestors structurally.
-            # Demoting only an ancestor would undercount the effective budget.
-            pending = [self._expiry.peekitem(0)[1]]
-            while pending:
-                victim = pending.pop()
-                pending.extend(child for child in victim.children.values() if child.cache_protected)
-                self._remove(victim)
+        self._trim_budget()
 
-    def forget(self, node):
+    def _refresh_frontier(self, node):
+        entry = self._leases.get(node)
+        if entry is None:
+            return
+        key = entry[0]
+        if any(child.cache_protected for child in node.children.values()):
+            self._frontier.pop(key, None)
+        else:
+            self._frontier[key] = node
+
+    def _trim_budget(self):
+        while self.protected_tokens > self.token_budget:
+            victim = self._frontier.peekitem(0)[1]
+            # Keep as much of the older continuation as the remaining budget
+            # permits. Full attention can split an edge at a page boundary;
+            # hybrid attention must fall back to a real recurrent checkpoint.
+            limit = max(0, victim.node_prefix_total_len - (self.protected_tokens - self.token_budget))
+            if self._fit_prefix is not None:
+                keep = self._fit_prefix(victim, limit)
+            else:
+                keep = victim
+                while keep.parent is not None and keep.node_prefix_total_len > limit:
+                    keep = keep.parent
+            while victim is not keep and victim.parent is not None:
+                if any(child.cache_protected for child in victim.children.values()):
+                    break
+                if victim.cache_protected:
+                    self._remove(victim, "budget_tokens")
+                victim = victim.parent
+
+    def consume(self, node):
+        """A matched continuation is now pinned by the request, not waiting.
+
+        Release its lease budget immediately. Other waiting descendants still
+        own their shared ancestors. A further tool stop will acquire a fresh
+        lease for the updated prefix when this request finishes.
+        """
+        if node is not None:
+            assert node.ref_counter > 0
+            self.complete(node, "consumed_tokens")
+
+    def forget(self, node, evicted=False):
         """Forget a node already removed from the cache's eviction indices."""
         entry = self._leases.pop(node, None)
         if entry is not None:
             key, weight = entry
             del self._expiry[key]
+            self._frontier.pop(key, None)
             self.protected_tokens -= weight
+            if evicted:
+                self._stats["evicted_tokens"] += weight
         node.cache_protected = False
         node.cache_retention = None
+        self._refresh_frontier(node.parent)
 
-    def complete(self, node):
+    def complete(self, node, reason="completed_tokens"):
         """Revoke stale preferences after a continuation answers or hits length.
 
         Stop at a shared ancestor with another protected branch. Its prefix is
@@ -78,7 +135,7 @@ class ToolCallCacheRetention:
             if any(child.cache_protected for child in node.children.values()):
                 break
             if node.cache_protected:
-                self._remove(node)
+                self._remove(node, reason)
             node = node.parent
 
     def invalidate_checkpoint(self, node, is_resumable):
@@ -87,7 +144,7 @@ class ToolCallCacheRetention:
             if any(child.cache_protected for child in node.children.values()):
                 return
             if node.cache_protected:
-                self._remove(node)
+                self._remove(node, "checkpoint_tokens")
             node = node.parent
             if is_resumable(node):
                 return
@@ -97,17 +154,17 @@ class ToolCallCacheRetention:
         entry = self._leases.get(node)
         if entry is None:
             return
-        deadline = entry[0][0]
+        deadline, priority = entry[0][:2]
         # The radix caller has removed node before changing its edge length.
         self.forget(node)
-        self._set(parent, deadline)
-        self._set(node, deadline)
+        self._set(parent, deadline, priority)
+        self._set(node, deadline, priority)
 
-    def _set(self, node, deadline):
+    def _set(self, node, deadline, priority=None):
         self._discard_node(node)
         self.forget(node)
         self._sequence += 1
-        key = (deadline, self._sequence)
+        key = (deadline, self._sequence if priority is None else priority, self._sequence)
         weight = node.node_value_len
         self._leases[node] = (key, weight)
         self._expiry[key] = node
@@ -115,8 +172,11 @@ class ToolCallCacheRetention:
         node.cache_protected = True
         node.cache_retention = self
         self._add_node(node)
+        self._refresh_frontier(node)
+        self._refresh_frontier(node.parent)
 
-    def _remove(self, node):
+    def _remove(self, node, reason):
+        self._stats[reason] += self._leases[node][1]
         self._discard_node(node)
         self.forget(node)
         self._add_node(node)

@@ -398,6 +398,8 @@ class HybridAttPagedRadixCache:
         mem_value = torch.concat([e.token_mem_index_value for e in ans_node_list])
         assert len(mem_value) == ans_node.node_prefix_total_len
 
+        if self.tool_call_retention is not None:
+            self.tool_call_retention.consume(ans_node)
         return ans_node, len(mem_value), mem_value
 
     def _match_prefix_helper(
@@ -644,7 +646,7 @@ class HybridAttPagedRadixCache:
             node: HybridAttPagedTreeNode = self._evict_tree_set.pop(0)
             self._discard_node(node)
             if self.tool_call_retention is not None:
-                self.tool_call_retention.forget(node)
+                self.tool_call_retention.forget(node, evicted=True)
 
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node

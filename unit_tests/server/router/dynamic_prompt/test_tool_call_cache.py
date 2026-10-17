@@ -73,7 +73,7 @@ def test_budget_and_oversized_prefix():
     tree.tool_call_retention.protect(second)
     assert not first.cache_protected
     assert second.cache_protected
-    assert tree.tool_call_retention.protected_tokens == 15
+    assert tree.tool_call_retention.protected_tokens == 20
     oversized = insert(tree, list(range(100, 121)))
     tree.tool_call_retention.protect(oversized)
     assert not oversized.cache_protected
@@ -215,8 +215,8 @@ def test_budget_counts_structurally_retained_ancestors():
     tree.tool_call_retention.protect(newer)
     assert newer.cache_protected
     assert not old_tail.cache_protected
-    assert not old_tail.parent.cache_protected
-    assert tree.tool_call_retention.protected_tokens == 10
+    assert old_tail.parent.cache_protected
+    assert tree.tool_call_retention.protected_tokens == 20
 
 
 def test_final_answer_revokes_stale_tool_prefix_but_preserves_other_branches():
@@ -518,5 +518,94 @@ def test_randomized_split_expiry_eviction_and_rank_agreement(seed):
                 while node.parent is not None:
                     assert node.cache_protected
                     node = node.parent
+            assert set(retention._frontier.values()) == {
+                n for n in retention._leases if not any(c.cache_protected for c in n.children.values())
+            }
             tree.evict_tree_set._check()
         assert outputs[0] == outputs[1]
+
+
+def test_budget_preserves_older_partial_prefix_instead_of_dropping_whole_branch():
+    tree = cache()
+    old = insert(tree, list(range(10)))
+    new = insert(tree, list(range(30, 45)))
+    tree.tool_call_retention.protect(old)
+    tree.tool_call_retention.protect(new)
+    assert tree.tool_call_retention.protected_tokens == 20
+    assert old.parent.node_prefix_total_len == 5
+    assert old.parent.cache_protected
+    tree.evict(5, lambda _: None)
+    assert tree.match_prefix(torch.arange(10), update_refs=False)[1] == 5
+    assert tree.match_prefix(torch.arange(30, 45), update_refs=False)[1] == 15
+    tree.evict_tree_set._check()
+
+
+def test_budget_trims_shared_branch_without_discarding_shared_ancestor():
+    tree = RadixCache(20, 0)
+    tree.enable_tool_call_retention(10, 0.5)
+    left = insert(tree, [1, 2, 3, 4])
+    right = insert(tree, [1, 2, 5, 6])
+    other = insert(tree, list(range(30, 38)))
+    retention = tree.tool_call_retention
+    for node in [left, right, other]:
+        retention.protect(node)
+    assert retention.protected_tokens == 10
+    assert not left.cache_protected and not right.cache_protected
+    assert right.parent.cache_protected
+    assert other.cache_protected
+    tree.evict_tree_set._check()
+
+
+def test_inflight_continuation_releases_waiting_budget_without_unpinning_kv():
+    tree = cache()
+    active = insert(tree, list(range(10)))
+    waiting = insert(tree, list(range(30, 45)))
+    retention = tree.tool_call_retention
+    retention.protect(active)
+    active, matched, _ = tree.match_prefix(torch.arange(10), update_refs=True)
+    assert matched == 10
+    assert retention.protected_tokens == 0
+    assert active.ref_counter == 1
+    retention.protect(waiting)
+    assert waiting.cache_protected
+    assert retention.protected_tokens == 15
+    tree.evict(15, lambda _: None)
+    assert active.ref_counter == 1
+    tree.dec_node_ref_counter(active)
+    tree.evict_tree_set._check()
+
+
+def test_partial_trimming_preserves_original_lease_priority_and_expiry():
+    tree = cache()
+    old = insert(tree, list(range(10)))
+    newer = insert(tree, list(range(30, 45)))
+    retention = tree.tool_call_retention
+    retention.protect(old)
+    original_priority = retention._leases[old][0][:2]
+    retention.protect(newer)
+    assert retention._leases[old.parent][0][:2] == original_priority
+    assert retention.get_stats()["budget_tokens"] == 5
+    assert retention._frontier.peekitem(0)[1] is old.parent
+    retention.advance_clock(110)
+    assert retention.get_stats()["expired_tokens"] == 20
+    assert retention.get_stats()["waiting_endpoints"] == 0
+
+
+def test_hybrid_consume_then_tool_stop_reacquires_only_updated_waiting_prefix():
+    buffers = SimpleNamespace(free_state_cache=lambda *args, **kwargs: None)
+    tree = HybridAttPagedRadixCache(20, 0, 2, 2, SimpleNamespace(big_page_buffers=buffers), buffers)
+    tree.enable_tool_call_retention(10, 0.5)
+    _, tool = tree.insert(
+        torch.arange(4), block_hashs=[11, 22], block_state_idxs=[None, None], len_to_big_page_id=SortedDict({4: 100})
+    )
+    retention = tree.tool_call_retention
+    retention.protect(tool)
+    matched, length, _ = tree.match_prefix(torch.arange(4), block_hashs=[11, 22], update_refs=True)
+    assert length == 4 and matched.ref_counter == 1
+    assert retention.protected_tokens == 0
+    assert retention.get_stats()["consumed_tokens"] == 4
+    retention.protect(matched)
+    tree.dec_node_ref_counter(matched)
+    assert matched.cache_protected and matched.ref_counter == 0
+    assert retention.protected_tokens == 4
+    tree._evict_tree_set._check()

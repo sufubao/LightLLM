@@ -288,6 +288,8 @@ class RadixCache:
                 value = torch.concat(ans_value_list)
             else:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
+            if update_refs and self.tool_call_retention is not None:
+                self.tool_call_retention.consume(tree_node)
             return tree_node, len(value), value
         else:
             if update_refs:
@@ -381,7 +383,7 @@ class RadixCache:
         while num_evicted < need_remove_tokens:
             node: TreeNode = self.evict_tree_set.pop(0)
             if self.tool_call_retention is not None:
-                self.tool_call_retention.forget(node)
+                self.tool_call_retention.forget(node, evicted=True)
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
             ), "error evict tree node state"

@@ -70,5 +70,10 @@
     "excluded-v17-independent-parity.json": "c087c4bfa846f8b8fc62c983e7e4a1ad158958dbbea36c1e2414bc90939ffa1c",
     "excluded-v18-output-budget.json": "a09475016b794db440052db086848ec978fb678ef9d7be0888c4f43430586ded",
     "tokenizer-budget-v19.json": "6cf375260b00bbdc965102fc8515d9cd92a08b1bf827865d9f014efaf7b01b32"
+  },
+  "configuration_artifact_sha256": {
+    "transfer-protocol-v20.json": "c249862a097f7f03fa8c439937edd89dfad1d38df7efc54485fb64a418ba4eed",
+    "hybrid-transfer-protocol-v20.json": "ab441c51ca2a5e9e3625d126015889e7b7c388f6bb51f5e6a20a1e9465a31f2e",
+    "harness-transfer-v20.json": "0aef9b7c8cf86eaf7faa9d48276fbc2e0ef20c3ab2f547e5fa4343847a100346"
   }
 }

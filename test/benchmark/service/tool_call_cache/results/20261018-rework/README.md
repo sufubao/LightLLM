@@ -214,3 +214,9 @@ Against predecessor unconditional priority (TTL3)
 Faster replay and agent means coexist with ordinary tail costs. Expired/abandoned cases have little or no cache benefit. This remains opt-in; no universal latency or production-speed claim is justified. The prior source/policy was fixed before the first independent inference, and only benchmark correctness was repaired after the excluded attempts. All independent cases, seeds, caps and GPU/order assignments remain prescribed.
 
 [Repaired-harness validation freeze](fifo-v20-policy-freeze.json). Independent results will be reported separately after the complete phases and crossovers pass.
+
+## Fixed independent-transfer protocol
+
+The [normal/default-off protocol](transfer-protocol-v20.json), [TP2 hybrid protocol](hybrid-transfer-protocol-v20.json) and [frozen benchmark file hashes](harness-transfer-v20.json) retain the prescribed cases, seeds, caps, GPU/order assignments and source/dataset revisions. Planning-status text records the state when prepared; actual completion is determined only by full audited phases. The ordinary-output correctness repairs and excluded attempts are explicit. Cache source and normal 3s / 0.5 policy remain fixed since before the original independent inference; no independent performance tunes them.
+
+There are 54 normal independent pairs, 12 default-off/upstream pairs and 24 hybrid TP2 pairs planned. Incomplete phases and untimed correctness/preflight requests never enter those counts. Hybrid retains the explicitly prespecified validation-only rule for considering a longer window before any hybrid independent run; any chosen configuration must match across GPU roles.

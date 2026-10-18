@@ -149,3 +149,84 @@ def test_cohort_export_whitelists_nested_numeric_fields_and_fixed_labels():
     assert result["agent"]["request_seconds"] == {"mean": 1.0, "p95": 2.0}
     assert result["agent"]["server_ttft_ms"]["p95"] == 30
     assert "mean" not in result["agent"]["server_ttft_ms"]
+
+
+def test_cohort_aggregation_preserves_group_identity_and_exposes_ordinary_regression(tmp_path):
+    def save(name, data):
+        (tmp_path / name).write_text(json.dumps(data))
+
+    save("progress.json", {"status": "complete"})
+    save(
+        "protocol.json",
+        {"cases": [{"name": "mix", "options": {"mix": "agent50"}}], "repeats": 1, "harness_sha256": "f" * 64},
+    )
+    policies = {}
+    for policy, revision, cached, agent_latency, ordinary_latency in [
+        ("candidate", "a" * 40, 5, 1.0, 4.0),
+        ("control", "b" * 40, 0, 2.0, 3.0),
+    ]:
+        config = {"model_dir": "/model", "cache_tokens": 100, "retention": 3, "fraction": 0.5}
+        save(
+            f"{policy}-service.json",
+            {
+                "configuration": config,
+                "source_revision": revision,
+                "image_id": "image",
+                "model_config_sha256": "c" * 64,
+                "command": [],
+            },
+        )
+        rows = []
+        for index, (kind, prompt, hit) in enumerate([("agent", 10, cached), ("one-shot", 20, 0)]):
+            reason = "tool_calls" if kind == "agent" else "stop"
+            rows.append(
+                {
+                    "session": str(index),
+                    "turn": 0,
+                    "request_kind": kind,
+                    "finish_reason": reason,
+                    "expected_finish_reason": reason,
+                    "client_prompt_tokens": prompt,
+                    "prompt_sha256": str(index),
+                    "output_signature": {"content": "same"},
+                    "usage": {
+                        "prompt_tokens": prompt,
+                        "completion_tokens": 2,
+                        "prompt_tokens_details": {"cached_tokens": hit},
+                    },
+                }
+            )
+        save(f"mix-r0-{policy}.json", {"rows": rows})
+        policies[policy] = {
+            "configuration": {"seed": 42},
+            "requests": 2,
+            "prompt_tokens": 30,
+            "cached_tokens": cached,
+            "prefilled_tokens": 30 - cached,
+            "unexpected_end_states": [],
+            "wall_seconds": 10,
+            "cache_hit_ratio": cached / 30,
+            "request_seconds": {"mean": 2, "p95": 4},
+            "session_seconds": {"mean": 8},
+            "agent_session_seconds": {"mean": agent_latency * 5},
+            "cohort_metrics": {
+                "agent": {
+                    "prefilled_tokens": 10 - cached,
+                    "request_seconds": {"mean": agent_latency, "p95": agent_latency},
+                },
+                "one-shot": {
+                    "prefilled_tokens": 20,
+                    "request_seconds": {"mean": ordinary_latency, "p95": ordinary_latency},
+                },
+            },
+        }
+    save(
+        "summary.json", [{"case": "mix", "repeat": 0, "order": ["control", "candidate"], "mismatches": [], **policies}]
+    )
+    result = report.summarize([tmp_path])
+    assert len(result) == 1
+    group = result[0]
+    assert group["model"] == "/model" and group["candidate_revision"] == "a" * 40
+    assert group["case"] == "mix" and group["workload"]["options"]["mix"] == "agent50"
+    assert group["metrics"]["agent_mean_request_speedup"]["geomean"] == pytest.approx(2.0)
+    assert group["metrics"]["one_shot_mean_request_speedup"]["geomean"] == pytest.approx(0.75)

@@ -9,6 +9,8 @@ import collections
 import hashlib
 import json
 import math
+import os
+import shutil
 from pathlib import Path
 import random
 import statistics
@@ -177,13 +179,13 @@ def summarize(phases):
                     metrics[f"{label}_prefill_reduction_percent"] = 100 * (
                         1 - left["prefilled_tokens"] / right["prefilled_tokens"]
                     )
-                for key, suffix in (("request_seconds", "request"), ("server_ttft_ms", "ttft")):
-                    if key not in left or key not in right:
+                for metric_field, suffix in (("request_seconds", "request"), ("server_ttft_ms", "ttft")):
+                    if metric_field not in left or metric_field not in right:
                         continue
                     for stat in ("mean", "p95"):
-                        if left[key][stat] and right[key][stat]:
+                        if left[metric_field][stat] and right[metric_field][stat]:
                             metrics[f"log_{label}_{stat}_{suffix}_speedup"] = math.log(
-                                right[key][stat] / left[key][stat]
+                                right[metric_field][stat] / left[metric_field][stat]
                             )
             per_seed[candidate["configuration"]["seed"]].append(metrics)
         clustered = {
@@ -361,6 +363,8 @@ def main():
         "--public-output", type=Path, help="Optional whitelisted numerical export, without request contents"
     )
     args = parser.parse_args()
+    if "EXP_RUN_DIR" in os.environ:
+        shutil.copy2(__file__, Path(os.environ["EXP_RUN_DIR"]) / Path(__file__).name)
     result = {
         "method": "Paired ratios; 95% descriptive bootstrap intervals clustered by workload seed; 10000 resamples.",
         "limitations": "Few seeds give limited uncertainty estimates. Request counts are not independent repetitions.",

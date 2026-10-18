@@ -133,6 +133,7 @@ def main():
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--phase", required=True)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--reverse-order", action="store_true", help="Reverse alternating order for GPU crossover")
     parser.add_argument("--model-dir", default="/models/Qwen3-4B")
     parser.add_argument("--rounds", default="cachewise-analysis-v2.rounds.jsonl")
     parser.add_argument("--exp", default="/mtc/sufubao/shared_home/sufubao/.local/bin/exp")
@@ -230,6 +231,8 @@ def main():
             namespace = f"{args.phase}-{case['name']}-r{repeat}"
             outputs = {}
             order = ["control", "candidate"] if repeat % 2 == 0 else ["candidate", "control"]
+            if args.reverse_order:
+                order.reverse()
             for label in order:
                 if gpu_errors:
                     raise RuntimeError(f"GPU isolation could not be verified; retain observations in {destination}")

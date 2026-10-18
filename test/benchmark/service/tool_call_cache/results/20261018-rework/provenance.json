@@ -25,7 +25,8 @@
     "fresh-v16": "261018-100200-python3-mtc-sufubao-tool-call-cache-rework-20261",
     "fifo-v17-validation-report": "261018-105321-python3-mtc-sufubao-tool-call-cache-rework-20261",
     "fifo-v17-priority-report": "261018-105614-python3-mtc-sufubao-tool-call-cache-rework-20261",
-    "tracelab-return-timing": "261018-110942-python-tmp-agent-cache-rework-20261018-analyze-t"
+    "tracelab-return-timing": "261018-110942-python-tmp-agent-cache-rework-20261018-analyze-t",
+    "actual-tokenizer-budget": "261018-112531-docker-run-rm-entrypoint-python-e-HF-HOME-tmp-hf"
   },
   "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
   "candidate_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
@@ -58,6 +59,8 @@
   },
   "numeric_diagnostic_sha256": {
     "tracelab-observed-returns-v17.json": "7aa0f29a2af4daa4eabf9a16eb39bd9a7615d53ae307ce568b1473e484b20d4b",
-    "excluded-v17-independent-parity.json": "c087c4bfa846f8b8fc62c983e7e4a1ad158958dbbea36c1e2414bc90939ffa1c"
+    "excluded-v17-independent-parity.json": "c087c4bfa846f8b8fc62c983e7e4a1ad158958dbbea36c1e2414bc90939ffa1c",
+    "excluded-v18-output-budget.json": "a09475016b794db440052db086848ec978fb678ef9d7be0888c4f43430586ded",
+    "tokenizer-budget-v19.json": "6cf375260b00bbdc965102fc8515d9cd92a08b1bf827865d9f014efaf7b01b32"
   }
 }

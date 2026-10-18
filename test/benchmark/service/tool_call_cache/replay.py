@@ -138,6 +138,14 @@ def latency_stats(values):
     }
 
 
+def ordinary_output_budget(tokenizer, answer, minimum):
+    serialized = json.dumps(answer)
+    # Source-shaped targets are estimates, not tokenized JSON lengths. Leave
+    # room for the complete literal and EOS, including alternate BPE splits.
+    tokens = tokenizer.encode(serialized, add_special_tokens=False)
+    return max(minimum, len(tokens) + 32, len(serialized.encode("utf-8")) + 16)
+
+
 async def run(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True, trust_remote_code=False)
     selected = select_sessions(args)
@@ -240,6 +248,7 @@ async def run(args):
                     "chat_template_kwargs": {"enable_thinking": False},
                 }
                 if constrained_ordinary:
+                    payload["max_tokens"] = ordinary_output_budget(tokenizer, answer, payload["max_tokens"])
                     payload["response_format"] = {
                         "type": "json_schema",
                         "json_schema": {

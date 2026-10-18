@@ -163,7 +163,9 @@ Raw downloaded traces and generated results belong outside the source tree.
 Ordinary free-text responses can differ by punctuation across batches despite
 temperature zero. For strict equal-work studies, pass `--ordinary-output
 json-string` in every case: short and source-shaped ordinary replies then use
-an exact-string JSON schema. This changes the synthetic workload and requires
+an exact-string JSON schema, with a completion allowance based on the actual
+tokenized literal and conservative byte/EOS margin. Source-shaped targets are
+estimates; actual generated tokens remain measured. This changes the synthetic workload and requires
 a new harness fingerprint and complete rerun. Keep signature and generated-token
 equality checks; do not normalize a failed pair into a performance win.
 

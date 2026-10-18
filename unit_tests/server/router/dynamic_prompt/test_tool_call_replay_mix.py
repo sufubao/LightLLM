@@ -47,3 +47,15 @@ def test_cohort_latency_statistics_keep_empty_groups_explicit():
     result = replay.latency_stats([1, 2, 3, 4])
     assert result["mean"] == 2.5
     assert result["p95"] >= result["p50"]
+
+
+def test_experimental_labels_are_opaque_to_the_model_and_scope_is_stable():
+    namespace = "PRIVATE_POLICY_NEW_VS_OFF"
+    name = "PRIVATE_DATASET_SESSION"
+    first = replay.session_system(namespace, name)
+    assert namespace not in first["content"] and name not in first["content"]
+    assert first == replay.session_system(namespace, name)
+    assert first != replay.session_system(namespace, name + "_next")
+    assert first != replay.session_system(namespace + "_next", name)
+    assert "latest user instruction" in first["content"]
+    assert "actual tool call" in first["content"]

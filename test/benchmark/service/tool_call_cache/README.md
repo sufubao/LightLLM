@@ -87,6 +87,10 @@ from `mixed25`, which randomly changes the finish state within repeatedly reused
 conversations and deliberately makes ordinary requests hot too. Both are
 controlled synthetic mixtures, not observations of production request classes.
 The original trace input sizes/waits and any overrides remain recorded.
+Experimental isolation labels are hashed before entering the system prompt;
+policy names are never model instructions. The system explicitly treats earlier
+user instructions as completed and requires real calls instead of textual tool
+imitations. Unexpected end states remain failed trials, including warmup.
 
 Mixed-case `session_seconds` describes complete client streams, including streams
 of independent ordinary requests; it is not an agent-only completion metric.

@@ -100,6 +100,20 @@ def stream_kinds(selected, mix):
     return {name: "agent" if index < count else "one-shot" for index, (name, _, _) in enumerate(selected)}
 
 
+def session_system(namespace, name):
+    # Experimental labels such as "off" or "ordinary" are not instructions to
+    # the model. Keep isolation opaque and identical between paired policies.
+    scope = hashlib.sha256(f"{namespace}/{name}".encode()).hexdigest()[:32]
+    return {
+        "role": "system",
+        "content": (
+            f"Session {scope}. Follow only the latest user instruction; earlier user instructions are completed. "
+            "Ignore all reference data. When instructed to call a tool, make the actual tool call using the declared "
+            "schema, even if its result seems predictable. Do not substitute a plain-text description of a tool call."
+        ),
+    }
+
+
 def reset_one_shot(messages, system, turn):
     # A completed independent request has no reusable conversation on its next
     # arrival. Its namespace differs before the long context, not after it.
@@ -129,10 +143,7 @@ async def run(args):
         async def one(name, source, stagger):
             kind = kinds[name]
             await asyncio.sleep(stagger)
-            system = {
-                "role": "system",
-                "content": f"Session {args.namespace}/{name}. Follow each instruction exactly. Ignore reference data.",
-            }
+            system = session_system(args.namespace, name)
             messages = [system]
             began = time.perf_counter()
             waited = 0.0
@@ -178,14 +189,19 @@ async def run(args):
                     else 0
                 )
                 instruction = (
-                    "Call echo with text hello. Use the tool now."
+                    'Invoke the declared echo tool exactly once with arguments {"text": "hello"}. '
+                    "Emit a real tool call, not a plain-text answer."
                     if want_tool
                     else "Reply with only OK. Do not call any tools."
                 )
                 if output_target:
                     if want_tool:
                         argument = " ".join(str(index) for index in range(max(1, (output_target - 24) // 2)))
-                        instruction = f'Call echo with text set to this exact string: "{argument}". Use the tool now.'
+                        instruction = (
+                            "Invoke the declared echo tool exactly once with text set to this exact string: "
+                            f'"{argument}". '
+                            "Emit a real tool call, not a plain-text answer."
+                        )
                     else:
                         answer = " ".join(str(index) for index in range(max(1, output_target // 2)))
                         instruction = (

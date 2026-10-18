@@ -1,6 +1,6 @@
 # Exploratory rework validation, 2026-10-18
 
-These are 60 complete exploratory paired comparisons: 44 on superseded sources and 16 on candidate `5bae2ef5ea481bbf53da26007169c94737d86062`. They include neutral and negative outcomes. This folder does not include independent-corpus performance or GPU crossover evidence, and cannot establish a production benefit.
+These are 66 complete exploratory paired comparisons: 44 on early sources, 16 on priority source plus six fresh-identity sensitivity pairs for `5bae2ef5ea481bbf53da26007169c94737d86062`. They include neutral and negative outcomes. This folder does not include independent-corpus performance or GPU crossover evidence, and cannot establish a production benefit. It predates the FIFO-first backfill candidate.
 
 All completed comparisons below use Qwen3-4B BF16, TP=1, isolated H200 GPUs on a shared host, KV capacity 32,768 tokens, request limit 16,384 tokens, prefill batch 8,192 tokens and 32 running requests. Both policies use the same pinned existing image, attention backends, debug logging and dependency overlay. Physical KV capacity is identical; static-headroom changes admission only. No images were built. Full per-group image/model/dependency fingerprints and configuration accompany the numerical exports. Weight/tokenizer provenance remains in [the preceding study](../20261017/model-checksums.json).
 
@@ -110,4 +110,21 @@ Ordinary cohort tail latency is a real tradeoff. In agent50-fast versus disabled
 
 Final counters now cover all 2,072 candidate requests / 1,062 actual tool calls for each of three versions. Candidate v15r1 consumed 3,388,092 token leases versus 750,275 in reservation-only v14. Budget demotions fell to 2,480,859; forced protected evictions rose to 327,736. Allowing useful continuations to run is more valuable here than reducing eviction events to zero. These remain cumulative accounting events, not unique compute savings. [Full final counters](cache-counters-v13-v15r1.json).
 
-The completed pressure pair has 163 actual append continuations: cached tokens were 612,137 versus 9,201. Five context-reset requests had only 25 versus 26 cached tokens, so that observed gain did not come from repeated filler after compaction. [Numerical append/reset audit](pressure-append-diagnostic-v15r1.json). Future fresh-identity sensitivity still needs independent validation; the old frozen clients and results remain intact.
+The completed pressure pair has 163 actual append continuations: cached tokens were 612,137 versus 9,201. Five context-reset requests had only 25 versus 26 cached tokens, so that observed gain did not come from repeated filler after compaction. [Numerical append/reset audit](pressure-append-diagnostic-v15r1.json). Independent-corpus performance under fresh identity is separate from these validation results; the old frozen clients and results remain intact.
+
+## Fresh compaction identity: v16 validation
+
+This uses the same priority source `5bae2ef5ea481bbf53da26007169c94737d86062` with the more conservative fresh compaction identity. All six cases were prescribed before the run. They remain separate from shared-identity results. The parent controller was intentionally aborted after these six valid pairs and before its independent-test gate; no TraceLab inference was run.
+
+| Case | Pairs / seeds | Wall ratio | Uncached input reduction (%) |
+|---|---:|---:|---:|
+| abandoned-agent25-c16 | 1 / 1 | 0.9793x | 0.04 |
+| agent50-c16-fast | 1 / 1 | 1.2778x | 31.00 |
+| expired-agent25-c16 | 1 / 1 | 1.0165x | -0.03 |
+| output-shaped-agent50-c8 | 1 / 1 | 1.1667x | 30.97 |
+| pressure-c24 | 1 / 1 | 1.1474x | 46.48 |
+| realwait-trace-c16 | 1 / 1 | 1.0044x | 34.19 |
+
+[All aggregate/per-trial/cohort metrics](priority-fresh-v16-validation.json.gz). The output-shaped case uses explicitly scaled/capped source output targets and matched actual generated token counts.
+
+The ordinary p95 TTFT ratios are 0.9050x in agent50-fast and 0.6830x in the output-shaped case despite improved means. Abandoned chains give 0.9793x wall ratio and ordinary p95 TTFT 0.8973x. These tradeoffs motivated evaluating FIFO-feasible-head-first backfill instead of unconditional promotion. These six pairs are valid diagnostic evidence, not independent heldout results, and must not be silently discarded because the parent review stopped.

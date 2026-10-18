@@ -187,9 +187,10 @@ can borrow the reservation, so a large request need not wait for lease expiry.
 A bounded shared table publishes at most 64 prefix fingerprints and deadlines
 for prefixes of at least 256 tokens, excluding tiny shared scaffolding,
 at request-release batches. A single-host router can recognize a waiting
-continuation, admit it against the original full-capacity bound and move it ahead
-of unrelated waiters. The oldest ordinary waiter permits at most eight successful
-bypasses; failed probes preserve its FIFO position. Explicit caller priority
+continuation and admit it against the original full-capacity bound. A feasible
+FIFO head always runs first. Only when that head is blocked does the queue scan
+for cached continuations that fit; at most eight successful admissions may bypass
+the same blocked head. Failed probes preserve FIFO and the capacity estimate. Explicit caller priority
 remains first. Fingerprints are scheduling hints only: actual KV reuse still
 requires the radix cache's exact match. Stale/missing hints fall back to ordinary
 admission. Local hint ordering is disabled for multinode TP and PD roles.

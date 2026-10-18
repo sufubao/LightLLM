@@ -114,35 +114,117 @@ def priority_queue(waiting):
     return result
 
 
-def test_hint_priority_preserves_explicit_priority_and_fifo_within_classes():
-    ordinary = waiting_req("ordinary", 20)
-    a, b = waiting_req("a", 40), waiting_req("b", 40)
+def scheduling_queue(waiting):
+    result = priority_queue(waiting)
+    result.dp_size_in_node = 1
+    result.filter_aborted_reqs = lambda: None
+    result.is_busy = lambda: False
+    return result
+
+
+def active(tokens):
+    return SimpleNamespace(reqs=[waiting_req("active", tokens)])
+
+
+def test_hint_refresh_does_not_reorder_any_waiter_or_override_explicit_priority():
+    ordinary, a, b = waiting_req("ordinary", 20), waiting_req("a", 40), waiting_req("b", 40)
     urgent = waiting_req("urgent", 10, urgent=True)
     result = priority_queue([urgent, ordinary, a, b])
-    result._prioritize_tool_continuations()
-    assert result.waiting_req_list == [urgent, a, b, ordinary]
-    assert result._tool_bypass_head is ordinary
-    assert result._tool_bypass_ids == {id(a), id(b)}
+    result._refresh_tool_continuation_hints()
+    assert result.waiting_req_list == [urgent, ordinary, a, b]
+    assert a._tool_call_cache_hit and b._tool_call_cache_hit
+    assert not ordinary._tool_call_cache_hit and not urgent._tool_call_cache_hit
 
 
-def test_ordinary_waiter_has_bounded_successful_continuation_bypasses():
-    ordinary = waiting_req("ordinary", 20)
-    ordinary._tool_call_priority_skips = 8
-    continuation = waiting_req("agent", 40)
-    result = priority_queue([ordinary, continuation])
-    result._prioritize_tool_continuations()
+def test_feasible_fifo_request_runs_before_a_later_matching_continuation():
+    ordinary, continuation = waiting_req("ordinary", 20), waiting_req("agent", 40)
+    result = scheduling_queue([ordinary, continuation])
+    batch = result.generate_new_batch(active(30))
+    assert batch.reqs == [ordinary, continuation]
+    assert result.waiting_req_list == []
+    assert getattr(ordinary, "_tool_call_priority_skips", 0) == 0
+
+
+def test_first_fifo_head_is_not_preempted_even_when_reservation_is_full():
+    ordinary, continuation = waiting_req("ordinary", 80), waiting_req("agent", 40)
+    result = scheduling_queue([ordinary, continuation])
+    result.router.get_tool_call_reserved_tokens = lambda _: 100
+    batch = result.generate_new_batch(None)
+    assert batch.reqs == [ordinary]
+    assert result.waiting_req_list == [continuation]
+
+
+def test_blocked_fifo_head_allows_cached_backfill_without_counting_failed_probes():
+    ordinary, continuation = waiting_req("ordinary", 50), waiting_req("agent", 40)
+    result = scheduling_queue([ordinary, continuation])
+    assert result.generate_new_batch(active(90)) is None
     assert result.waiting_req_list == [ordinary, continuation]
-    assert result._tool_bypass_ids == set()
-    assert continuation._tool_call_cache_hit
+    assert result.cache_len_list == [(90, 0)]
+    assert getattr(ordinary, "_tool_call_priority_skips", 0) == 0
+    batch = result.generate_new_batch(active(30))
+    assert batch.reqs == [continuation]
+    assert result.waiting_req_list == [ordinary]
+    assert ordinary._tool_call_priority_skips == 1
+    assert result.cache_len_list == [(30, 0), (40, 0)]
 
 
-def test_disabled_queue_does_not_link_prompts_or_read_hint_table():
-    result = priority_queue([waiting_req("ordinary", 20), waiting_req("agent", 40)])
-    original = list(result.waiting_req_list)
+def test_exhausted_backfill_budget_waits_then_runs_old_fifo_head_first():
+    ordinary, continuation = waiting_req("ordinary", 50), waiting_req("agent", 40)
+    ordinary._tool_call_priority_skips = 8
+    result = scheduling_queue([ordinary, continuation])
+    assert result.generate_new_batch(active(30)) is None
+    assert result.waiting_req_list == [ordinary, continuation]
+    batch = result.generate_new_batch(None)
+    assert batch.reqs == [ordinary, continuation]
+    assert ordinary._tool_call_priority_skips == 8
+
+
+def test_explicit_urgent_head_is_never_bypassed_by_cached_backfill():
+    urgent, continuation = waiting_req("urgent", 80, urgent=True), waiting_req("agent", 40)
+    result = scheduling_queue([urgent, continuation])
+    assert result.generate_new_batch(active(30)) is None
+    assert result.waiting_req_list == [urgent, continuation]
+
+
+def test_only_matching_continuations_can_fill_space_behind_blocked_head():
+    ordinary, shorter = waiting_req("ordinary", 50), waiting_req("shorter", 20)
+    result = scheduling_queue([ordinary, shorter])
+    assert result.generate_new_batch(active(30)) is None
+    assert result.waiting_req_list == [ordinary, shorter]
+
+
+def test_successful_backfill_limit_is_eight_total_for_the_same_blocked_head():
+    ordinary = waiting_req("ordinary", 50)
+    ordinary._tool_call_priority_skips = 7
+    a, b = waiting_req("a", 40), waiting_req("b", 40)
+    result = scheduling_queue([ordinary, a, b])
+    result.max_total_tokens = 200
+    result.router.get_tool_call_reserved_tokens = lambda _: 150
+    batch = result.generate_new_batch(active(30))
+    assert batch.reqs == [a]
+    assert result.waiting_req_list == [ordinary, b]
+    assert ordinary._tool_call_priority_skips == 8
+
+
+def test_disabled_queue_keeps_original_fifo_and_never_reads_hint_or_reservation():
+    ordinary, continuation = waiting_req("ordinary", 50), waiting_req("agent", 40)
+    result = scheduling_queue([ordinary, continuation])
     result.tool_call_admission_enabled = False
     result.router.get_tool_call_prefix_hints = lambda _: pytest.fail("disabled table read")
-    result._prioritize_tool_continuations()
-    assert result.waiting_req_list == original
+    result.router.get_tool_call_reserved_tokens = lambda _: pytest.fail("disabled reservation read")
+    batch = result.generate_new_batch(active(30))
+    assert batch.reqs == [ordinary]
+    assert result.waiting_req_list == [continuation]
+
+
+def test_explicit_cache_disable_does_not_probe_a_matching_prompt():
+    ordinary, disabled = waiting_req("ordinary", 50), waiting_req("disabled", 40)
+    disabled.sample_params.disable_prompt_cache = True
+    disabled.get_prompt_ids_numpy = lambda: pytest.fail("disabled cache prompt probe")
+    result = scheduling_queue([ordinary, disabled])
+    assert result.generate_new_batch(active(30)) is None
+    assert result.waiting_req_list == [ordinary, disabled]
+    assert not disabled._tool_call_cache_hit
 
 
 def test_multinode_router_never_uses_local_prefix_hint_ordering():
@@ -153,42 +235,3 @@ def test_multinode_router_never_uses_local_prefix_hint_ordering():
     router.is_multinode_tp = True
     router.radix_cache_client = SimpleNamespace(get_tool_call_prefix_hints=lambda _: pytest.fail("local hints"))
     assert router.get_tool_call_prefix_hints(0) is None
-
-
-def test_failed_priority_probe_restores_fifo_and_only_success_counts_bypass():
-    ordinary, continuation = waiting_req("ordinary", 20), waiting_req("agent", 40)
-    result = priority_queue([ordinary, continuation])
-    result.dp_size_in_node = 1
-    result.filter_aborted_reqs = lambda: None
-    result.is_busy = lambda: False
-    full = SimpleNamespace(reqs=[waiting_req("active", 90)])
-    assert result.generate_new_batch(full) is None
-    assert result.waiting_req_list == [ordinary, continuation]
-    assert getattr(ordinary, "_tool_call_priority_skips", 0) == 0
-    available = SimpleNamespace(reqs=[waiting_req("active", 30)])
-    batch = result.generate_new_batch(available)
-    assert batch.reqs == [continuation]
-    assert result.waiting_req_list == [ordinary]
-    assert ordinary._tool_call_priority_skips == 1
-
-
-def test_exhausted_priority_budget_admits_old_ordinary_waiter_first():
-    ordinary, continuation = waiting_req("ordinary", 20), waiting_req("agent", 40)
-    ordinary._tool_call_priority_skips = 8
-    result = priority_queue([ordinary, continuation])
-    result.dp_size_in_node = 1
-    result.filter_aborted_reqs = lambda: None
-    result.is_busy = lambda: False
-    batch = result.generate_new_batch(SimpleNamespace(reqs=[waiting_req("active", 30)]))
-    assert batch.reqs[0] is ordinary
-    assert ordinary._tool_call_priority_skips == 8
-
-
-def test_explicit_cache_disable_does_not_probe_or_prioritize_a_matching_prompt():
-    ordinary, disabled = waiting_req("ordinary", 20), waiting_req("disabled", 40)
-    disabled.sample_params.disable_prompt_cache = True
-    disabled.get_prompt_ids_numpy = lambda: pytest.fail("disabled cache prompt probe")
-    result = priority_queue([ordinary, disabled])
-    result._prioritize_tool_continuations()
-    assert result.waiting_req_list == [ordinary, disabled]
-    assert not disabled._tool_call_cache_hit

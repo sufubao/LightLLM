@@ -290,6 +290,7 @@ def public_summary(result):
         "wait_scale",
         "max_wait",
         "start_jitter",
+        "compaction_identity",
         "abandon_fraction",
         "min_tool_wait",
     ]

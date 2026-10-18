@@ -102,6 +102,15 @@ policy names are never model instructions. The system explicitly treats earlier
 user instructions as completed and requires real calls instead of textual tool
 imitations. Unexpected end states remain failed trials, including warmup.
 
+`--compaction-identity fresh` is the default for new replays: source context drops
+and prompt-cap resets replace the system scope before the long synthetic
+reference. Redacted metadata cannot establish a shared long prefix across these
+resets. `--compaction-identity shared` explicitly reproduces the earlier
+assumption, which can reuse identical filler after resetting history. Preserve
+this sensitivity and the harness hash in each report; do not pool both modes.
+The 2026-10-17 study and v11/v13/v14/v15r1 exploratory snapshots predate this
+option and use shared compaction identity. Their archived clients remain intact.
+
 Mixed-case `session_seconds` describes complete client streams, including streams
 of independent ordinary requests; it is not an agent-only completion metric.
 Use `agent_session_seconds` for completed agents. Numerical cohort metrics report

@@ -59,3 +59,29 @@ def test_experimental_labels_are_opaque_to_the_model_and_scope_is_stable():
     assert first != replay.session_system(namespace + "_next", name)
     assert "latest user instruction" in first["content"]
     assert "actual tool call" in first["content"]
+
+
+def test_compaction_changes_identity_before_long_reference_and_clears_old_history():
+    system = {"role": "system", "content": "Session s. Follow latest instructions."}
+    original = copy.deepcopy(system)
+    messages = [system, {"role": "user", "content": "OLD_HISTORY"}]
+    replay.reset_compacted_context(messages, system, 1)
+    first = copy.deepcopy(messages)
+    messages.append({"role": "user", "content": "SYNTHETIC_LONG_REFERENCE" * 1000})
+    replay.reset_compacted_context(messages, system, 2)
+    assert len(messages) == 1 and messages != first
+    assert messages[0]["role"] == "system"
+    assert "Context revision 2" in messages[0]["content"]
+    assert "OLD_HISTORY" not in str(messages) and "LONG_REFERENCE" not in str(messages)
+    assert system == original
+
+
+def test_legacy_shared_compaction_identity_is_explicit_and_reproducible():
+    system = {"role": "system", "content": "Session s."}
+    messages = []
+    replay.reset_compacted_context(messages, system, 1, identity="shared")
+    first = copy.deepcopy(messages)
+    replay.reset_compacted_context(messages, system, 2, identity="shared")
+    assert first == messages == [system]
+    with pytest.raises(ValueError, match="compaction identity"):
+        replay.reset_compacted_context(messages, system, 3, identity="unknown")

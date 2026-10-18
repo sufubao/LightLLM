@@ -120,6 +120,16 @@ def reset_one_shot(messages, system, turn):
     messages[:] = [{**system, "content": system["content"] + f" Independent request {turn}."}]
 
 
+def reset_compacted_context(messages, system, turn, identity="fresh"):
+    # Redacted source metadata cannot establish prefix identity after compaction.
+    # A new scope before the long synthetic reference avoids inventing reuse.
+    # Shared mode explicitly preserves the earlier optimistic assumption.
+    if identity not in ("fresh", "shared"):
+        raise ValueError("unknown compaction identity")
+    suffix = f" Context revision {turn}." if identity == "fresh" else ""
+    messages[:] = [{**system, "content": system["content"] + suffix}]
+
+
 def latency_stats(values):
     return {
         "mean": statistics.mean(values) if values else None,
@@ -155,7 +165,7 @@ async def run(args):
                 target = max(256, min(args.max_prompt_tokens, round(row["input_tokens"] * args.context_scale)))
                 compaction = turn > 0 and row["input_tokens"] < source[turn - 1]["input_tokens"] - 256
                 if compaction:
-                    messages = [system]
+                    reset_compacted_context(messages, system, turn, args.compaction_identity)
                 if kind == "one-shot":
                     reset_one_shot(messages, system, turn)
                 if turn:
@@ -209,7 +219,7 @@ async def run(args):
                         )
                 prompt_hash, client_tokens = await asyncio.to_thread(prepare, tokenizer, messages, instruction, target)
                 if client_tokens > args.max_prompt_tokens + 128:
-                    messages = [system]
+                    reset_compacted_context(messages, system, turn, args.compaction_identity)
                     if kind == "one-shot":
                         reset_one_shot(messages, system, turn)
                     prompt_hash, client_tokens = await asyncio.to_thread(
@@ -401,6 +411,12 @@ def main():
     parser.add_argument("--wait-scale", type=float, default=0.1)
     parser.add_argument("--max-wait", type=float, default=5)
     parser.add_argument("--start-jitter", type=float, default=1)
+    parser.add_argument(
+        "--compaction-identity",
+        choices=["fresh", "shared"],
+        default="fresh",
+        help="Fresh scopes avoid assumed cross-compaction reuse; shared reproduces earlier runs.",
+    )
     asyncio.run(run(parser.parse_args()))
 
 

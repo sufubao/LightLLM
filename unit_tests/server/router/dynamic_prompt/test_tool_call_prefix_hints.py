@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.server.router.dynamic_prompt import tool_call_prefix_hints as hints_module
 from lightllm.server.router.dynamic_prompt.tool_call_prefix_hints import (
     MAX_PREFIX_HINTS,
     PREFIX_HINT_SHAPE,
@@ -20,6 +21,7 @@ from lightllm.utils import shm_utils
 
 @pytest.fixture(autouse=True)
 def service_name(monkeypatch):
+    monkeypatch.setattr(hints_module, "MIN_PREFIX_HINT_TOKENS", 1)
     name = f"prefix_hints_{uuid.uuid4().hex}"
     monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: name)
 
@@ -120,3 +122,20 @@ def test_reader_attaches_existing_publisher_without_resetting():
     protect(cache, [1, 2, 3])
     reader = ToolCallPrefixHints(0)
     assert reader.snapshot(now=101).matches([1, 2, 3, 4])
+
+
+def test_tiny_shared_scaffolding_does_not_prioritize_unrelated_requests(monkeypatch):
+    monkeypatch.setattr(hints_module, "MIN_PREFIX_HINT_TOKENS", 256)
+    cache = tree()
+    protect(cache, list(range(255)))
+    assert not cache.tool_call_prefix_hints.snapshot(now=101).by_length
+    protect(cache, list(range(256)))
+    assert cache.tool_call_prefix_hints.snapshot(now=101).matches(list(range(257)))
+
+
+def test_new_hint_lengths_cannot_grow_request_memo_past_bound():
+    ids = np.arange(131, dtype=np.int64)
+    first, second = fingerprint(hashlib.sha256(ids[:129].astype("<i8").tobytes()))
+    memo = {length: (0, 0) for length in range(1, 129)}
+    assert PrefixHintSnapshot([(129, first, second, 110000000)], 100).matches(ids, memo)
+    assert len(memo) <= MAX_PREFIX_HINTS * 2

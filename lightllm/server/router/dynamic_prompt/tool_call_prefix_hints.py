@@ -13,6 +13,7 @@ from .shared_arr import SharedArray
 
 
 MAX_PREFIX_HINTS = 64
+MIN_PREFIX_HINT_TOKENS = 256
 PREFIX_HINT_SHAPE = (MAX_PREFIX_HINTS + 1, 4)
 
 
@@ -43,9 +44,10 @@ class ToolCallPrefixHints:
     def publish(self, retention):
         rows = []
         # Earliest expiry first, deterministically bounded even with many small
-        # branches. Missing entries lose only their optional scheduling hint.
+        # branches. Tiny common scaffolding is not a valuable continuation hint.
+        # Missing entries lose only their optional scheduling preference.
         for key, node in retention._frontier.items():
-            if node.ref_counter == 0:
+            if node.ref_counter == 0 and node.node_prefix_total_len >= MIN_PREFIX_HINT_TOKENS:
                 rows.append((node.node_prefix_total_len, *fingerprint(prefix_hasher(node)), int(key[0] * 1e6)))
                 if len(rows) == MAX_PREFIX_HINTS:
                     break
@@ -74,7 +76,7 @@ class PrefixHintSnapshot:
     def __init__(self, rows, now):
         self.by_length = {}
         for length, first, second, deadline in rows:
-            if length > 0 and deadline > now * 1e6:
+            if length >= MIN_PREFIX_HINT_TOKENS and deadline > now * 1e6:
                 self.by_length.setdefault(int(length), set()).add((int(first), int(second)))
 
     def matches(self, token_ids, memo=None):
@@ -85,6 +87,9 @@ class PrefixHintSnapshot:
             memo.clear()
         lengths = sorted(length for length in self.by_length if length < len(token_ids))
         missing = [length for length in lengths if length not in memo]
+        if len(memo) + len(missing) > MAX_PREFIX_HINTS * 2:
+            memo.clear()
+            missing = lengths
         if missing:
             raw = np.ascontiguousarray(token_ids, dtype="<i8").view(np.uint8)
             state, offset = hashlib.sha256(), 0

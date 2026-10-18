@@ -176,6 +176,7 @@ Shared ancestors count once, and referenced KV does not also consume this idle
 reservation. An initial feasible request or an explicitly high-priority request
 can borrow the reservation, so a large request need not wait for lease expiry.
 A bounded shared table publishes at most 64 prefix fingerprints and deadlines
+for prefixes of at least 256 tokens, excluding tiny shared scaffolding,
 at request-release batches. A single-host router can recognize a waiting
 continuation, admit it against the original full-capacity bound and move it ahead
 of unrelated waiters. The oldest ordinary waiter permits at most eight successful

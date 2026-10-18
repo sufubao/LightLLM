@@ -182,3 +182,13 @@ def test_exhausted_priority_budget_admits_old_ordinary_waiter_first():
     batch = result.generate_new_batch(SimpleNamespace(reqs=[waiting_req("active", 30)]))
     assert batch.reqs[0] is ordinary
     assert ordinary._tool_call_priority_skips == 8
+
+
+def test_explicit_cache_disable_does_not_probe_or_prioritize_a_matching_prompt():
+    ordinary, disabled = waiting_req("ordinary", 20), waiting_req("disabled", 40)
+    disabled.sample_params.disable_prompt_cache = True
+    disabled.get_prompt_ids_numpy = lambda: pytest.fail("disabled cache prompt probe")
+    result = priority_queue([ordinary, disabled])
+    result._prioritize_tool_continuations()
+    assert result.waiting_req_list == [ordinary, disabled]
+    assert not disabled._tool_call_cache_hit

@@ -78,7 +78,7 @@ class ChunkedPrefillQueue(BaseQueue):
             if req.sample_params.high_priority_request:
                 urgent.append(req)
                 continue
-            if hints.by_length:
+            if hints.by_length and not getattr(req.sample_params, "disable_prompt_cache", False):
                 if not hasattr(req, "shm_prompt_ids"):
                     req.link_prompt_ids_shm_array()
                 memo = getattr(req, "_tool_call_prefix_memo", None)

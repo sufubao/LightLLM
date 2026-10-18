@@ -1,5 +1,5 @@
 {
-  "scope": "All75 exploratory/validation pairs, including9current FIFO-first pairs; no independent performance or crossover included",
+  "scope": "All 84 complete exploratory/validation pairs, including 9 repaired-harness FIFO-first pairs; excluded incomplete phases never pooled",
   "source_labels": {
     "380d1ebd9a2b605fb6349a5c3f4d9a1c81d0b8db": "budget-only",
     "6df137db54f97078c5e13804cc59ed9fddd482ed": "stable-prefix",
@@ -16,7 +16,9 @@
     "v15r1": 16,
     "fresh-v16": 6,
     "fifo-v17-validation": 6,
-    "fifo-v17-priority-comparison": 3
+    "fifo-v17-priority-comparison": 3,
+    "fifo-v20-validation": 6,
+    "fifo-v20-priority": 3
   },
   "root_experiments": {
     "v13": "261018-082521-python3-mtc-sufubao-tool-call-cache-rework-20261",
@@ -26,7 +28,9 @@
     "fifo-v17-validation-report": "261018-105321-python3-mtc-sufubao-tool-call-cache-rework-20261",
     "fifo-v17-priority-report": "261018-105614-python3-mtc-sufubao-tool-call-cache-rework-20261",
     "tracelab-return-timing": "261018-110942-python-tmp-agent-cache-rework-20261018-analyze-t",
-    "actual-tokenizer-budget": "261018-112531-docker-run-rm-entrypoint-python-e-HF-HOME-tmp-hf"
+    "actual-tokenizer-budget": "261018-112531-docker-run-rm-entrypoint-python-e-HF-HOME-tmp-hf",
+    "fifo-v20-validation-report": "261018-114309-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "fifo-v20-priority-report": "261018-114556-python3-mtc-sufubao-tool-call-cache-rework-20261"
   },
   "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
   "candidate_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
@@ -40,7 +44,9 @@
     "pressure-append-diagnostic-v15r1.json": "6ceaaad1d0beebcbfb53073ba27b018eb7642a049b97d1040708a4054bd8f76c",
     "priority-fresh-v16-validation.json": "60fabce605dbb3eef83c1866e9a5014d72f16f4808f0750357687aaab546c64b",
     "fifo-v17-validation.json": "98edc484b6d05c30f31a1becdee5660fa10b826d459d193baca32fe219237ebf",
-    "fifo-v17-priority.json": "6d268de48ae491ad76c58903ee0678d2cec96db492ab3b31b2745c026ecbe1fb"
+    "fifo-v17-priority.json": "6d268de48ae491ad76c58903ee0678d2cec96db492ab3b31b2745c026ecbe1fb",
+    "fifo-v20-validation.json": "2bcd7e70a91b587a75faf2a331cc458da49974e605f9e28a496f537b611d74bc",
+    "fifo-v20-priority.json": "b28caff62a8e7e0a21566a69ebb6d1674748d95f0e14514f79261b83a0cf9d93"
   },
   "compressed_report_sha256": {
     "budget-v11-validation.json.gz": "625fadeea207f9bae0c125dadb4a10071f7d4b101c18e0cd1c488d48e473fbd1",
@@ -49,7 +55,9 @@
     "continuation-v15r1-validation.json.gz": "0a990d537fe0cbb00499ee1fe6a7b84df7e55d1745dbaa887ec021dc53b1ff67",
     "priority-fresh-v16-validation.json.gz": "5f89e48370c330ce8855bf625e2414ea648531f8d7156b26eb8a3410572bfd55",
     "fifo-v17-validation.json.gz": "c3cd53e0744128995d0a0aa5b9a1ad18adaef64b30c754b8a4daadc242f8685d",
-    "fifo-v17-priority.json.gz": "ab54de6b228db0b00c014c7cf226be51e1cd3ba9000ce5e04d3609d463b88df8"
+    "fifo-v17-priority.json.gz": "ab54de6b228db0b00c014c7cf226be51e1cd3ba9000ce5e04d3609d463b88df8",
+    "fifo-v20-validation.json.gz": "38a9d376a3e2c03fdfcec16773c529ec01a75244befef4bb575c78ad1f1dcd2d",
+    "fifo-v20-priority.json.gz": "3883df4baed0a3e697f8edd8acde225025e54de129f73425cdb45c3ca30c6e7d"
   },
   "fresh_v16_parent_exit": {
     "exit_code": 1,

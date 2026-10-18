@@ -156,6 +156,8 @@ Against predecessor unconditional priority (TTL3)
 
 [All aggregate/per-trial/cohort metrics](fifo-v17-priority.json.gz).
 
+[Cohort tradeoff chart](fifo-v17-validation-cohorts/Qwen3-4B.png) ([SVG](fifo-v17-validation-cohorts/Qwen3-4B.svg)) shows every validation case, including unavailable cohort metrics and negative ratios.
+
 The faster fast-agent/pressure results against Off coexist with ordinary tail regressions. FIFO-first is a bounded fairness choice: against unconditional priority it improves fast-agent ordinary p95 TTFT by 1.0675x, while agent mean request ratio is 0.8396x and pressure wall ratio 0.911x. It does not eliminate the cost of retaining idle KV. Slow tools and abandoned chains provide little or no wall benefit. The feature remains disabled by default.
 
 [Policy freeze before independent inference](fifo-v17-policy-freeze.json) records these limitations, the exact service/replay revisions and validation report hashes. Independent TraceLab assessment, hardware/order crossover and TP2 hybrid validation are in progress; do not interpret these nine pairs as production evidence.

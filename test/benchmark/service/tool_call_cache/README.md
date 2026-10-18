@@ -63,6 +63,10 @@ This directory provides complementary kinds of evidence:
   Use `launch_server.py --log-level debug` consistently on both policies and the
   unchanged baseline when collecting those metrics. Keep the logging setting in
   the result configuration; absolute latency includes its instrumentation cost.
+* `plot_results.py --cohorts`: displays wall time, agent mean request latency and
+  ordinary one-shot p95 TTFT together from the audited numerical export. Ratios
+  below one expose costs even when total wall time improves. Missing cohorts
+  remain visibly unavailable.
 * `model_provenance.py`: hashes the actual weights and tokenizer files in a
   separate untimed interval, archiving the script and results under `exp`.
 * `workload_stats.py`: exports numerical input/output-length and wait

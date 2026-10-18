@@ -22,6 +22,9 @@ def main():
     parser.add_argument("summary", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--title-prefix", default="Paired cache-retention comparisons")
+    parser.add_argument(
+        "--cohorts", action="store_true", help="Show agent mean and ordinary p95 costs beside wall time"
+    )
     args = parser.parse_args()
     payload = args.summary.read_bytes()
     if args.summary.suffix == ".gz":
@@ -33,6 +36,12 @@ def main():
         ("p95_ttft_speedup", "Server p95 TTFT speedup", 1),
         ("prefill_reduction_percent", "Uncached input reduction (%)", 0),
     ]
+    if args.cohorts:
+        columns = [
+            ("wall_speedup", "Replay wall-time speedup", 1),
+            ("agent_mean_request_speedup", "Agent mean request speedup", 1),
+            ("one_shot_p95_ttft_speedup", "Ordinary one-shot p95 TTFT speedup", 1),
+        ]
     for model in sorted({group["model"] for group in data["groups"]}):
         groups = sorted(
             (group for group in data["groups"] if group["model"] == model),
@@ -69,7 +78,12 @@ def main():
         fig.text(
             0.5,
             0.015,
-            "Points: geometric-mean ratios / mean token reduction. Bars: descriptive 95% bootstrap intervals.\n"
+            (
+                "Points: geometric-mean ratios. "
+                if args.cohorts
+                else "Points: geometric-mean ratios / mean token reduction. "
+            )
+            + "Bars: descriptive 95% bootstrap intervals.\n"
             "Independent unit: workload seed; GPU crossover repetitions share a seed cluster. "
             "Uncached input = API prompt tokens minus cached tokens.",
             ha="center",

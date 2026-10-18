@@ -291,6 +291,7 @@ def public_summary(result):
         "max_wait",
         "start_jitter",
         "compaction_identity",
+        "ordinary_output",
         "abandon_fraction",
         "min_tool_wait",
     ]

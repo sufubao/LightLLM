@@ -6,7 +6,8 @@
     "8fe7ec01bb6fa85a58c77be8e003cade1ee9b19c": "reserved-KV",
     "0e68cc17feecbcf85e43d9a69c7ebe9471e10bab": "static-headroom control",
     "dcd3551c53a13c5613d8a8b644870de00dd57820": "historical eviction policy",
-    "5bae2ef5ea481bbf53da26007169c94737d86062": "continuation priority"
+    "5bae2ef5ea481bbf53da26007169c94737d86062": "continuation priority",
+    "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec": "FIFO-first cached backfill"
   },
   "complete_pairs": {
     "v11": 12,
@@ -27,7 +28,7 @@
     "tracelab-return-timing": "261018-110942-python-tmp-agent-cache-rework-20261018-analyze-t"
   },
   "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
-  "candidate_revision": "5bae2ef5ea481bbf53da26007169c94737d86062",
+  "candidate_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
   "uncompressed_input_artifact_sha256": {
     "budget-v11-validation.json": "be2709aa7bec20758760f2a1720a1c8dad135244bf30c52d5c88eeefaca67ed3",
     "stable-prefix-v13-validation.json": "18fb699219e3e00f9ce6e7ead8dd544a635af294980d0f04098e85dc85ceb1c9",
@@ -56,6 +57,7 @@
     "heldout_requests": 0
   },
   "numeric_diagnostic_sha256": {
-    "tracelab-observed-returns-v17.json": "7aa0f29a2af4daa4eabf9a16eb39bd9a7615d53ae307ce568b1473e484b20d4b"
+    "tracelab-observed-returns-v17.json": "7aa0f29a2af4daa4eabf9a16eb39bd9a7615d53ae307ce568b1473e484b20d4b",
+    "excluded-v17-independent-parity.json": "c087c4bfa846f8b8fc62c983e7e4a1ad158958dbbea36c1e2414bc90939ffa1c"
   }
 }

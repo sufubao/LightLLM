@@ -198,6 +198,7 @@ async def run(args):
                     if args.output_scale > 0 and row["output_tokens"] > 0
                     else 0
                 )
+                answer = "OK"
                 instruction = (
                     'Invoke the declared echo tool exactly once with arguments {"text": "hello"}. '
                     "Emit a real tool call, not a plain-text answer."
@@ -217,6 +218,9 @@ async def run(args):
                         instruction = (
                             f'Reply with exactly this text, without quotes: "{answer}". Do not call any tools.'
                         )
+                constrained_ordinary = not want_tool and getattr(args, "ordinary_output", "text") == "json-string"
+                if constrained_ordinary:
+                    instruction = f"Reply with this exact JSON string: {json.dumps(answer)}. Do not call any tools."
                 prompt_hash, client_tokens = await asyncio.to_thread(prepare, tokenizer, messages, instruction, target)
                 if client_tokens > args.max_prompt_tokens + 128:
                     reset_compacted_context(messages, system, turn, args.compaction_identity)
@@ -235,6 +239,15 @@ async def run(args):
                     "max_tokens": max(128, output_target + 128),
                     "chat_template_kwargs": {"enable_thinking": False},
                 }
+                if constrained_ordinary:
+                    payload["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "ordinary_reply",
+                            "strict": True,
+                            "schema": {"type": "string", "enum": [answer]},
+                        },
+                    }
                 started = time.perf_counter()
                 async with client.post(
                     args.url + "/v1/chat/completions", json=payload, headers={"X-Request-Id": request_id}
@@ -246,6 +259,8 @@ async def run(args):
                 elapsed = time.perf_counter() - started
                 choice = result["choices"][0]
                 message = choice["message"]
+                if constrained_ordinary and json.loads(message.get("content") or "null") != answer:
+                    raise RuntimeError("ordinary response did not satisfy its exact string constraint")
                 calls = message.get("tool_calls") or []
                 expected = "tool_calls" if want_tool else "stop"
                 allowed = ["tool_calls"] if want_tool else ["stop", "length"]
@@ -404,6 +419,12 @@ def main():
         help="Optional source-shaped output target; zero uses short echo/OK. Actual outputs are measured.",
     )
     parser.add_argument("--max-output-target", type=int, default=512)
+    parser.add_argument(
+        "--ordinary-output",
+        choices=["text", "json-string"],
+        default="text",
+        help="Optional exact JSON-string constraint avoids punctuation drift; retain strict paired output/token checks.",
+    )
     parser.add_argument("--abandon-fraction", type=float, default=0)
     parser.add_argument("--min-tool-wait", type=float, default=0)
     parser.add_argument("--context-scale", type=float, default=0.05)

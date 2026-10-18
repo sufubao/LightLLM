@@ -6,6 +6,7 @@ from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
 from .tool_call_cache import ToolCallCacheRetention
+from .tool_call_prefix_hints import ToolCallPrefixHints
 
 
 class UniqueTimeIdGenerator:
@@ -144,8 +145,10 @@ class RadixCache:
         self.tool_call_retention = None
         self.rank_in_node = rank_in_node
         self.tool_call_reserved_tokens = None
+        self.tool_call_prefix_hints = None
 
     def enable_tool_call_retention(self, duration, fraction):
+        self.tool_call_prefix_hints = ToolCallPrefixHints(self.rank_in_node, initialize=True)
         self.tool_call_reserved_tokens = SharedArray(
             f"tool_call_reserved_tokens_{self.rank_in_node}", (1,), dtype=np.int64
         )
@@ -592,6 +595,7 @@ class _RadixCacheReadOnlyClient:
             if tool_call_retention_enabled
             else None
         )
+        self.tool_call_prefix_hints = ToolCallPrefixHints(rank_in_node) if tool_call_retention_enabled else None
         self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
 
@@ -614,6 +618,10 @@ class RadixCacheReadOnlyClient:
             _RadixCacheReadOnlyClient(total_token_num, rank_in_node, tool_call_retention_enabled)
             for rank_in_node in range(0, node_world_size, dp_world_size)
         ]
+
+    def get_tool_call_prefix_hints(self, dp_rank_in_node):
+        hints = self.dp_rank_clients[dp_rank_in_node].tool_call_prefix_hints
+        return hints.snapshot() if hints is not None else None
 
     def get_refed_tokens_num(self, dp_rank_in_node):
         return self.dp_rank_clients[dp_rank_in_node].get_refed_tokens_num()

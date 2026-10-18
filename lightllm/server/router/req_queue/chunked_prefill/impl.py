@@ -40,8 +40,10 @@ class ChunkedPrefillQueue(BaseQueue):
         capacity = self.max_total_tokens - reserved
         # Always allow a first feasible request to borrow the reservation. This
         # prevents head-of-line deadlock for a large request or a full budget.
-        if len(self.cache_len_list) == 1 or getattr(
-            getattr(req, "sample_params", None), "high_priority_request", False
+        if (
+            len(self.cache_len_list) == 1
+            or getattr(req, "_tool_call_cache_hit", False)
+            or getattr(getattr(req, "sample_params", None), "high_priority_request", False)
         ):
             capacity = self.max_total_tokens
         ok_token_num = need_max_token_num < capacity
@@ -59,6 +61,46 @@ class ChunkedPrefillQueue(BaseQueue):
             return False
 
     # @calculate_time(show=True, min_cost_ms=10)
+    def _prioritize_tool_continuations(self):
+        self._tool_bypass_head = None
+        self._tool_bypass_ids = set()
+        if not getattr(self, "tool_call_admission_enabled", False):
+            return
+        reader = getattr(self.router, "get_tool_call_prefix_hints", None)
+        hints = reader(self.dp_index) if reader is not None else None
+        if hints is None:
+            return
+        limit = max(64, self.running_max_req_size * 2)
+        head, tail = self.waiting_req_list[:limit], self.waiting_req_list[limit:]
+        urgent, normal, matched = [], [], []
+        for req in head:
+            req._tool_call_cache_hit = False
+            if req.sample_params.high_priority_request:
+                urgent.append(req)
+                continue
+            if hints.by_length:
+                if not hasattr(req, "shm_prompt_ids"):
+                    req.link_prompt_ids_shm_array()
+                memo = getattr(req, "_tool_call_prefix_memo", None)
+                if memo is None:
+                    req._tool_call_prefix_memo = memo = {}
+                req._tool_call_cache_hit = hints.matches(req.get_prompt_ids_numpy(), memo)
+            normal.append(req)
+            if req._tool_call_cache_hit:
+                matched.append(req)
+            elif self._tool_bypass_head is None:
+                self._tool_bypass_head = req
+        oldest = self._tool_bypass_head
+        # At most eight successful continuation admissions can bypass the oldest
+        # ordinary waiter. Explicit caller priority always remains ahead.
+        quota = max(0, 8 - getattr(oldest, "_tool_call_priority_skips", 0)) if oldest is not None else len(matched)
+        promoted = matched[:quota]
+        promoted_ids = {id(req) for req in promoted}
+        if oldest is not None:
+            position = next(i for i, req in enumerate(normal) if req is oldest)
+            self._tool_bypass_ids = {id(req) for req in normal[position + 1 :] if id(req) in promoted_ids}
+        self.waiting_req_list = urgent + promoted + [req for req in normal if id(req) not in promoted_ids] + tail
+
     def generate_new_batch(self, current_batch: Batch):
         # 即使调度容量已满，也要先清理 abort 请求，避免继续占用共享请求槽位。
         self.filter_aborted_reqs()
@@ -69,6 +111,9 @@ class ChunkedPrefillQueue(BaseQueue):
         exist_req_num = self.get_batch_dp_req_size(current_batch)
         if exist_req_num >= self.running_max_req_size:
             return None
+
+        original_waiting_queue = self.waiting_req_list
+        self._prioritize_tool_continuations()
 
         is_busy = self.is_busy()
 
@@ -83,12 +128,22 @@ class ChunkedPrefillQueue(BaseQueue):
             if ok_insert:
                 consumed_req_count += 1
                 can_run_list.append(req)
+                if id(req) in self._tool_bypass_ids and self._tool_bypass_head is not None:
+                    oldest = self._tool_bypass_head
+                    oldest._tool_call_priority_skips = getattr(oldest, "_tool_call_priority_skips", 0) + 1
             else:
                 break
         new_batch = None
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
-        self.waiting_req_list = self.waiting_req_list[consumed_req_count:]
+        if getattr(self, "tool_call_admission_enabled", False):
+            admitted = {id(req) for req in can_run_list}
+            # Restore FIFO for requests that did not run. Repeated failed probes
+            # must not permanently move continuations ahead without counting a
+            # successful bypass against the oldest ordinary waiter.
+            self.waiting_req_list = [req for req in original_waiting_queue if id(req) not in admitted]
+        else:
+            self.waiting_req_list = self.waiting_req_list[consumed_req_count:]
         return new_batch
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):

@@ -6,6 +6,7 @@ from lightllm.common.state_cache_manager import StateCacheManager
 from .shared_arr import SharedArray
 from .radix_cache import time_gen
 from .tool_call_cache import ToolCallCacheRetention
+from .tool_call_prefix_hints import ToolCallPrefixHints
 
 
 class HybridAttPagedTreeNode:
@@ -151,6 +152,7 @@ class HybridAttPagedRadixCache:
         self.tool_call_retention = None
         self.rank_in_node = rank_in_node
         self.tool_call_reserved_tokens = None
+        self.tool_call_prefix_hints = None
 
         self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
@@ -159,6 +161,7 @@ class HybridAttPagedRadixCache:
         self.small_page_buffers: StateCacheManager = small_page_buffers
 
     def enable_tool_call_retention(self, duration, fraction):
+        self.tool_call_prefix_hints = ToolCallPrefixHints(self.rank_in_node, initialize=True)
         self.tool_call_reserved_tokens = SharedArray(
             f"tool_call_reserved_tokens_{self.rank_in_node}", (1,), dtype=np.int64
         )

@@ -375,6 +375,9 @@ class InferenceContext:
             free_token_index = custom_cat(free_token_index)
         self.req_manager.free(free_req_index, free_token_index)
 
+        if self.radix_cache is not None and self.radix_cache.tool_call_retention is not None:
+            self.radix_cache.tool_call_prefix_hints.publish(self.radix_cache.tool_call_retention)
+
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
 

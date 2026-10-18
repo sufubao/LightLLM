@@ -175,6 +175,14 @@ contexts to force out waiting tool prefixes despite their eviction preference.
 Shared ancestors count once, and referenced KV does not also consume this idle
 reservation. An initial feasible request or an explicitly high-priority request
 can borrow the reservation, so a large request need not wait for lease expiry.
+A bounded shared table publishes at most 64 prefix fingerprints and deadlines
+at request-release batches. A single-host router can recognize a waiting
+continuation, admit it against the original full-capacity bound and move it ahead
+of unrelated waiters. The oldest ordinary waiter permits at most eight successful
+bypasses; failed probes preserve its FIFO position. Explicit caller priority
+remains first. Fingerprints are scheduling hints only: actual KV reuse still
+requires the radix cache's exact match. Stale/missing hints fall back to ordinary
+admission. Local hint ordering is disabled for multinode TP and PD roles.
 The backend can still reclaim every protected token; no reference is added.
 This reservation may reduce active concurrency while tools are pending, so the
 cohort latency and abandoned/slow-tool controls remain necessary. PD admission

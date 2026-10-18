@@ -385,6 +385,13 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                     count += 1
             return count
 
+    def get_tool_call_prefix_hints(self, dp_index):
+        # Local monotonic deadlines and queue priority must not reorder separate
+        # multinode routers differently. PD keeps its original admission path.
+        if not self.tool_call_admission_enabled or self.is_multinode_tp or self.radix_cache_client is None:
+            return None
+        return self.radix_cache_client.get_tool_call_prefix_hints(dp_index)
+
     def get_tool_call_reserved_tokens(self, dp_index):
         # PD has no completion-feedback path to its separate prefill cache.
         # Reservation only changes normal-service admission, never KV refs.
@@ -418,6 +425,10 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
             # 防止反复发送abort命令给推理进程
             req._router_aborted = False
+            if self.tool_call_admission_enabled:
+                req._tool_call_prefix_memo = {}
+                req._tool_call_priority_skips = 0
+                req._tool_call_cache_hit = False
             # 作用同 _router_aborted 类似
             req_group.append(req)
 

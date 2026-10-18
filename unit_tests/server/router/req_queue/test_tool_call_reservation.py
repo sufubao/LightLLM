@@ -87,3 +87,98 @@ def test_router_accounts_for_idle_protected_tokens_once_and_keeps_disabled_accou
     router.tool_call_admission_enabled = False
     assert router.get_used_tokens(0) == 20
     assert router.get_tool_call_reserved_tokens(0) == 0
+
+
+def test_actual_continuation_can_borrow_but_never_exceeds_full_capacity():
+    continuation = req(40)
+    continuation._tool_call_cache_hit = True
+    assert queue(40, [(30, 0)])._can_add_new_req(continuation, False)
+    assert not queue(40, [(70, 0)])._can_add_new_req(continuation, False)
+
+
+def waiting_req(name, tokens, urgent=False):
+    result = req(tokens)
+    result.request_id = name
+    result.sample_params = SimpleNamespace(high_priority_request=urgent, suggested_dp_index=0)
+    result.shm_prompt_ids = True
+    result.get_prompt_ids_numpy = lambda: [tokens, 1]
+    return result
+
+
+def priority_queue(waiting):
+    result = queue(40)
+    result.waiting_req_list = waiting
+    result.router.get_tool_call_prefix_hints = lambda _: SimpleNamespace(
+        by_length={1}, matches=lambda ids, memo: ids[0] == 40
+    )
+    return result
+
+
+def test_hint_priority_preserves_explicit_priority_and_fifo_within_classes():
+    ordinary = waiting_req("ordinary", 20)
+    a, b = waiting_req("a", 40), waiting_req("b", 40)
+    urgent = waiting_req("urgent", 10, urgent=True)
+    result = priority_queue([urgent, ordinary, a, b])
+    result._prioritize_tool_continuations()
+    assert result.waiting_req_list == [urgent, a, b, ordinary]
+    assert result._tool_bypass_head is ordinary
+    assert result._tool_bypass_ids == {id(a), id(b)}
+
+
+def test_ordinary_waiter_has_bounded_successful_continuation_bypasses():
+    ordinary = waiting_req("ordinary", 20)
+    ordinary._tool_call_priority_skips = 8
+    continuation = waiting_req("agent", 40)
+    result = priority_queue([ordinary, continuation])
+    result._prioritize_tool_continuations()
+    assert result.waiting_req_list == [ordinary, continuation]
+    assert result._tool_bypass_ids == set()
+    assert continuation._tool_call_cache_hit
+
+
+def test_disabled_queue_does_not_link_prompts_or_read_hint_table():
+    result = priority_queue([waiting_req("ordinary", 20), waiting_req("agent", 40)])
+    original = list(result.waiting_req_list)
+    result.tool_call_admission_enabled = False
+    result.router.get_tool_call_prefix_hints = lambda _: pytest.fail("disabled table read")
+    result._prioritize_tool_continuations()
+    assert result.waiting_req_list == original
+
+
+def test_multinode_router_never_uses_local_prefix_hint_ordering():
+    from lightllm.server.router.manager import RouterManager
+
+    router = RouterManager.__new__(RouterManager)
+    router.tool_call_admission_enabled = True
+    router.is_multinode_tp = True
+    router.radix_cache_client = SimpleNamespace(get_tool_call_prefix_hints=lambda _: pytest.fail("local hints"))
+    assert router.get_tool_call_prefix_hints(0) is None
+
+
+def test_failed_priority_probe_restores_fifo_and_only_success_counts_bypass():
+    ordinary, continuation = waiting_req("ordinary", 20), waiting_req("agent", 40)
+    result = priority_queue([ordinary, continuation])
+    result.dp_size_in_node = 1
+    result.filter_aborted_reqs = lambda: None
+    result.is_busy = lambda: False
+    full = SimpleNamespace(reqs=[waiting_req("active", 90)])
+    assert result.generate_new_batch(full) is None
+    assert result.waiting_req_list == [ordinary, continuation]
+    assert getattr(ordinary, "_tool_call_priority_skips", 0) == 0
+    available = SimpleNamespace(reqs=[waiting_req("active", 30)])
+    batch = result.generate_new_batch(available)
+    assert batch.reqs == [continuation]
+    assert result.waiting_req_list == [ordinary]
+    assert ordinary._tool_call_priority_skips == 1
+
+
+def test_exhausted_priority_budget_admits_old_ordinary_waiter_first():
+    ordinary, continuation = waiting_req("ordinary", 20), waiting_req("agent", 40)
+    ordinary._tool_call_priority_skips = 8
+    result = priority_queue([ordinary, continuation])
+    result.dp_size_in_node = 1
+    result.filter_aborted_reqs = lambda: None
+    result.is_busy = lambda: False
+    batch = result.generate_new_batch(SimpleNamespace(reqs=[waiting_req("active", 30)]))
+    assert batch.reqs[0] is ordinary
+    assert ordinary._tool_call_priority_skips == 8

@@ -105,6 +105,7 @@ class _PrefillTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
+        self.kv_page_bytes = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -423,8 +424,7 @@ class _PrefillTransModule:
                     pages=1,
                     kv_tokens_total=trans_task.transfer_kv_num(),
                     state_pages=int(trans_task.page_kind != "kv"),
-                    bytes_total=self.transporter.kv_move_buffer[0].numel()
-                    * self.transporter.kv_move_buffer.element_size(),
+                    bytes_total=self.kv_page_bytes,
                     task_duration_ms_total=round((time.time() - trans_task.create_time) * 1000, 3),
                 )
 

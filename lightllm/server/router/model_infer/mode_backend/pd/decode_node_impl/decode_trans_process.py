@@ -132,6 +132,7 @@ class _DecodeTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
+        self.kv_page_bytes = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -433,8 +434,7 @@ class _DecodeTransModule:
                     read_page_gpu_ms_total=(
                         copy_start_event.elapsed_time(copy_end_event) if copy_end_event is not None else 0
                     ),
-                    bytes_total=self.transporter.kv_move_buffer[0].numel()
-                    * self.transporter.kv_move_buffer.element_size(),
+                    bytes_total=self.kv_page_bytes,
                     task_duration_ms_total=round((time.time() - trans_task.create_time) * 1000, 3),
                 )
 

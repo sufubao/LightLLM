@@ -384,15 +384,19 @@ def main():
         args.public_output.parent.mkdir(parents=True, exist_ok=True)
         args.public_output.write_text(json.dumps(public_summary(result), indent=2) + "\n")
     lines = [
-        "| Model | Case | TTL | Pairs / seeds | Wall speedup | Cache gain (pp) | Prefill reduction |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Model | Candidate SHA | Control SHA (TTL / budget) | Case | TTL | "
+        "Pairs / seeds | Wall speedup | Cache gain (pp) | Prefill reduction |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for group in result["groups"]:
         metric = group["metrics"]
         speed = metric["wall_speedup"]
         interval = "" if speed["ci95"] is None else f" [{speed['ci95'][0]:.3f}, {speed['ci95'][1]:.3f}]"
+        control = group["workload"].get("control_policy", {})
         lines.append(
-            f"| {Path(group['model']).name} | {group['case']} | {group['retention_seconds']} | "
+            f"| {Path(group['model']).name} | {group['candidate_revision'][:8]} | "
+            f"{group['control_revision'][:8]} ({control.get('retention', '?')}s / {control.get('fraction', '?')}) | "
+            f"{group['case']} | {group['retention_seconds']} | "
             f"{group['pairs']} / {group['independent_seeds']} | {speed['geomean']:.3f}x{interval} | "
             f"{metric['cache_hit_gain_pp']['mean']:+.2f} | {metric['prefill_reduction_percent']['mean']:+.2f}% |"
         )

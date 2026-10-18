@@ -423,7 +423,7 @@ def main():
         "--ordinary-output",
         choices=["text", "json-string"],
         default="text",
-        help="Optional exact JSON-string constraint avoids punctuation drift; retain strict paired output/token checks.",
+        help="Exact JSON strings avoid punctuation drift; strict paired output/token checks remain enabled.",
     )
     parser.add_argument("--abandon-fraction", type=float, default=0)
     parser.add_argument("--min-tool-wait", type=float, default=0)

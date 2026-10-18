@@ -104,6 +104,8 @@ def summarize(phases):
             workload = {
                 "options": next(case["options"] for case in protocol["cases"] if case["name"] == trial["case"]),
                 "harness_sha256": protocol["harness_sha256"],
+                "rounds_sha256": protocol.get("rounds_sha256"),
+                "control_policy": {key: control["configuration"].get(key) for key in ("retention", "fraction")},
                 "cache_isolation": protocol.get("cache_isolation", "none"),
                 "image_id": candidate["image_id"],
                 "model_config_sha256": candidate["model_config_sha256"],
@@ -321,6 +323,12 @@ def public_summary(result):
             ]
         }
         safe["workload"]["python_dependency_sha256"] = workload.get("python_dependency_sha256", {})
+        safe["workload"]["rounds_sha256"] = workload.get("rounds_sha256")
+        safe["workload"]["control_policy"] = {
+            key: value
+            for key in ("retention", "fraction")
+            if type(value := workload.get("control_policy", {}).get(key)) in (int, float) and math.isfinite(value)
+        }
         safe["workload"]["options"] = {key: workload["options"][key] for key in options if key in workload["options"]}
         public["groups"].append(safe)
         for pair in group["raw_pairs"]:

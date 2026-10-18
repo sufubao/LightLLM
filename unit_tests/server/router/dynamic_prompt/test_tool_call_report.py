@@ -1,6 +1,7 @@
 import importlib.util
 import copy
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -151,7 +152,8 @@ def test_cohort_export_whitelists_nested_numeric_fields_and_fixed_labels():
     assert "mean" not in result["agent"]["server_ttft_ms"]
 
 
-def test_cohort_aggregation_preserves_group_identity_and_exposes_ordinary_regression(tmp_path):
+@pytest.mark.parametrize("separation", ["identical", "control_policy", "dataset"])
+def test_cohort_aggregation_preserves_group_identity_and_exposes_ordinary_regression(tmp_path, separation):
     def save(name, data):
         (tmp_path / name).write_text(json.dumps(data))
 
@@ -230,3 +232,21 @@ def test_cohort_aggregation_preserves_group_identity_and_exposes_ordinary_regres
     assert group["case"] == "mix" and group["workload"]["options"]["mix"] == "agent50"
     assert group["metrics"]["agent_mean_request_speedup"]["geomean"] == pytest.approx(2.0)
     assert group["metrics"]["one_shot_mean_request_speedup"]["geomean"] == pytest.approx(0.75)
+
+    alternate = tmp_path / "alternate"
+    alternate.mkdir()
+    for source in tmp_path.glob("*.json"):
+        shutil.copy2(source, alternate / source.name)
+    if separation == "control_policy":
+        manifest_path = alternate / "control-service.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["configuration"]["fraction"] = 0.25
+        manifest_path.write_text(json.dumps(manifest))
+    elif separation == "dataset":
+        protocol_path = alternate / "protocol.json"
+        protocol = json.loads(protocol_path.read_text())
+        protocol["rounds_sha256"] = "d" * 64
+        protocol_path.write_text(json.dumps(protocol))
+    combined = report.summarize([tmp_path, alternate])
+    assert len(combined) == (1 if separation == "identical" else 2)
+    assert sum(group["pairs"] for group in combined) == 2

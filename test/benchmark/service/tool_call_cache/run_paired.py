@@ -197,6 +197,7 @@ def main():
                 "cases": cases,
                 "repeats": args.repeats,
                 "harness_sha256": harness_sha,
+                "rounds_sha256": hashlib.sha256((args.root / args.rounds).read_bytes()).hexdigest(),
                 "paired_runner_sha256": hashlib.sha256((destination / "run_paired.py").read_bytes()).hexdigest(),
                 "gpu_monitor_interval_seconds": 2,
                 "reject_timed_tilelang_compilation": args.reject_timed_tilelang_compilation,

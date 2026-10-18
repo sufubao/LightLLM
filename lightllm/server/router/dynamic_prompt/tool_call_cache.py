@@ -2,7 +2,8 @@
 
 The caller supplies a clock shared by all tensor-parallel ranks. Never read a
 process-local clock here: different eviction decisions would corrupt TP state.
-Leases affect eviction order only; they never acquire KV references.
+Leases change eviction preference and publish idle coverage for normal-service
+admission. They never acquire KV references.
 """
 
 from sortedcontainers import SortedDict

@@ -8,6 +8,14 @@ This directory provides complementary kinds of evidence:
   observations are censored; return probabilities are conditional on observing
   another request. Input readiness and the next response's first chunk are
   different timing measurements, neither an exact HTTP arrival timestamp.
+* `tracelab_data.py`: independent [TraceLab v0.0.1 metadata](https://github.com/uw-syfi/TraceLab/releases/tag/v0.0.1),
+  pinned by SHA-256. Reject missing usage and generation timing; retain one longest
+  contiguous, nonoverlapping segment per original session, choosing the first on
+  ties. Do not bridge invalid rounds or index gaps. Normalize identities to hashes
+  and tool presence to a fixed label. Missing original finish reasons and input
+  readiness remain missing; usage-report timestamps are not generation events.
+  These sanitized metadata still require synthetic replay content. Preserve CC
+  BY 4.0 attribution. Reserve an independent corpus before performance tuning.
 * `smoke.py`: actual OpenAI tool generation and a live tool-result continuation.
   Tool definitions remain identical across turns to preserve the prompt prefix.
 * `pressure_probe.py`: controlled residency diagnostic with real tool generation
@@ -33,7 +41,9 @@ This directory provides complementary kinds of evidence:
   generated arguments back into the conversation.
 * `run_paired.py`: sequential paired trials with alternating order, archived
   service manifests, an immutable client snapshot, strict prompt/output checks,
-  and server TTFT/cache metrics correlated by request ID. Comparison stops on
+  and server TTFT/cache metrics correlated by request ID. Dataset checksums and
+  both policy settings separate report groups. Older protocols lack the explicit
+  dataset checksum; do not pool them with new independent-corpus evaluations. Comparison stops on
   errors or mismatches; earlier and failed results remain available. Continuous
   GPU process/load observations reject foreign processes on either experiment
   GPU while retaining visibility into activity elsewhere on the shared host.

@@ -91,9 +91,33 @@ def select_sessions(args):
     return selected
 
 
+def stream_kinds(selected, mix):
+    """Session selection is already seeded; assign an exact agent fraction."""
+    if mix not in ("agent25", "agent50"):
+        return {name: "trace" for name, _, _ in selected}
+    divisor = 4 if mix == "agent25" else 2
+    count = max(1, len(selected) // divisor)
+    return {name: "agent" if index < count else "one-shot" for index, (name, _, _) in enumerate(selected)}
+
+
+def reset_one_shot(messages, system, turn):
+    # A completed independent request has no reusable conversation on its next
+    # arrival. Its namespace differs before the long context, not after it.
+    messages[:] = [{**system, "content": system["content"] + f" Independent request {turn}."}]
+
+
+def latency_stats(values):
+    return {
+        "mean": statistics.mean(values) if values else None,
+        "p50": percentile(values, 0.5),
+        "p95": percentile(values, 0.95),
+    }
+
+
 async def run(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True, trust_remote_code=False)
     selected = select_sessions(args)
+    kinds = stream_kinds(selected, args.mix)
     output_rows = []
     failures = []
     sessions = []
@@ -103,6 +127,7 @@ async def run(args):
     async with aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=False) as client:
 
         async def one(name, source, stagger):
+            kind = kinds[name]
             await asyncio.sleep(stagger)
             system = {
                 "role": "system",
@@ -111,7 +136,7 @@ async def run(args):
             messages = [system]
             began = time.perf_counter()
             waited = 0.0
-            planned_abandon = (
+            planned_abandon = kind != "one-shot" and (
                 int(hashlib.sha256(f"{args.seed}:{name}".encode()).hexdigest(), 16) / (1 << 256) < args.abandon_fraction
             )
             previous_was_tool = False
@@ -120,6 +145,8 @@ async def run(args):
                 compaction = turn > 0 and row["input_tokens"] < source[turn - 1]["input_tokens"] - 256
                 if compaction:
                     messages = [system]
+                if kind == "one-shot":
+                    reset_one_shot(messages, system, turn)
                 if turn:
                     original_wait = source[turn - 1].get("next_input_ready_gap_s")
                     original_wait = (
@@ -141,6 +168,8 @@ async def run(args):
                     want_tool = True
                 elif args.mix == "mixed25":
                     want_tool = hashlib.sha256(f"{args.seed}:{name}:{row['request']}".encode()).digest()[0] < 64
+                elif args.mix in ("agent25", "agent50"):
+                    want_tool = kind == "agent" and turn < len(source) - 1
                 if planned_abandon and turn == 0:
                     want_tool = True
                 output_target = (
@@ -165,6 +194,8 @@ async def run(args):
                 prompt_hash, client_tokens = await asyncio.to_thread(prepare, tokenizer, messages, instruction, target)
                 if client_tokens > args.max_prompt_tokens + 128:
                     messages = [system]
+                    if kind == "one-shot":
+                        reset_one_shot(messages, system, turn)
                     prompt_hash, client_tokens = await asyncio.to_thread(
                         prepare, tokenizer, messages, instruction, target
                     )
@@ -205,6 +236,7 @@ async def run(args):
                     "target_output_tokens": output_target,
                     "target_prompt_tokens": target,
                     "session": name,
+                    "request_kind": kind,
                     "turn": turn,
                     "prompt_sha256": prompt_hash,
                     "client_prompt_tokens": client_tokens,
@@ -244,6 +276,7 @@ async def run(args):
             sessions.append(
                 {
                     "session": name,
+                    "session_kind": kind,
                     "seconds": time.perf_counter() - began,
                     "wait_seconds": waited,
                     "abandoned": planned_abandon,
@@ -258,6 +291,22 @@ async def run(args):
     prompt_tokens = sum(r["usage"]["prompt_tokens"] for r in output_rows)
     cached_tokens = sum(r["usage"]["prompt_tokens_details"]["cached_tokens"] for r in output_rows)
     completed = [s for s in sessions if not s["abandoned"]]
+    agents = [s for s in completed if s["session_kind"] == "agent"]
+    cohorts = {}
+    for kind in ("agent", "one-shot", "trace"):
+        rows = [r for r in output_rows if r["request_kind"] == kind]
+        if not rows:
+            continue
+        prompts = sum(r["usage"]["prompt_tokens"] for r in rows)
+        cached = sum(r["usage"]["prompt_tokens_details"]["cached_tokens"] for r in rows)
+        cohorts[kind] = {
+            "requests": len(rows),
+            "prompt_tokens": prompts,
+            "cached_tokens": cached,
+            "prefilled_tokens": prompts - cached,
+            "output_tokens": sum(r["usage"]["completion_tokens"] for r in rows),
+            "request_seconds": latency_stats([r["seconds"] for r in rows]),
+        }
     result = {
         "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "rounds_sha256": hashlib.sha256(args.rounds.read_bytes()).hexdigest(),
@@ -268,6 +317,11 @@ async def run(args):
         "completed_sessions": len(completed),
         "abandoned_sessions": len(sessions) - len(completed),
         "sessions_per_second": len(completed) / duration,
+        "session_kind_counts": dict(collections.Counter(s["session_kind"] for s in sessions)),
+        "agent_completed_sessions": len(agents),
+        "agent_sessions_per_second": len(agents) / duration,
+        "agent_session_seconds": latency_stats([s["seconds"] for s in agents]),
+        "cohort_metrics": cohorts,
         "session_seconds": {
             "mean": statistics.mean(s["seconds"] for s in completed) if completed else None,
             "p50": percentile([s["seconds"] for s in completed], 0.5),
@@ -314,7 +368,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--namespace", default="run", help="Unique per paired trial, identical for both policies")
     parser.add_argument("--split", choices=["validation", "test", "all"], default="validation")
-    parser.add_argument("--mix", choices=["trace", "ordinary", "all-tools", "mixed25"], default="trace")
+    parser.add_argument(
+        "--mix", choices=["trace", "ordinary", "all-tools", "mixed25", "agent25", "agent50"], default="trace"
+    )
     parser.add_argument(
         "--output-scale",
         type=float,

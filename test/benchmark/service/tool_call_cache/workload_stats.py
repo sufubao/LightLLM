@@ -64,12 +64,16 @@ def summarize(phases):
                 rows = data["rows"]
                 config = data["configuration"]
                 reasons = collections.Counter(row["finish_reason"] for row in rows)
+                kinds = collections.Counter(row.get("request_kind", "trace") for row in rows)
+                if not set(kinds).issubset({"trace", "agent", "one-shot"}):
+                    raise ValueError("unexpected request kind")
                 if not set(reasons).issubset({"stop", "length", "tool_calls"}):
                     raise ValueError(f"unexpected finish state: {phase}")
                 if any(row["usage"]["prompt_tokens"] != row["client_prompt_tokens"] for row in rows):
                     raise ValueError(f"prompt token mismatch: {phase}")
                 policies[policy] = {
                     "requests": len(rows),
+                    "request_kind_counts": dict(kinds),
                     "compacted_requests": sum(bool(row["compaction"]) for row in rows),
                     "wait_capped_requests": sum(bool(row["wait_capped"]) for row in rows),
                     "output_target_capped_requests": data["output_target_capped_requests"],

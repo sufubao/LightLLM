@@ -127,3 +127,25 @@ def test_report_rejects_equal_parsed_outputs_with_different_generated_token_coun
         save(f"case-r0-{policy}.json", {"rows": [row]})
     with pytest.raises(ValueError, match="generated token counts differ"):
         report.summarize([tmp_path])
+
+
+def test_cohort_export_whitelists_nested_numeric_fields_and_fixed_labels():
+    secret = "NEVER_PUBLISH_COHORT_CONTENT"
+    raw = {
+        "agent": {
+            "requests": 4,
+            "prompt_tokens": 100,
+            "messages": secret,
+            "request_seconds": {"mean": 1.0, "p95": 2.0, "url": secret, "p50": secret},
+            "server_ttft_ms": {"mean": float("inf"), "p95": 30, "private": secret},
+        },
+        secret: {"requests": 9},
+        "one-shot": {"requests": 8, "prompt_tokens": secret},
+    }
+    result = report.public_cohort_metrics(raw)
+    assert secret not in json.dumps(result)
+    assert result["agent"]["requests"] == 4
+    assert result["one-shot"] == {"requests": 8}
+    assert result["agent"]["request_seconds"] == {"mean": 1.0, "p95": 2.0}
+    assert result["agent"]["server_ttft_ms"]["p95"] == 30
+    assert "mean" not in result["agent"]["server_ttft_ms"]

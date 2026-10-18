@@ -165,6 +165,26 @@ def summarize(phases):
                 metrics["log_mean_session_speedup"] = math.log(
                     control["session_seconds"]["mean"] / candidate["session_seconds"]["mean"]
                 )
+            agent_means = [p.get("agent_session_seconds", {}).get("mean") for p in (candidate, control)]
+            if all(agent_means):
+                metrics["log_agent_mean_session_speedup"] = math.log(agent_means[1] / agent_means[0])
+            for kind, label in (("agent", "agent"), ("one-shot", "one_shot")):
+                left = candidate.get("cohort_metrics", {}).get(kind)
+                right = control.get("cohort_metrics", {}).get(kind)
+                if left is None or right is None:
+                    continue
+                if right["prefilled_tokens"]:
+                    metrics[f"{label}_prefill_reduction_percent"] = 100 * (
+                        1 - left["prefilled_tokens"] / right["prefilled_tokens"]
+                    )
+                for key, suffix in (("request_seconds", "request"), ("server_ttft_ms", "ttft")):
+                    if key not in left or key not in right:
+                        continue
+                    for stat in ("mean", "p95"):
+                        if left[key][stat] and right[key][stat]:
+                            metrics[f"log_{label}_{stat}_{suffix}_speedup"] = math.log(
+                                right[key][stat] / left[key][stat]
+                            )
             per_seed[candidate["configuration"]["seed"]].append(metrics)
         clustered = {
             name: [statistics.mean(m[name] for m in rows) for rows in per_seed.values()]
@@ -196,6 +216,34 @@ def summarize(phases):
             summary["metrics"][name] = estimate
         result.append(summary)
     return result
+
+
+def public_latency_stats(raw):
+    return {
+        stat: value
+        for stat in ("mean", "p50", "p95")
+        if (value := raw.get(stat)) is None or (type(value) in (int, float) and math.isfinite(value))
+    }
+
+
+def public_cohort_metrics(cohorts):
+    """Keep only fixed cohort labels and numerical counters/latencies."""
+    output = {}
+    for kind in ("agent", "one-shot", "trace"):
+        raw = cohorts.get(kind)
+        if not isinstance(raw, dict):
+            continue
+        safe = {}
+        for key in ("requests", "prompt_tokens", "cached_tokens", "prefilled_tokens", "output_tokens"):
+            value = raw.get(key)
+            if type(value) in (int, float) and math.isfinite(value):
+                safe[key] = value
+        for key in ("request_seconds", "server_ttft_ms"):
+            if not isinstance(raw.get(key), dict):
+                continue
+            safe[key] = public_latency_stats(raw[key])
+        output[kind] = safe
+    return output
 
 
 def public_summary(result):
@@ -285,6 +333,22 @@ def public_summary(result):
             }
             for policy in ["candidate", "control"]:
                 entry[policy] = {key: trial[policy][key] for key in metrics if key in trial[policy]}
+                for key in ("agent_completed_sessions", "agent_sessions_per_second"):
+                    value = trial[policy].get(key)
+                    if type(value) in (int, float) and math.isfinite(value):
+                        entry[policy][key] = value
+                if isinstance(trial[policy].get("agent_session_seconds"), dict):
+                    entry[policy]["agent_session_seconds"] = public_latency_stats(
+                        trial[policy]["agent_session_seconds"]
+                    )
+                if "session_kind_counts" in trial[policy]:
+                    entry[policy]["session_kind_counts"] = {
+                        kind: value
+                        for kind in ("agent", "one-shot", "trace")
+                        if type(value := trial[policy]["session_kind_counts"].get(kind)) is int and value >= 0
+                    }
+                if "cohort_metrics" in trial[policy]:
+                    entry[policy]["cohort_metrics"] = public_cohort_metrics(trial[policy]["cohort_metrics"])
             public["trials"].append(entry)
     return public
 

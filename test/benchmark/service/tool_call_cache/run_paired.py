@@ -392,6 +392,15 @@ def main():
                 "mean": statistics.mean(values),
                 "p95": sorted(values)[int((len(values) - 1) * 0.95)],
             }
+            cohorts = summary[label].get("cohort_metrics", {})
+            for kind in cohorts:
+                subset = [
+                    measured[r["request_id"]]["ttft_ms"] for r in data["rows"] if r.get("request_kind", "trace") == kind
+                ]
+                cohorts[kind]["server_ttft_ms"] = {
+                    "mean": statistics.mean(subset),
+                    "p95": sorted(subset)[int((len(subset) - 1) * 0.95)],
+                }
     gpu_stop.set()
     gpu_worker.join(timeout=25)
     if gpu_worker.is_alive() or gpu_errors:

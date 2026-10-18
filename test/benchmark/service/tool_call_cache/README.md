@@ -79,6 +79,21 @@ cache treatment. Their actual finish reasons are counted separately, and paired
 trials must match both the finish reason and generated token count. An unexpected
 tool call in an ordinary workload remains an error.
 
+`--mix agent25` and `--mix agent50` assign respectively one quarter and one
+half of the seeded client streams to multi-round agents. Agents call tools until
+the final answer; the remaining streams issue independent ordinary requests,
+each with a fresh namespace before its long reference context. This differs
+from `mixed25`, which randomly changes the finish state within repeatedly reused
+conversations and deliberately makes ordinary requests hot too. Both are
+controlled synthetic mixtures, not observations of production request classes.
+The original trace input sizes/waits and any overrides remain recorded.
+
+Mixed-case `session_seconds` describes complete client streams, including streams
+of independent ordinary requests; it is not an agent-only completion metric.
+Use `agent_session_seconds` for completed agents. Numerical cohort metrics report
+agent and one-shot cache work, request latency and server TTFT separately, so a
+cache preference cannot hide latency transferred to unrelated ordinary requests.
+
 All benchmark/evaluation commands must be wrapped in `exp -m "purpose" ...`.
 Save the exact service source revision/checksum, image digest, command line,
 hardware, driver, model configuration, dataset revision and dataset checksums.

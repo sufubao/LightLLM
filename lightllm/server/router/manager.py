@@ -45,7 +45,8 @@ logger = init_logger(__name__)
 class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
     def __init__(self, args: StartArgs):
         self.args = args
-        self.tool_call_admission_enabled = args.tool_call_cache_retention_seconds > 0 and args.run_mode == "normal"
+        # Benchmark-only control: fixed headroom, independent of finish state.
+        self.tool_call_admission_enabled = getattr(args, "run_mode", "normal") == "normal"
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
         self.node_world_size = self.world_size // args.nnodes
@@ -386,11 +387,9 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             return count
 
     def get_tool_call_reserved_tokens(self, dp_index):
-        # PD has no completion-feedback path to its separate prefill cache.
-        # Reservation only changes normal-service admission, never KV refs.
-        if not getattr(self, "tool_call_admission_enabled", False) or self.radix_cache_client is None:
-            return 0
-        return self.radix_cache_client.get_tool_call_reserved_tokens(dp_index)
+        # Physical KV capacity is unchanged. Hold generic headroom even when
+        # no tools are pending, with ordinary LRU and retention disabled.
+        return int(self.max_total_token_num * self.args.tool_call_cache_max_fraction)
 
     def get_used_tokens(self, dp_index):
         if not self.args.disable_dynamic_prompt_cache:

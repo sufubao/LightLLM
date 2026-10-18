@@ -1,10 +1,10 @@
 # Exploratory rework validation, 2026-10-18
 
-These are 66 complete exploratory paired comparisons: 44 on early sources, 16 on priority source plus six fresh-identity sensitivity pairs for `5bae2ef5ea481bbf53da26007169c94737d86062`. They include neutral and negative outcomes. This folder does not include independent-corpus performance or GPU crossover evidence, and cannot establish a production benefit. It predates the FIFO-first backfill candidate.
+These are 75 complete exploratory/validation paired comparisons: 66 on earlier sources, plus nine on FIFO-first candidate `e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec`. All neutral and negative outcomes are included. This folder currently contains no independent-corpus performance or GPU crossover evidence, and cannot establish a production benefit.
 
 All completed comparisons below use Qwen3-4B BF16, TP=1, isolated H200 GPUs on a shared host, KV capacity 32,768 tokens, request limit 16,384 tokens, prefill batch 8,192 tokens and 32 running requests. Both policies use the same pinned existing image, attention backends, debug logging and dependency overlay. Physical KV capacity is identical; static-headroom changes admission only. No images were built. Full per-group image/model/dependency fingerprints and configuration accompany the numerical exports. Weight/tokenizer provenance remains in [the preceding study](../20261017/model-checksums.json).
 
-The source is pinned public [CacheWise metadata](https://github.com/cachewise-project/cachewise-coding-traces/tree/181c435a090d328d00bbbee4c8eeb27d32f3abd2). Text is synthetic; actual generated tool results close the agent loop. Lengths, waits and controlled mixtures are explicitly scaled/capped. These are closed-loop workloads, not verbatim production traffic or an open-loop overload test. These frozen clients reset compacted history to the same system/reference scope; identical synthetic filler can therefore be reused across compactions. New clients provide an explicit fresh-context sensitivity and must be reported separately. Source snapshots differ between studies; replay namespaces differ too. Comparisons are paired within each phase, and studies are never pooled.
+The source is pinned public [CacheWise metadata](https://github.com/cachewise-project/cachewise-coding-traces/tree/181c435a090d328d00bbbee4c8eeb27d32f3abd2). Text is synthetic; actual generated tool results close the agent loop. Lengths, waits and controlled mixtures are explicitly scaled/capped. These are closed-loop workloads, not verbatim production traffic or an open-loop overload test. The v11–v15 clients reset compacted history to the same system/reference scope; identical synthetic filler can therefore be reused across compactions. The v16/v17 clients use fresh context identity before the long reference at each compaction. These two definitions are reported separately. Source snapshots differ between studies; replay namespaces differ too. Comparisons are paired within each phase, and studies are never pooled.
 
 v11 has two validation seeds per case; v13/v14/v15r1 have one. Intervals, when present, are descriptive seed-cluster bootstrap intervals. Requests are not independent performance repetitions; there is no GPU crossover or independent-corpus performance proof here. v12 stopped during warmup on unexpected end states and has zero measured pairs. Raw requests, responses and logs remain private in the experiment store.
 
@@ -128,3 +128,34 @@ This uses the same priority source `5bae2ef5ea481bbf53da26007169c94737d86062` wi
 [All aggregate/per-trial/cohort metrics](priority-fresh-v16-validation.json.gz). The output-shaped case uses explicitly scaled/capped source output targets and matched actual generated token counts.
 
 The ordinary p95 TTFT ratios are 0.9050x in agent50-fast and 0.6830x in the output-shaped case despite improved means. Abandoned chains give 0.9793x wall ratio and ordinary p95 TTFT 0.8973x. These tradeoffs motivated evaluating FIFO-feasible-head-first backfill instead of unconditional promotion. These six pairs are valid diagnostic evidence, not independent heldout results, and must not be silently discarded because the parent review stopped.
+
+## FIFO-first blocked-head backfill: v17 validation
+
+Frozen service source: `e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec`. Six conservative fresh-compaction validation pairs versus same-source Off, plus three direct pairs versus predecessor `5bae2ef5...`. Seed42 only; these are validation evidence, not independent-corpus results. All source prompts, finish states, output signatures and generated token counts match.
+
+Against same-source Off (TTL0)
+
+| Case | Wall ratio | Uncached input reduction (%) | Ordinary mean request ratio | Ordinary p95 TTFT ratio |
+|---|---:|---:|---:|---:|
+| abandoned-agent25-c16 | 0.9717x | 0.00 | 0.9547x | 0.9048x |
+| agent50-c16-fast | 1.2061x | 26.36 | 1.0482x | 0.8092x |
+| expired-agent25-c16 | 0.9972x | 0.43 | 0.9080x | 0.8666x |
+| output-shaped-agent50-c8 | 1.1686x | 31.00 | 1.1198x | 0.6747x |
+| pressure-c24 | 1.2044x | 48.42 | n/a | n/a |
+| realwait-trace-c16 | 1.0070x | 29.82 | n/a | n/a |
+
+[All aggregate/per-trial/cohort metrics](fifo-v17-validation.json.gz).
+
+Against predecessor unconditional priority (TTL3)
+
+| Case | Wall ratio | Uncached input reduction (%) | Ordinary mean request ratio | Ordinary p95 TTFT ratio |
+|---|---:|---:|---:|---:|
+| agent50-c16-fast | 0.9957x | -2.19 | 0.9982x | 1.0675x |
+| output-shaped-agent50-c8 | 1.0120x | -0.06 | 1.0066x | 1.0092x |
+| pressure-c24 | 0.9106x | -10.67 | n/a | n/a |
+
+[All aggregate/per-trial/cohort metrics](fifo-v17-priority.json.gz).
+
+The faster fast-agent/pressure results against Off coexist with ordinary tail regressions. FIFO-first is a bounded fairness choice: against unconditional priority it improves fast-agent ordinary p95 TTFT by 1.0675x, while agent mean request ratio is 0.8396x and pressure wall ratio 0.911x. It does not eliminate the cost of retaining idle KV. Slow tools and abandoned chains provide little or no wall benefit. The feature remains disabled by default.
+
+[Policy freeze before independent inference](fifo-v17-policy-freeze.json) records these limitations, the exact service/replay revisions and validation report hashes. Independent TraceLab assessment, hardware/order crossover and TP2 hybrid validation are in progress; do not interpret these nine pairs as production evidence.

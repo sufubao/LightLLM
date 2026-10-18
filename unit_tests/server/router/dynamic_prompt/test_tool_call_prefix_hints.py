@@ -139,3 +139,48 @@ def test_new_hint_lengths_cannot_grow_request_memo_past_bound():
     memo = {length: (0, 0) for length in range(1, 129)}
     assert PrefixHintSnapshot([(129, first, second, 110000000)], 100).matches(ids, memo)
     assert len(memo) <= MAX_PREFIX_HINTS * 2
+
+
+def test_hybrid_admission_hint_ends_at_a_real_budgeted_checkpoint():
+    from sortedcontainers import SortedDict
+    from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
+
+    buffers = SimpleNamespace(free_state_cache=lambda *args, **kwargs: None)
+    cache = HybridAttPagedRadixCache(20, 0, 2, 2, SimpleNamespace(big_page_buffers=buffers), buffers)
+    cache.enable_tool_call_retention(10, 0.25)
+    cache.tool_call_retention.advance_clock(100)
+    _, tail = cache.insert(
+        torch.arange(12),
+        block_hashs=[11, 22, 33, 44, 55, 66],
+        block_state_idxs=[None] * 6,
+        len_to_big_page_id=SortedDict({4: 100, 8: 101, 12: 102}),
+    )
+    cache.tool_call_retention.protect(tail)
+    cache.tool_call_prefix_hints.publish(cache.tool_call_retention)
+    snapshot = cache.tool_call_prefix_hints.snapshot(now=101)
+    assert set(snapshot.by_length) == {4}
+    assert snapshot.matches(np.arange(13))
+    cache.match_prefix(torch.arange(12), block_hashs=[11, 22, 33, 44, 55, 66], update_refs=True)
+    cache.tool_call_prefix_hints.publish(cache.tool_call_retention)
+    assert not cache.tool_call_prefix_hints.snapshot(now=101).by_length
+
+
+def test_lost_hybrid_state_removes_admission_hint_when_published():
+    from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
+
+    freed = []
+    buffers = SimpleNamespace(
+        free_state_cache=lambda indexes=None, free_indexes=None: freed.extend(indexes or free_indexes),
+        get_free_cache_num=lambda: 0,
+    )
+    cache = HybridAttPagedRadixCache(40, 0, 2, 2, SimpleNamespace(big_page_buffers=buffers), buffers)
+    cache.enable_tool_call_retention(10, 0.5)
+    cache.tool_call_retention.advance_clock(100)
+    _, node = cache.insert(torch.tensor([1, 2]), block_hashs=[11], block_state_idxs=[10])
+    cache.tool_call_retention.protect(node)
+    cache.tool_call_prefix_hints.publish(cache.tool_call_retention)
+    assert cache.tool_call_prefix_hints.snapshot(now=101).matches([1, 2, 3])
+    cache.free_one_small_page_buffer()
+    cache.tool_call_prefix_hints.publish(cache.tool_call_retention)
+    assert freed == [10]
+    assert not cache.tool_call_prefix_hints.snapshot(now=101).by_length

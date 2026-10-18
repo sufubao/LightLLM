@@ -23,7 +23,8 @@
     "v15r1": "261018-093545-python3-mtc-sufubao-tool-call-cache-rework-20261",
     "fresh-v16": "261018-100200-python3-mtc-sufubao-tool-call-cache-rework-20261",
     "fifo-v17-validation-report": "261018-105321-python3-mtc-sufubao-tool-call-cache-rework-20261",
-    "fifo-v17-priority-report": "261018-105614-python3-mtc-sufubao-tool-call-cache-rework-20261"
+    "fifo-v17-priority-report": "261018-105614-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "tracelab-return-timing": "261018-110942-python-tmp-agent-cache-rework-20261018-analyze-t"
   },
   "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
   "candidate_revision": "5bae2ef5ea481bbf53da26007169c94737d86062",
@@ -53,5 +54,8 @@
     "reason": "Intentional internal review abort before independent test",
     "valid_pairs": 6,
     "heldout_requests": 0
+  },
+  "numeric_diagnostic_sha256": {
+    "tracelab-observed-returns-v17.json": "7aa0f29a2af4daa4eabf9a16eb39bd9a7615d53ae307ce568b1473e484b20d4b"
   }
 }

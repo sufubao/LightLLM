@@ -161,3 +161,11 @@ Against predecessor unconditional priority (TTL3)
 The faster fast-agent/pressure results against Off coexist with ordinary tail regressions. FIFO-first is a bounded fairness choice: against unconditional priority it improves fast-agent ordinary p95 TTFT by 1.0675x, while agent mean request ratio is 0.8396x and pressure wall ratio 0.911x. It does not eliminate the cost of retaining idle KV. Slow tools and abandoned chains provide little or no wall benefit. The feature remains disabled by default.
 
 [Policy freeze before independent inference](fifo-v17-policy-freeze.json) records these limitations, the exact service/replay revisions and validation report hashes. Independent TraceLab assessment, hardware/order crossover and TP2 hybrid validation are in progress; do not interpret these nine pairs as production evidence.
+
+## Independent metadata: observed return timing
+
+[TraceLab v0.0.1](https://github.com/uw-syfi/TraceLab#-the-dataset) supplies sanitized real coding-agent metadata, not original prompts. On the pinned normalized longest valid segment per session (348,158 rounds), **all original finish reasons are missing**. Tool presence is a separate advisory label.
+
+Among observed valid input-readiness gaps, tool rounds have a median of **0.224s**, versus **130.593s** without observed tools; **76.84%** versus **4.62%** are within three seconds. These denominators are 311,225 and 31,602 observed gaps respectively. Next first-response-chunk gaps instead have medians 5.958s and 149.029s: these include serving latency and are not request-arrival times.
+
+[Complete numerical timing audit](tracelab-observed-returns-v17.json) includes all gap distributions, missing followups and conditional fractions. Final/segment-boundary observations are censored; lack of a followup is not abandonment, and no HTTP-arrival, token-identity or causal performance inference is justified. This supports the return-timing hypothesis, while end-to-end gains remain a separate question. The three-second policy had already been frozen before independent model inference; this analysis does not change it.

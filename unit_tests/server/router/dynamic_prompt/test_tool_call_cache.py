@@ -513,6 +513,8 @@ def test_randomized_split_expiry_eviction_and_rank_agreement(seed):
             outputs.append(values)
             assert retention.protected_tokens == sum(len(n.token_id_key) for n in retention._leases)
             assert 0 <= retention.protected_tokens <= retention.token_budget
+            assert retention.reserved_tokens == sum(n.node_value_len for n in retention._leases if n.ref_counter == 0)
+            assert tree.tool_call_reserved_tokens.arr[0] == retention.reserved_tokens
             assert len(retention._expiry) == len(retention._leases)
             for node in retention._leases:
                 while node.parent is not None:
@@ -609,3 +611,58 @@ def test_hybrid_consume_then_tool_stop_reacquires_only_updated_waiting_prefix():
     assert matched.cache_protected and matched.ref_counter == 0
     assert retention.protected_tokens == 4
     tree._evict_tree_set._check()
+
+
+def test_shared_reservation_excludes_pinned_ancestors_and_renews_without_transient_drops():
+    tree = cache()
+    left = insert(tree, [1, 2, 3, 4])
+    right = insert(tree, [1, 2, 5, 6])
+    retention = tree.tool_call_retention
+    retention.protect(left)
+    retention.protect(right)
+    assert retention.reserved_tokens == 6
+    prefix, length, _ = tree.match_prefix(torch.tensor([1, 2]), update_refs=True)
+    assert length == 2 and retention.protected_tokens == 6
+    assert retention.reserved_tokens == 4
+    tree.add_node_ref_counter(prefix)
+    assert retention.reserved_tokens == 4
+    tree.dec_node_ref_counter(prefix)
+    assert retention.reserved_tokens == 4
+    tree.dec_node_ref_counter(prefix)
+    assert retention.reserved_tokens == 6
+    published = []
+    retention._publish_reserved = published.append
+    retention.protect(right)
+    assert published == []
+    retention.advance_clock(110)
+    assert retention.reserved_tokens == retention.protected_tokens == 0
+
+
+def test_reservation_tracks_protected_split_and_remains_fully_reclaimable():
+    tree = cache()
+    tail = insert(tree, list(range(10)))
+    tree.tool_call_retention.protect(tail)
+    prefix, length, _ = tree.match_prefix(torch.arange(3), update_refs=True)
+    assert length == 3
+    assert tree.tool_call_retention.protected_tokens == 10
+    assert tree.tool_call_retention.reserved_tokens == 7
+    tree.dec_node_ref_counter(prefix)
+    assert tree.tool_call_retention.reserved_tokens == 10
+    tree.evict(10, lambda _: None)
+    assert tree.tool_call_retention.reserved_tokens == 0
+    assert tree.tool_call_reserved_tokens.arr[0] == 0
+
+
+def test_router_client_reads_exact_reservation_and_disabled_client_stays_zero(monkeypatch):
+    from lightllm.server.router.dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
+
+    name = f"reservation_client_{uuid.uuid4().hex}"
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: name)
+    tree = cache()
+    enabled = RadixCacheReadOnlyClient(40, 1, 1, tool_call_retention_enabled=True)
+    disabled = RadixCacheReadOnlyClient(40, 1, 1)
+    tree.tool_call_retention.protect(insert(tree, [1, 2, 3, 4]))
+    assert enabled.get_tool_call_reserved_tokens(0) == 4
+    assert disabled.get_tool_call_reserved_tokens(0) == 0
+    tree.tool_call_retention.advance_clock(110)
+    assert enabled.get_tool_call_reserved_tokens(0) == 0

@@ -159,6 +159,17 @@ Hybrid attention trims only to checkpoints with valid recurrent state.
 Numeric debug counters distinguish consumed, budget-demoted, expired, completed,
 and evicted lease tokens. These are accounting events, not unique prefill savings.
 
+Normal-service admission now accounts for protected KV that is actually idle.
+Without this, treating the entire cache as free admits enough unrelated active
+contexts to force out waiting tool prefixes despite their eviction preference.
+Shared ancestors count once, and referenced KV does not also consume this idle
+reservation. An initial feasible request or an explicitly high-priority request
+can borrow the reservation, so a large request need not wait for lease expiry.
+The backend can still reclaim every protected token; no reference is added.
+This reservation may reduce active concurrency while tools are pending, so the
+cohort latency and abandoned/slow-tool controls remain necessary. PD admission
+is unchanged because separate prefill has no tool-completion feedback.
+
 An ordinary stop or length-limited continuation also revokes stale preferences
 along its completed branch, while preserving ancestors shared by other protected
 branches. Abort/error and pauses do not revoke other requests' preferences.

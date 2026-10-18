@@ -149,6 +149,8 @@ class HybridAttPagedRadixCache:
             key=lambda x: x.get_compare_key_for_buffer_idx()
         )
         self.tool_call_retention = None
+        self.rank_in_node = rank_in_node
+        self.tool_call_reserved_tokens = None
 
         self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
@@ -157,12 +159,17 @@ class HybridAttPagedRadixCache:
         self.small_page_buffers: StateCacheManager = small_page_buffers
 
     def enable_tool_call_retention(self, duration, fraction):
+        self.tool_call_reserved_tokens = SharedArray(
+            f"tool_call_reserved_tokens_{self.rank_in_node}", (1,), dtype=np.int64
+        )
+        self.tool_call_reserved_tokens.arr[0] = 0
         self.tool_call_retention = ToolCallCacheRetention(
             duration,
             int(self.total_token_num * fraction),
             self._discard_node,
             self._add_node,
             self._fit_retention_prefix,
+            lambda count: self.tool_call_reserved_tokens.arr.__setitem__(0, count),
         )
 
     @staticmethod
@@ -419,6 +426,8 @@ class HybridAttPagedRadixCache:
                 # from 0 to 1 need update refs token num
                 if node.ref_counter == 1:
                     self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+                    if self.tool_call_retention is not None:
+                        self.tool_call_retention.reference_changed(node, True)
 
             if len(block_hashs) == 0:
                 return
@@ -474,6 +483,8 @@ class HybridAttPagedRadixCache:
             node.ref_counter -= 1
             if node.ref_counter == 0:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
+                if self.tool_call_retention is not None:
+                    self.tool_call_retention.reference_changed(node, False)
 
             self._add_node(node)
 
@@ -505,6 +516,8 @@ class HybridAttPagedRadixCache:
 
             if iter_node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(iter_node.token_mem_index_value)
+                if self.tool_call_retention is not None:
+                    self.tool_call_retention.reference_changed(iter_node, False)
             iter_node.ref_counter -= 1
 
             self._add_node(iter_node)
@@ -525,6 +538,8 @@ class HybridAttPagedRadixCache:
         while node is not None:
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
+                if self.tool_call_retention is not None:
+                    self.tool_call_retention.reference_changed(node, False)
             node.ref_counter -= 1
             node = node.parent
 
@@ -540,6 +555,8 @@ class HybridAttPagedRadixCache:
         while node is not None:
             if node.ref_counter == 0:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+                if self.tool_call_retention is not None:
+                    self.tool_call_retention.reference_changed(node, True)
             node.ref_counter += 1
             node = node.parent
 

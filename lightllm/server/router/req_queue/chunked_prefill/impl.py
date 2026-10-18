@@ -29,7 +29,22 @@ class ChunkedPrefillQueue(BaseQueue):
         size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
-        ok_token_num = need_max_token_num < self.max_total_tokens
+        reserved = 0
+        if getattr(self, "tool_call_admission_enabled", False):
+            reservation_reader = getattr(self.router, "get_tool_call_reserved_tokens", None)
+            if reservation_reader is not None:
+                reserved = max(0, min(self.max_total_tokens, int(reservation_reader(self.dp_index))))
+        # Idle tool prefixes are physically reclaimable, but admitting unrelated
+        # work against all their space defeats the retention preference before
+        # the continuation can reach inference. Account for that waiting space.
+        capacity = self.max_total_tokens - reserved
+        # Always allow a first feasible request to borrow the reservation. This
+        # prevents head-of-line deadlock for a large request or a full budget.
+        if len(self.cache_len_list) == 1 or getattr(
+            getattr(req, "sample_params", None), "high_priority_request", False
+        ):
+            capacity = self.max_total_tokens
+        ok_token_num = need_max_token_num < capacity
 
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 

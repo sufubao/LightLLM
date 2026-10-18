@@ -10,13 +10,15 @@ import numpy as np
 
 
 class ToolCallCacheRetention:
-    def __init__(self, duration, token_budget, discard_node, add_node, fit_prefix=None):
+    def __init__(self, duration, token_budget, discard_node, add_node, fit_prefix=None, publish_reserved=None):
         if duration <= 0 or token_budget < 0:
             raise ValueError("retention duration must be positive and token budget nonnegative")
         self.duration = duration
         self.token_budget = token_budget
         self.clock = 0.0
         self.protected_tokens = 0
+        self.reserved_tokens = 0
+        self._publish_reserved = publish_reserved
         self._discard_node = discard_node
         self._add_node = add_node
         self._fit_prefix = fit_prefix
@@ -40,7 +42,23 @@ class ToolCallCacheRetention:
         )
 
     def get_stats(self):
-        return {**self._stats, "protected_tokens": self.protected_tokens, "waiting_endpoints": len(self._frontier)}
+        return {
+            **self._stats,
+            "protected_tokens": self.protected_tokens,
+            "reserved_tokens": self.reserved_tokens,
+            "waiting_endpoints": len(self._frontier),
+        }
+
+    def _reserve(self, delta):
+        self.reserved_tokens += delta
+        assert 0 <= self.reserved_tokens <= self.protected_tokens
+        if self._publish_reserved is not None:
+            self._publish_reserved(self.reserved_tokens)
+
+    def reference_changed(self, node, referenced):
+        """Only idle protected KV reserves admission space; active refs own it."""
+        if node.cache_protected:
+            self._reserve(-node.node_value_len if referenced else node.node_value_len)
 
     def advance_clock(self, now):
         self.clock = max(self.clock, now)
@@ -121,6 +139,9 @@ class ToolCallCacheRetention:
             key, weight = entry
             del self._expiry[key]
             self._frontier.pop(key, None)
+            # Remove the idle reservation before reducing the total coverage.
+            if node.ref_counter == 0:
+                self._reserve(-weight)
             self.protected_tokens -= weight
             if evicted:
                 self._stats["evicted_tokens"] += weight
@@ -164,6 +185,20 @@ class ToolCallCacheRetention:
         self._set(node, deadline, priority)
 
     def _set(self, node, deadline, priority=None):
+        entry = self._leases.get(node)
+        if entry is not None and entry[1] == node.node_value_len:
+            # Renewal changes only expiry, not eviction priority or idle bytes.
+            # Avoid toggling shared reservation counters and all eviction sets
+            # along the entire history of a long-running agent.
+            old_key, weight = entry
+            del self._expiry[old_key]
+            self._frontier.pop(old_key, None)
+            self._sequence += 1
+            key = (deadline, self._sequence if priority is None else priority, self._sequence)
+            self._leases[node] = (key, weight)
+            self._expiry[key] = node
+            self._refresh_frontier(node)
+            return
         self._discard_node(node)
         self.forget(node)
         self._sequence += 1
@@ -172,6 +207,8 @@ class ToolCallCacheRetention:
         self._leases[node] = (key, weight)
         self._expiry[key] = node
         self.protected_tokens += weight
+        if node.ref_counter == 0:
+            self._reserve(weight)
         node.cache_protected = True
         node.cache_retention = self
         self._add_node(node)

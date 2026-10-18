@@ -47,16 +47,19 @@ class ToolCallCacheRetention:
         while self._expiry and self._expiry.peekitem(0)[0][0] <= self.clock:
             self._remove(self._expiry.peekitem(0)[1], "expired_tokens")
 
-    def protect(self, node):
+    def protect(self, node, reusable_prefix_len=None):
         self._stats["tool_stops"] += 1
         if node is None:
             return
-        if node.node_prefix_total_len > self.token_budget:
+        limit = self.token_budget if reusable_prefix_len is None else min(self.token_budget, reusable_prefix_len)
+        if limit <= 0:
+            return
+        if node.node_prefix_total_len > limit:
             if self._fit_prefix is not None:
-                node = self._fit_prefix(node, self.token_budget)
+                node = self._fit_prefix(node, limit)
             else:
                 # Hybrid state can only resume at an existing checkpoint.
-                while node is not None and node.node_prefix_total_len > self.token_budget:
+                while node is not None and node.node_prefix_total_len > limit:
                     node = node.parent
             if node is None:
                 return

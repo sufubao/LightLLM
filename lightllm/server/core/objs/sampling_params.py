@@ -222,7 +222,7 @@ class ConstraintOutParams(ctypes.Structure):
         guided_reasoning_end: List[int],
         pd_previous_output_len: int = 0,
     ):
-        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2 ** 31 - 1:
+        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2**31 - 1:
             raise ValueError("pd_previous_output_len must be an integer in [0, 2147483647]")
         self.regular_constraint.initialize(regular_constraint)
         self.guided_grammar.initialize(guided_grammar, tokenizer)
@@ -294,9 +294,13 @@ class ToolCallCacheMarkers(ctypes.Structure):
         ("token_ids", (ctypes.c_int * MAX_LENGTH) * MAX_MARKERS),
         ("lengths", ctypes.c_int * MAX_MARKERS),
         ("size", ctypes.c_int),
+        ("prompt_tail_tokens", ctypes.c_int),
     ]
 
-    def initialize(self, markers):
+    def initialize(self, markers, prompt_tail_tokens=0):
+        if type(prompt_tail_tokens) is not int or not 0 <= prompt_tail_tokens <= 2048:
+            raise ValueError("tool-call cache prompt tail must be an integer between 0 and 2048")
+        self.prompt_tail_tokens = prompt_tail_tokens
         assert len(markers) <= self.MAX_MARKERS, "Too many tool-call cache markers"
         self.size = len(markers)
         for index, marker in enumerate(markers):
@@ -406,7 +410,9 @@ class SamplingParams(ctypes.Structure):
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
         self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
-        self.tool_call_cache_markers.initialize(kwargs.get("tool_call_cache_markers", []))
+        self.tool_call_cache_markers.initialize(
+            kwargs.get("tool_call_cache_markers", []), kwargs.get("tool_call_cache_prompt_tail_tokens", 0)
+        )
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
@@ -592,6 +598,7 @@ class SamplingParams(ctypes.Structure):
             "print_eos_token": self.print_eos_token,
             "disable_prompt_cache": self.disable_prompt_cache,
             "tool_call_cache_markers": self.tool_call_cache_markers.to_list(),
+            "tool_call_cache_prompt_tail_tokens": self.tool_call_cache_markers.prompt_tail_tokens,
             "seed": self.seed,
             "prompt_logprobs": self.prompt_logprobs,
         }

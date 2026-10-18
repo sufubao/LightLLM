@@ -192,13 +192,19 @@ class InferenceContext:
         if retention is None:
             return
         if req.finish_status.is_stopped() and not req.sampling_param.disable_prompt_cache:
-            markers = req.sampling_param.shm_param.tool_call_cache_markers.to_list()
+            marker_metadata = req.sampling_param.shm_param.tool_call_cache_markers
+            markers = marker_metadata.to_list()
             if markers:
                 generated = req.get_input_token_ids()[
                     req.shm_req.input_len : req.shm_req.input_len + req.finish_output_len
                 ]
                 if contains_tool_call(generated, markers):
-                    retention.protect(cache_node)
+                    stable_prefix_len = (
+                        max(0, req.shm_req.input_len - marker_metadata.prompt_tail_tokens)
+                        if marker_metadata.prompt_tail_tokens
+                        else None
+                    )
+                    retention.protect(cache_node, stable_prefix_len)
                     return
         if req.finish_status.is_stopped() or req.finish_status.is_finished_length():
             retention.complete(cache_node)

@@ -125,6 +125,21 @@ enables temporary eviction preferences after normally stopped generations that
 contain the configured parser's tool-start marker. Only tool-enabled chat
 requests supply that marker. `length`, abort/error and paused requests receive
 no new preference. The default duration of zero preserves ordinary eviction.
+When the template supports a history-only render, the lease ends before its
+short generation-only assistant header. That header and generated tool JSON
+can be rewritten when clients serialize the next tool-result request. The
+inference worker protects the stable input history rather than waiting for an
+unmatchable generated tail. Unsupported custom renders retain the advisory
+fallback; token-exact cache lookup remains authoritative.
+
+A continuation that acquires a real KV reference consumes its waiting lease
+immediately; the pinned request no longer competes for the waiting budget.
+Budget pressure trims older continuations incrementally at page boundaries,
+retaining their useful prefix instead of discarding an entire shared subtree.
+Hybrid attention trims only to checkpoints with valid recurrent state.
+Numeric debug counters distinguish consumed, budget-demoted, expired, completed,
+and evicted lease tokens. These are accounting events, not unique prefill savings.
+
 An ordinary stop or length-limited continuation also revokes stale preferences
 along its completed branch, while preserving ancestors shared by other protected
 branches. Abort/error and pauses do not revoke other requests' preferences.
@@ -172,9 +187,10 @@ Dataset: [CacheWise coding traces](https://github.com/cachewise-project/cachewis
 [paper](https://arxiv.org/abs/2606.16824). Preserve the authors' attribution and
 the source revision when publishing derived results.
 
-## Completed study (2026-10-17–18)
+## Previous implementation study (2026-10-17–18)
 
-The final serving source is `dcd3551c53a13c5613d8a8b644870de00dd57820`;
+The serving source measured in this historical study is `dcd3551c53a13c5613d8a8b644870de00dd57820`;
+these results do not measure the later waiting-budget and stable-prefix reimplementation.
 the unchanged upstream control is `22888b4237aa2c895fc24176e08089cf14bc6c89`.
 All 238 required paired comparisons completed: 36 validation, 154 held-out
 including hardware crossover, 20 default-disabled versus upstream, and 28

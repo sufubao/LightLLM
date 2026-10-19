@@ -210,7 +210,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
         return
 
     @staticmethod
-    def _kv_growth_reservation(req, args):
+    def _kv_growth_reservation(req, args, hold_kv_len=None):
         # Match Router's output estimate and page/MTP/asynchronous-exit margin.
         output_len = req.cur_output_len
         params = req.sampling_param.shm_param
@@ -219,7 +219,9 @@ class PDDecodeNode(ChunkedPrefillBackend):
         )
         a_len = max(req.shm_req.input_len + output_len + 1, req.cur_kv_len + 1)
         b_len = max(0, estimate - output_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
-        return max(0, a_len + b_len - max(req.shm_req.input_len, req.hold_kv_len))
+        if hold_kv_len is None:
+            hold_kv_len = req.hold_kv_len
+        return max(0, a_len + b_len - max(req.shm_req.input_len, hold_kv_len))
 
     def _allocate_ready_kv(self, req_ids):
         for request_id in req_ids:
@@ -232,7 +234,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 PDDecodeNode._kv_growth_reservation(r, self.args)
                 for r in g_infer_context.requests_mapping.values()
                 if getattr(r, "pd_pending_kv_group", None) is None
-            ) + PDDecodeNode._kv_growth_reservation(req, self.args)
+            ) + PDDecodeNode._kv_growth_reservation(req, self.args, hold_kv_len=req.hold_kv_len + needed)
             available = g_infer_context.get_can_alloc_token_num() - growth
             if self.dp_world_size > 1:
                 from lightllm.distributed import dist_group_manager

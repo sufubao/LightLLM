@@ -33,6 +33,15 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
+            # A pending WRITE still owns its source KV until the transfer worker
+            # returns it. Pausing would free those indexes before READY/copy.
+            if (
+                getattr(req_obj, "wait_pause", False)
+                and req_obj.pd_task_num != (req_obj.pd_task_failed_num + req_obj.pd_task_success_num)
+                and not req_obj.infer_aborted
+            ):
+                continue
+
             # P 节点的推理请求收到 abort 后，主动通知 KV 传输层停止该请求
             # 尚未完成的传输任务，避免只能等待 D 节点上报错误或传输超时。
             pd_abort_req_send_count = getattr(req_obj, "pd_abort_req_send_count", 0)

@@ -237,3 +237,88 @@ def test_optional_cache_compaction_debug_is_rate_limited_and_tp_leader_only(monk
         assert sum(call.kwargs["extra"]["count"] for call in backend.logger.debug.call_args_list) == 2000
     else:
         backend.logger.debug.assert_not_called()
+
+
+@pytest.mark.parametrize("aborted", [False, True])
+def test_prefill_cannot_pause_and_free_kv_until_pending_write_returns(monkeypatch, aborted):
+    req = SimpleNamespace(
+        req_id=123,
+        infer_aborted=aborted,
+        wait_pause=True,
+        pd_task_num=1,
+        pd_task_failed_num=0,
+        pd_task_success_num=0,
+        pd_trans_device_id=0,
+        cur_kv_len=4,
+        shm_req=SimpleNamespace(input_len=8),
+    )
+    monkeypatch.setattr(prefill_impl.g_infer_context, "requests_mapping", {123: req})
+    backend = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
+    backend.is_master_in_dp = True
+    backend.info_queue = queue.Queue()
+    assert backend._filter_not_ready_reqs([123]) == []
+    req.pd_task_success_num = 1
+    assert backend._filter_not_ready_reqs([123]) == [req]
+
+
+@pytest.mark.parametrize("terminal_status", ["DONE", "ERR"])
+def test_prefill_timeout_does_not_recycle_active_dma(monkeypatch, terminal_status):
+    task = SimpleNamespace(
+        xfer_handle=object(),
+        error_info=None,
+        get_key=lambda: "active",
+        time_out=lambda: True,
+        transfer_time_out_secs=66,
+    )
+    module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.waiting_dict_lock = threading.Lock()
+    module.waiting_dict = {"active": task}
+    module.failed_queue, module.success_queue = queue.Queue(), queue.Queue()
+    module.transporter = MagicMock()
+    module.transporter.check_task_status.return_value = "PROC"
+    monkeypatch.setattr(prefill_trans_process.time, "time", lambda: 1000)
+    module._check_tasks_time_out()
+    module._update_task_status_once()
+    assert module.failed_queue.empty()
+    assert module.waiting_dict["active"] is task
+    module.transporter.check_task_status.return_value = terminal_status
+    module._update_task_status_once()
+    assert module.failed_queue.get_nowait() is task
+    assert module.success_queue.empty()
+    assert not module.waiting_dict
+
+
+def test_unknown_write_status_fails_worker_without_returning_source():
+    task = SimpleNamespace(xfer_handle=object(), get_key=lambda: "active")
+    module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.waiting_dict_lock = threading.Lock()
+    module.waiting_dict = {"active": task}
+    module.failed_queue = queue.Queue()
+    module.transporter = MagicMock()
+    module.transporter.check_task_status.side_effect = RuntimeError("native failure")
+    with pytest.raises(RuntimeError, match="Cannot establish WRITE status"):
+        module._update_task_status_once()
+    assert module.waiting_dict["active"] is task
+    assert module.failed_queue.empty()
+
+
+def test_prefill_stuck_dma_fails_worker_without_returning_source(monkeypatch):
+    task = SimpleNamespace(
+        xfer_handle=object(),
+        error_info="timeout",
+        get_key=lambda: "active",
+        time_out=lambda: True,
+        transfer_time_out_secs=66,
+        _cancel_time=1,
+    )
+    module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.waiting_dict_lock = threading.Lock()
+    module.waiting_dict = {"active": task}
+    module.failed_queue = queue.Queue()
+    module.transporter = MagicMock()
+    module.transporter.check_task_status.return_value = "PROC"
+    monkeypatch.setattr(prefill_trans_process.time, "time", lambda: 1000)
+    with pytest.raises(RuntimeError, match="did not drain"):
+        module._update_task_status_once()
+    assert module.waiting_dict["active"] is task
+    assert module.failed_queue.empty()

@@ -204,6 +204,8 @@ class _PrefillTransModule:
         except BaseException as exc:
             logger.exception(f"send WRITE request to decode failed: {trans_task.to_str()}")
             with self.waiting_dict_lock:
+                if self.waiting_dict.get(key) is not trans_task or trans_task.dst_page_index is not None:
+                    raise RuntimeError("WRITE request failed after READY; source copy may be active") from exc
                 self.waiting_dict.pop(key, None)
             trans_task.error_info = f"send WRITE request to decode failed: {exc}"
             self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
@@ -299,6 +301,8 @@ class _PrefillTransModule:
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.xfer_handle is not None:
+                    continue  # The status loop owns in-flight transfers and their pages.
                 if trans_task.time_out():
                     timeout_tasks.append(self.waiting_dict.pop(key))
 
@@ -323,10 +327,8 @@ class _PrefillTransModule:
                 continue
             except BaseException as e:
                 logger.exception(f"write_blocks_paged failed: {trans_task.to_str()}")
-                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
-                trans_task.error_info = f"write_blocks_paged failed: {str(e)}"
-                self.failed_queue.put(trans_task)
-                continue
+                # Submission may have partially succeeded; do not recycle either page.
+                raise RuntimeError("Cannot establish whether WRITE submission is quiescent") from e
         return
 
     @log_exception
@@ -348,21 +350,19 @@ class _PrefillTransModule:
                 if trans_task.xfer_handle is None:
                     continue
 
-                # A native NIXL error must fail this task without terminating the
-                # status thread and stranding every transfer queued behind it.
+                # An exception does not prove that DMA has stopped. Let the fatal
+                # thread hook terminate the worker without recycling its pages.
                 try:
                     ret = self.transporter.check_task_status(trans_task=trans_task)
                 except BaseException as e:
-                    failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
-                    if failed_task is not None:
-                        logger.exception(f"check transfer status failed: {failed_task.to_str()}")
-                        failed_task.error_info = f"check transfer status failed: {str(e)}"
-                        self.failed_queue.put(failed_task)
-                    continue
+                    raise RuntimeError(f"Cannot establish WRITE status: {trans_task.get_key()}") from e
 
                 if ret == "DONE":
                     completed_task = self.waiting_dict.pop(trans_task.get_key(), None)
                     if completed_task is None:
+                        continue
+                    if completed_task.error_info is not None:
+                        self.failed_queue.put(completed_task)
                         continue
                     if self.transporter.capture_telemetry and logger.isEnabledFor(logging.DEBUG):
                         try:
@@ -392,10 +392,12 @@ class _PrefillTransModule:
                         failed_task.error_info = "xfer error"
                         self.failed_queue.put(failed_task)
                 elif trans_task.time_out():
-                    failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
-                    if failed_task is not None:
-                        failed_task.error_info = "time out in update_task_status_loop"
-                        self.failed_queue.put(failed_task)
+                    cancel_time = getattr(trans_task, "_cancel_time", None)
+                    if cancel_time is None:
+                        trans_task._cancel_time = time.time()
+                        trans_task.error_info = "time out in update_task_status_loop"
+                    elif time.time() - cancel_time > trans_task.transfer_time_out_secs:
+                        raise RuntimeError(f"WRITE did not drain after timeout: {trans_task.get_key()}")
 
     @log_exception
     def success_loop(self):

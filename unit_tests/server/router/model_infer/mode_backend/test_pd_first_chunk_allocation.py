@@ -290,3 +290,156 @@ def test_prefill_control_send_error_does_not_allocate_a_source_page():
     assert t.src_page_index is None
     assert module.waiting_dict == {}
     assert "peer unavailable" in t.error_info
+
+
+def test_admitted_unaligned_prompt_allocates_on_idle_decode(monkeypatch):
+    from lightllm.server.core.objs import req as req_module
+    from lightllm.server.router.model_infer.infer_batch import InferReq
+
+    args = SimpleNamespace(page_size=16, mtp_step=0)
+    params = SimpleNamespace(max_new_tokens=1, ignore_eos=True)
+    req = SimpleNamespace(
+        args=args,
+        req_idx=0,
+        input_len=65,
+        shm_cur_output_len=0,
+        shm_cur_kv_len=0,
+        sample_params=params,
+        shm_req=SimpleNamespace(input_len=65, pd_waiting_for_kv=True),
+        sampling_param=SimpleNamespace(shm_param=params),
+        hold_kv_len=0,
+        cur_kv_len=0,
+        cur_output_len=0,
+        pd_pending_kv_group=PDChunckedTransTaskGroup([task()]),
+        pd_first_chunk_ready=True,
+        infer_aborted=False,
+        pd_task_failed_num=0,
+    )
+    monkeypatch.setattr(req_module, "get_env_start_args", lambda: args)
+    req.get_tuple_tokens = lambda *a: req_module.ChunkedPrefillReq.get_tuple_tokens(req, *a)
+    req._kv_cache_alloc_need = lambda n: InferReq._kv_cache_alloc_need(req, n)
+    router = PDDecodeQueue.__new__(PDDecodeQueue)
+    router.max_total_tokens, router.running_max_req_size, router.dp_index = 112, 1, 0
+    router.is_busy = lambda: False
+    router.router = SimpleNamespace(router_statics=SimpleNamespace(ema_req_out_len=64), shared_token_load=MagicMock())
+    assert router._can_add_new_req(req, 0, 0)[0]
+
+    backend = PDDecodeNode.__new__(PDDecodeNode)
+    backend.args, backend.dp_world_size, backend.is_master_in_dp = args, 1, True
+    backend.info_queue = queue.Queue()
+    backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(80).reshape(1, 80)))
+    backend._alloc_req_kv_mem = MagicMock(side_effect=lambda r, n: setattr(r, "hold_kv_len", r.hold_kv_len + n))
+    monkeypatch.setattr(decode_impl.g_infer_context, "requests_mapping", {1: req})
+    monkeypatch.setattr(decode_impl.g_infer_context, "get_can_alloc_token_num", lambda: 112)
+    backend._allocate_ready_kv([1])
+    backend._alloc_req_kv_mem.assert_called_once_with(req, 80)
+    assert req.pd_pending_kv_group is None
+    assert not req.shm_req.pd_waiting_for_kv
+    assert backend.info_queue.get_nowait().allocation_update
+
+
+@pytest.mark.parametrize("completion", ["done", "error"])
+def test_decode_timeout_retains_granted_page_until_sender_finishes(monkeypatch, completion):
+    import pickle
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_trans_process
+
+    t = task()
+    t.dst_page_index, t.start_trans_time = 0, 0
+    remote = copy.copy(t)
+    remote.write_stage = completion
+    remote.error_info = "sender cancelled" if completion == "error" else None
+    module = module_with_tasks(t)
+    module.args = SimpleNamespace(pd_trans_mode="nixl")
+    module.device_id = 0
+    module.transporter = MagicMock()
+    module.ready_page_task_queue = queue.Queue()
+    monkeypatch.setattr(decode_trans_process.time, "time", lambda: 1000)
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "set_device", lambda _: None)
+    module._check_tasks_time_out()
+    module._check_tasks_time_out()
+    assert module.waiting_dict[t.get_key()] is t
+    assert module.failed_queue.empty()
+    module.transporter.send_error_info_to_prefill_node.assert_called_once_with(t)
+
+    module.transporter.get_new_notifs.return_value = {"peer": [pickle.dumps(remote)]}
+    module._check_tasks_time_out = MagicMock(side_effect=RuntimeError("stop loop"))
+    with pytest.raises(RuntimeError, match="stop loop"):
+        module.accept_peer_task_loop()
+    assert module.failed_queue.get_nowait() is t
+    assert module.failed_queue.empty()
+    assert not module.waiting_dict
+    assert module.ready_page_task_queue.empty()
+
+
+def test_decode_stuck_write_fails_worker_without_recycling_page(monkeypatch):
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_trans_process
+
+    t = task()
+    t.dst_page_index, t.start_trans_time, t._cancel_time = 0, 0, 1
+    module = module_with_tasks(t)
+    monkeypatch.setattr(decode_trans_process.time, "time", lambda: 1000)
+    with pytest.raises(RuntimeError, match="did not drain"):
+        module._check_tasks_time_out()
+    assert module.waiting_dict[t.get_key()] is t
+    assert module.failed_queue.empty()
+
+
+def test_ready_send_failure_cannot_recycle_a_possibly_granted_page(monkeypatch):
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_trans_process
+
+    t = task()
+    module = module_with_tasks()
+    module.device_id = 0
+    module.page_index_queue = queue.Queue()
+    module.page_index_queue.put(0)
+    module.request_page_task_queue.put(t)
+    module.transporter = MagicMock()
+    module.transporter.send_write_ready_task_to_prefill_node.side_effect = ConnectionError("ambiguous send")
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "set_device", lambda _: None)
+    with pytest.raises(RuntimeError, match="Cannot safely reclaim"):
+        module.request_page_loop()
+    assert module.waiting_dict[t.get_key()] is t
+    assert module.page_index_queue.empty()
+    assert module.failed_queue.empty()
+
+
+def test_nccl_sender_error_cannot_recycle_posted_receive(monkeypatch):
+    import pickle
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_trans_process
+
+    t = task()
+    t.dst_page_index = 0
+    remote = copy.copy(t)
+    remote.error_info = "sender cancelled"
+    module = module_with_tasks(t)
+    module.device_id = 0
+    module.args = SimpleNamespace(pd_trans_mode="nccl")
+    module.transporter = MagicMock()
+    module.transporter.get_new_notifs.return_value = {"peer": [pickle.dumps(remote)]}
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "set_device", lambda _: None)
+    with pytest.raises(RuntimeError, match="NCCL receive failed"):
+        module.accept_peer_task_loop()
+    assert module.failed_queue.empty()
+
+
+def test_request_send_failure_after_ready_cannot_return_source_ownership():
+    from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_trans_process import (
+        _PrefillTransModule,
+    )
+
+    t = task()
+    module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.waiting_dict_lock = threading.Lock()
+    module.waiting_dict = {}
+    module.failed_queue = queue.Queue()
+    module.transporter = MagicMock()
+
+    def receive_ready_then_fail(_):
+        module.waiting_dict.pop(t.get_key())
+        t.dst_page_index = 0
+        raise ConnectionError("send completed before exception")
+
+    module.transporter.send_write_request_task_to_decode_node.side_effect = receive_ready_then_fail
+    with pytest.raises(RuntimeError, match="source copy may be active"):
+        module._request_write(t)
+    assert module.failed_queue.empty()

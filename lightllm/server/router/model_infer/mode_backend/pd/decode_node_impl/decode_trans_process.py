@@ -274,12 +274,15 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(notify_obj.get_key(), None)
                                 if local_trans_task is not None:
+                                    if (
+                                        local_trans_task.dst_page_index is not None
+                                        and self.args.pd_trans_mode == "nccl"
+                                    ):
+                                        raise RuntimeError(
+                                            "NCCL receive failed after WRITE READY; destination is still owned"
+                                        )
                                     local_trans_task.error_info = notify_obj.error_info
-                                    # TODO: 这里设置 12 秒超时后会立即将任务放入 failed_queue，
-                                    # fail_loop 会直接归还任务占用的 page，因此该超时时间实际不会再被检查。
-                                    # 如果底层异步传输尚未结束，page 可能被新任务提前复用，导致脏数据。
-                                    # 后续需要在确认传输已经静默（DONE/ERR）后再回收 page。
-                                    local_trans_task.transfer_time_out_secs = 12
+                                    # P reports errors only after its source copy/write is quiescent.
                                     self.failed_queue.put(local_trans_task)
 
                             self._abort(
@@ -315,9 +318,12 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
-                                local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
-                                local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
-                                self.ready_page_task_queue.put(local_trans_task)
+                                if local_trans_task.error_info is not None:
+                                    self.failed_queue.put(local_trans_task)
+                                else:
+                                    local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
+                                    local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
+                                    self.ready_page_task_queue.put(local_trans_task)
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -373,12 +379,26 @@ class _DecodeTransModule:
                     self.request_page_task_queue.put(task)
 
     def _check_tasks_time_out(self):
+        cancelling_tasks = []
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
                 if trans_task.time_out():
+                    if trans_task.dst_page_index is not None:
+                        # READY grants P ownership of this page, even while P is
+                        # waiting for a source page. Reclaim only on DONE/error.
+                        cancel_time = getattr(trans_task, "_cancel_time", None)
+                        if cancel_time is None:
+                            trans_task._cancel_time = time.time()
+                            trans_task.error_info = "time out waiting WRITE completion"
+                            cancelling_tasks.append(trans_task)
+                        elif time.time() - cancel_time > trans_task.transfer_time_out_secs:
+                            raise RuntimeError(f"WRITE did not drain after timeout: {trans_task.get_key()}")
+                        continue
                     timeout_tasks.append(self.waiting_dict.pop(key))
 
+        for trans_task in cancelling_tasks:
+            self.transporter.send_error_info_to_prefill_node(trans_task)
         for trans_task in timeout_tasks:
             trans_task.error_info = "time out in accept_peer_task_loop"
             self.failed_queue.put(trans_task)
@@ -398,13 +418,9 @@ class _DecodeTransModule:
                     self.waiting_dict[key] = trans_task
                 self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
             except BaseException as e:
-                with self.waiting_dict_lock:
-                    self.waiting_dict.pop(key, None)
                 logger.exception(f"send write ready task to prefill node failed: {trans_task.to_str()}")
-                self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)
-                trans_task.error_info = f"send write ready task to prefill node failed: {str(e)}"
-                self.failed_queue.put(trans_task)
-                continue
+                # The notification may have reached P before the exception.
+                raise RuntimeError("Cannot safely reclaim a page after WRITE READY failure") from e
 
         return
 

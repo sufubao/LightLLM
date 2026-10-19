@@ -43,25 +43,6 @@ class SSMRunConfig(Mapping[str, int]):
         return 3
 
 
-@dataclass(frozen=True, slots=True)
-class RecurrentStateContext:
-    """Per-forward/graph commit metadata, passed unchanged by the runner.
-
-    Both verify and compact reconstruction read the same immutable layout.
-    Publishing a context detaches it from the tuner's mutable dictionaries.
-    """
-
-    config: SSMRunConfig
-
-    def __post_init__(self):
-        if not isinstance(self.config, SSMRunConfig):
-            raise TypeError("Use from_run_config() to freeze a mutable kernel configuration")
-
-    @classmethod
-    def from_run_config(cls, config: Mapping[str, int]) -> "RecurrentStateContext":
-        return cls(SSMRunConfig.from_mapping(config))
-
-
 class SSMUpdateBackend(Protocol):
     """Attention executes the updater directly; lifecycle stays with its owner.
 

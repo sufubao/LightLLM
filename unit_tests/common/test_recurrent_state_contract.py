@@ -6,32 +6,30 @@ import pytest
 import torch
 
 from lightllm.common.recurrent_state import RecurrentState
-from lightllm.common.recurrent_state_types import RecurrentStateContext
+from lightllm.common.recurrent_state_types import SSMRunConfig
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig, LinearAttCacheConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
-def test_published_context_is_detached_immutable_and_pickleable():
+def test_published_config_is_detached_immutable_and_pickleable():
     tuning = {"BV": 8, "num_warps": 1}
-    context = RecurrentStateContext.from_run_config(tuning)
+    config = SSMRunConfig.from_mapping(tuning)
     tuning.update(BV=128, num_warps=4, num_stages=1)
-    assert dict(context.config) == {"BV": 8, "num_warps": 1, "num_stages": 3}
+    assert dict(config) == {"BV": 8, "num_warps": 1, "num_stages": 3}
     with pytest.raises(FrozenInstanceError):
-        context.config.BV = 128
+        config.BV = 128
     with pytest.raises(TypeError):
-        context.config["BV"] = 128
-    with pytest.raises(TypeError, match="from_run_config"):
-        RecurrentStateContext(tuning)
-    restored = pickle.loads(pickle.dumps(context))
-    assert restored == context
-    assert dict(restored.config) == dict(context.config)
+        config["BV"] = 128
+    restored = pickle.loads(pickle.dumps(config))
+    assert restored == config
+    assert dict(restored) == dict(config)
 
 
-def test_context_rejects_unrepresented_kernel_options():
+def test_config_rejects_unrepresented_kernel_options():
     with pytest.raises(ValueError, match="Unknown SSM kernel configuration fields"):
-        RecurrentStateContext.from_run_config({"BV": 32, "num_warps": 1, "future_layout_option": 2})
+        SSMRunConfig.from_mapping({"BV": 32, "num_warps": 1, "future_layout_option": 2})
     with pytest.raises(TypeError, match="must be an integer"):
-        RecurrentStateContext.from_run_config({"BV": [32], "num_warps": 1})
+        SSMRunConfig.from_mapping({"BV": [32], "num_warps": 1})
 
 
 @pytest.fixture

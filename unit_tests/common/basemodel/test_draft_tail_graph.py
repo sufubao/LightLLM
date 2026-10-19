@@ -63,7 +63,7 @@ def draft_model(monkeypatch):
     model._select_mem_indexes = lambda _: None
     model.decode_att_backend = SimpleNamespace(
         create_att_decode_state=lambda **kw: SimpleNamespace(
-            init_state=lambda: None, copy_for_decode_cuda_graph=lambda _: None
+            init_state=lambda: None, copy_for_decode_cuda_graph=lambda _: None, check_no_infer_state=lambda: None
         )
     )
     model.decode_att_backend1 = None

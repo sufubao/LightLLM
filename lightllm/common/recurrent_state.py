@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence, Tuple, Union
 import torch
 
 from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheConfig
-from lightllm.common.recurrent_state_types import RecurrentStateContext, SSMUpdateBackend
+from lightllm.common.recurrent_state_types import SSMRunConfig, SSMUpdateBackend
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache as _ReplaySSMCache
@@ -119,12 +119,12 @@ class RecurrentState:
         b_mtp_index,
         accepted_index,
         verify_width,
-        batches: Optional[Sequence[Tuple[int, Optional[RecurrentStateContext]]]] = None,
+        batches: Optional[Sequence[Tuple[int, Optional[SSMRunConfig]]]] = None,
     ):
         """Commit accepted prefixes without requiring full-state materialization.
 
         ``batches`` partitions logical requests in the same order as the MTP
-        start locations. Each context belongs to the forward that wrote that
+        start locations. Each configuration belongs to the forward that wrote that
         partition's scratch; padding rows do not participate in acceptance.
         """
         from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
@@ -150,12 +150,12 @@ class RecurrentState:
             return
         assert sum(size for size, _ in batches) == reqs.numel()
         start = 0
-        for size, context in batches:
+        for size, run_config in batches:
             if size:
                 self.updates.accept_updates(
                     reqs[start : start + size],
                     self.accepted_index,
-                    run_config=context.config if context is not None else None,
+                    run_config=run_config,
                 )
             start += size
 

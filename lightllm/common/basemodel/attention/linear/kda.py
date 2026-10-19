@@ -9,7 +9,7 @@ import weakref
 from typing import TYPE_CHECKING
 
 import torch
-from lightllm.common.recurrent_state_types import RecurrentStateContext
+from lightllm.common.recurrent_state_types import SSMRunConfig
 
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
@@ -245,7 +245,7 @@ class KDADecodeAttState(BaseDecodeAttState):
                 layer_weight.linear_dt_bias.weight,
             )
             if linear_layer_idx == 0:
-                self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
+                self.infer_state.ssm_run_config = SSMRunConfig.from_mapping(
                     updater.get_run_config(*args, self.b1_mtp_cu_q_seq_len)
                 )
             return updater.forward(
@@ -253,7 +253,7 @@ class KDADecodeAttState(BaseDecodeAttState):
                 *args,
                 self.b_conv_buffer_idx,
                 self.b1_mtp_cu_q_seq_len,
-                run_config=self.infer_state.recurrent_state_context.config,
+                run_config=self.infer_state.ssm_run_config,
             )
         output, _ = fused_recurrent_kda(
             q=q,

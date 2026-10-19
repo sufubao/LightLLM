@@ -1,7 +1,7 @@
 import dataclasses
 import weakref
 import torch
-from lightllm.common.recurrent_state_types import RecurrentStateContext
+from lightllm.common.recurrent_state_types import SSMRunConfig
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
@@ -354,15 +354,13 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             linear_layer_idx = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
             if linear_layer_idx == 0:
-                self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
-                    updater.get_run_config(*args)
-                )
+                self.infer_state.ssm_run_config = SSMRunConfig.from_mapping(updater.get_run_config(*args))
             return (
                 updater.forward(
                     linear_layer_idx,
                     *args,
                     self.b_conv_buffer_idx,
-                    run_config=self.infer_state.recurrent_state_context.config,
+                    run_config=self.infer_state.ssm_run_config,
                 ),
                 z,
             )
@@ -416,15 +414,13 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             linear_layer_idx = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
             if linear_layer_idx == 0:
-                self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
-                    updater.get_run_config(*args, cu_seqlens_q)
-                )
+                self.infer_state.ssm_run_config = SSMRunConfig.from_mapping(updater.get_run_config(*args, cu_seqlens_q))
             return updater.forward(
                 linear_layer_idx,
                 *args,
                 self.b_conv_buffer_idx,
                 cu_seqlens_q,
-                run_config=self.infer_state.recurrent_state_context.config,
+                run_config=self.infer_state.ssm_run_config,
             )
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,

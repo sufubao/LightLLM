@@ -1,6 +1,7 @@
 """Tune a complete SSM update cycle without touching the serving state pool."""
 
 import ast
+
 import torch
 import triton
 
@@ -139,8 +140,8 @@ def select_config(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, work
         rounds = 2  # Partial acceptance and full acceptance, both across all layers.
     for step in range(rounds):
         cache.prepare_decode(reqs, cu_seqlens)
-        for layer in range(cache.state.shape[0]):
-            cache.forward(layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
+        for linear_layer_idx in range(cache.state.shape[0]):
+            cache.forward(linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
         cache.accept_updates(reqs, partial if mode != "replay" and step == 0 else accepted)
         if mode == "replay" and step == rounds - 2:
             cache._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)

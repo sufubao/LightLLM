@@ -165,7 +165,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
 
 
 def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
-    state = _create_decode_state(
+    state, infer_state = _create_decode_state(
         draft_step=3,
         dynamic_layout=True,
         b_req_idx=torch.tensor([0, 0, 1, 1, 1]),
@@ -210,8 +210,9 @@ def test_linear_backend_checks_req_manager_at_construction(monkeypatch, manager_
     else:
         backend.__init__(model)
         assert backend.req_manager is manager
-        assert backend.create_att_prefill_state(None).backend.req_manager is manager
-        assert backend.create_att_decode_state(None).backend.req_manager is manager
+        infer_state = InferStateInfo()
+        assert backend.create_att_prefill_state(infer_state).backend.req_manager is manager
+        assert backend.create_att_decode_state(infer_state).backend.req_manager is manager
 
 
 @pytest.fixture

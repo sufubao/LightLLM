@@ -1,10 +1,14 @@
 import math
 import os
 import re
+from typing import List, Tuple, Any, Union
+from multiprocessing.reduction import ForkingPickler
+
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from typing import List, Tuple, Any, Union
+from filelock import FileLock
+
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .allocator import KvCacheAllocator
@@ -20,8 +24,6 @@ from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
-from multiprocessing.reduction import ForkingPickler
-from filelock import FileLock
 from .operator import BaseMemManagerOperator, NormalMemOperator
 
 logger = init_logger(__name__)
@@ -97,7 +99,7 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         pd_kv_move_buffer_size = self.get_pd_kv_move_buffer_size()
-        available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
+        available_memory_bytes = available_memory * 1024**3 - pd_kv_move_buffer_size
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")

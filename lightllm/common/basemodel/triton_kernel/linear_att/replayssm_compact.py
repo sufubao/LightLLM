@@ -51,7 +51,7 @@ def _compact(
 ):
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + row).to(tl.int64)
-    layer, hv = lh // HV, lh % HV
+    linear_layer_idx, hv = lh // HV, lh % HV
     if COMMIT:
         start = 0
         end = tl.load(Accepted + req) + 1 if req != HOLD else 0
@@ -64,8 +64,8 @@ def _compact(
             for t in range(start, end):
                 tl.store(Out + (t * HV + hv) * V + vv, 0, vv < V)
         return
-    slot = (layer * SLOTS + req) * HV + hv
-    key_slot = (layer * SLOTS + req) * KH + hv // (HV // KH)
+    slot = (linear_layer_idx * SLOTS + req) * HV + hv
+    key_slot = (linear_layer_idx * SLOTS + req) * KH + hv // (HV // KH)
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
     for t in range(start, end):
@@ -108,7 +108,7 @@ def _compact(
         state += k[:, None] * d[None, :]
         if not COMMIT:
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
-            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
+            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K**-0.5)
             tl.store(Out + (t * HV + hv) * V + vv, tl.sum(state * q[:, None], 0), vv < V)
         state = state.to(State.dtype.element_ty).to(tl.float32)
     if COMMIT:
@@ -159,7 +159,7 @@ class CompactSSMCache:
     def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None):
         return configure_cache(self, "gdn", q, k, v, a, b, a_log, bias, cu_seqlens)
 
-    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
+    def forward(self, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
         assert cu_seqlens is not None, "compact replay is only used for speculative verify"
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
         _, slots, hv, kd, vd = self.state.shape
@@ -175,11 +175,11 @@ class CompactSSMCache:
             b,
             a_log,
             bias,
-            self.state[layer],
-            self.keys[layer],
-            self.values[layer],
-            self.decays[layer],
-            self.betas[layer],
+            self.state[linear_layer_idx],
+            self.keys[linear_layer_idx],
+            self.values[linear_layer_idx],
+            self.decays[linear_layer_idx],
+            self.betas[linear_layer_idx],
             reqs,
             cu_seqlens,
             None,

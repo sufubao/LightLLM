@@ -1,10 +1,12 @@
+import collections
+from typing import TYPE_CHECKING, Tuple, Any, Optional, List
+
 import torch
 import triton
-import collections
+
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
-from typing import TYPE_CHECKING, Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj

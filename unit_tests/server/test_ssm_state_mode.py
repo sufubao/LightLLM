@@ -1,4 +1,5 @@
 import json
+
 import pytest
 
 from lightllm.server.api_cli import make_argument_parser

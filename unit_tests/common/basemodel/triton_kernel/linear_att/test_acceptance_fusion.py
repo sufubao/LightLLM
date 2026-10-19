@@ -1,6 +1,7 @@
 import pytest
 import torch
 import triton
+
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
 from lightllm.common.recurrent_state import RecurrentState

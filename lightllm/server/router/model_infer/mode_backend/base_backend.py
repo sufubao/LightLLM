@@ -1,12 +1,13 @@
 import os
+import time
+import threading
+from typing import List, Tuple, Callable, Optional, Union
 
 import numpy as np
 import torch
-import time
-import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
+
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
@@ -722,7 +723,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue

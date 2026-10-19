@@ -9,8 +9,8 @@ import weakref
 from typing import TYPE_CHECKING
 
 import torch
-from lightllm.common.recurrent_state_types import SSMRunConfig
 
+from lightllm.common.recurrent_state_types import SSMRunConfig
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,

@@ -1,9 +1,11 @@
 import dataclasses
 import weakref
-import torch
-from lightllm.common.recurrent_state_types import SSMRunConfig
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
+
+import torch
+
+from lightllm.common.recurrent_state_types import SSMRunConfig
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.utils.envs_utils import get_env_start_args

@@ -131,7 +131,7 @@ def _fold_history(
         slot_work = work // tiles
         seq = tl.load(Active + slot_work % count)
         layer_hv = slot_work // count
-        layer, hv = (layer_hv // HV).to(tl.int64), layer_hv % HV
+        linear_layer_idx, hv = (layer_hv // HV).to(tl.int64), layer_hv % HV
         req = tl.load(Reqs + seq).to(tl.int64)
         cursor = tl.load(Cursors + seq)
         n = cursor % (2 * L)
@@ -140,21 +140,21 @@ def _fold_history(
         vv = iv * BV + tl.arange(0, BV)
         slot = req * HV + hv
         key_slot = req * KH + hv // (HV // KH)
-        sp = State + layer * SS + slot * K * V + kk[:, None] * V + vv[None, :]
+        sp = State + linear_layer_idx * SS + slot * K * V + kk[:, None] * V + vv[None, :]
         state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
         if DERIVED:
             tl.static_assert(not KDA)
             ll = tl.arange(0, max(16, L))
-            g = tl.load(Gates + layer * GS + slot * (2 * L) + base + ll, ll < n, 0).to(tl.float32)
+            g = tl.load(Gates + linear_layer_idx * GS + slot * (2 * L) + base + ll, ll < n, 0).to(tl.float32)
             prefix = tl.cumsum(g, 0)
             total_g = tl.sum(g, 0)
             keys = tl.load(
-                Keys + layer * RS + (key_slot * (2 * L) + base + ll[None, :]) * K + kk[:, None],
+                Keys + linear_layer_idx * RS + (key_slot * (2 * L) + base + ll[None, :]) * K + kk[:, None],
                 (kk[:, None] < K) & (ll[None, :] < n),
                 0,
             ).to(tl.float32)
             delta = tl.load(
-                Deltas + layer * VS + (slot * (2 * L) + base + ll[:, None]) * V + vv[None, :],
+                Deltas + linear_layer_idx * VS + (slot * (2 * L) + base + ll[:, None]) * V + vv[None, :],
                 (ll[:, None] < n) & (vv[None, :] < V),
                 0,
             ).to(tl.float32)
@@ -162,15 +162,19 @@ def _fold_history(
             state = state * tl.exp(total_g) + tl.dot(keys, delta, input_precision="tf32x3")
         else:
             for j in range(n):
-                raw_k = tl.load(RawKeys + layer * RS + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(
+                raw_k = tl.load(
+                    RawKeys + linear_layer_idx * RS + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0
+                ).to(tl.float32)
+                raw_v = tl.load(RawValues + linear_layer_idx * VS + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(
                     tl.float32
                 )
-                raw_v = tl.load(RawValues + layer * VS + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
                 if KDA:
-                    g = tl.load(Gates + layer * GS + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
+                    g = tl.load(Gates + linear_layer_idx * GS + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(
+                        tl.float32
+                    )
                 else:
-                    g = tl.load(Gates + layer * GS + slot * (2 * L) + base + j).to(tl.float32)
-                beta = tl.load(Betas + layer * BS + slot * (2 * L) + base + j).to(tl.float32)
+                    g = tl.load(Gates + linear_layer_idx * GS + slot * (2 * L) + base + j).to(tl.float32)
+                beta = tl.load(Betas + linear_layer_idx * BS + slot * (2 * L) + base + j).to(tl.float32)
                 state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
         # Start the new history from the same rounded checkpoint future calls load.
         state = state.to(State.dtype.element_ty).to(tl.float32)
@@ -284,7 +288,7 @@ def _replay(
             qk /= tl.sqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
         else:
             qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
-        qk *= tl.where(tt < BW, K ** -0.5, 1.0)[:, None]
+        qk *= tl.where(tt < BW, K**-0.5, 1.0)[:, None]
         if KDA:
             history = ll < n
             gates = tl.load(
@@ -467,7 +471,7 @@ def _replay(
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
             raw_k = tl.load(Kp + t * SK + h * K + kk, kk < K, 0).to(tl.float32)
             v = tl.load(Vp + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
-            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
+            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K**-0.5)
             k = raw_k / tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
             if KDA:
                 x = tl.load(A + t * SA + hv * K + kk, kk < K, 0).to(tl.float32) + bias
@@ -554,9 +558,9 @@ def _materialize(
     base = (cursor // (2 * L)) * L
     if n == 0 and not SNAPSHOT:
         return
-    layer, head = lh // HV, lh % HV
-    slot = (layer * SLOTS + req) * HV + head
-    key_slot = (layer * SLOTS + req) * KH + head // (HV // KH)
+    linear_layer_idx, head = lh // HV, lh % HV
+    slot = (linear_layer_idx * SLOTS + req) * HV + head
+    key_slot = (linear_layer_idx * SLOTS + req) * KH + head // (HV // KH)
     kk = tl.arange(0, BK)
     vv = iv * BV + tl.arange(0, BV)
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
@@ -573,7 +577,7 @@ def _materialize(
         state *= tl.exp(g)[:, None] if KDA else tl.exp(g)
         d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
         state += raw_k[:, None] * d[None, :]
-    out_slot = layer * HV + head if SNAPSHOT else slot
+    out_slot = linear_layer_idx * HV + head if SNAPSHOT else slot
     out = Output + out_slot * K * V + kk[:, None] * V + vv[None, :]
     tl.store(out, state, (kk[:, None] < K) & (vv[None, :] < V))
 
@@ -772,7 +776,7 @@ class ReplaySSMCache:
             return self.run_config or {"BV": 128, "num_warps": 2, "num_stages": 1}
         return configure_cache(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
 
-    def forward(self, layer, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
+    def forward(self, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
         hv, kd, vd = self.state.shape[-3:]
         assert self.num_key_heads in (q.shape[-2], hv)
@@ -790,13 +794,13 @@ class ReplaySSMCache:
             b,
             a_log,
             bias,
-            self.state[layer],
-            self.keys[layer],
-            self.deltas[layer],
-            self.gates[layer],
-            self.raw_keys[layer],
-            self.raw_values[layer],
-            self.betas[layer],
+            self.state[linear_layer_idx],
+            self.keys[linear_layer_idx],
+            self.deltas[linear_layer_idx],
+            self.gates[linear_layer_idx],
+            self.raw_keys[linear_layer_idx],
+            self.raw_values[linear_layer_idx],
+            self.betas[linear_layer_idx],
             reqs,
             self.forward_cursors,
             cu_seqlens,

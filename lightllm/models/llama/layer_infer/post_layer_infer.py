@@ -1,9 +1,11 @@
 import os
+
 import torch
-from lightllm.common.basemodel.batch_objs import PostLayerOutput
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
+
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo

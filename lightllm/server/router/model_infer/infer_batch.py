@@ -1,13 +1,14 @@
 import enum
+import collections
+import pickle
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
+
 import torch
 import torch.distributed as dist
 import numpy as np
-import collections
-import pickle
-
 from sortedcontainers import SortedDict
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
+
 from lightllm.common.req_manager import ReqManager, HybridAttentionReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
@@ -371,7 +372,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:

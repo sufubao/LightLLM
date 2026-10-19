@@ -1,6 +1,9 @@
-import torch
+from typing import Tuple
+from functools import partial
 
+import torch
 import torch.distributed as dist
+
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
     Qwen3NextTransformerLayerWeight,
 )
@@ -10,12 +13,10 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from lightllm.common.basemodel.attention.base_att import AttControl
-from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args
-from functools import partial
 
 logger = init_logger(__name__)
 
@@ -184,7 +185,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
         backend = infer_state.prefill_att_state1.backend
 
         mixed_qkvzba = mixed_qkvzba.contiguous()

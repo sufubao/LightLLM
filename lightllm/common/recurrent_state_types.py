@@ -66,7 +66,7 @@ class SSMUpdateBackend(Protocol):
 
     def forward(
         self,
-        layer: int,
+        linear_layer_idx: int,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,

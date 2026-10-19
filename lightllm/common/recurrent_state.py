@@ -230,5 +230,5 @@ class RecurrentState:
         ssm.copy_(snapshot.ssm, non_blocking=True)
 
     def layer_buffers(self, layer_idx_in_all):
-        layer = self.linear_config.get_linear_layer_index(layer_idx_in_all)
-        return self.conv_state.buffer[layer], self.ssm_state.buffer[layer]
+        linear_layer_idx = self.linear_config.get_linear_layer_index(layer_idx_in_all)
+        return self.conv_state.buffer[linear_layer_idx], self.ssm_state.buffer[linear_layer_idx]

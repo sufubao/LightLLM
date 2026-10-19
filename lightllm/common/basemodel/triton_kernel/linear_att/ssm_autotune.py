@@ -42,7 +42,7 @@ def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
             key["fold"] = cache.fold_method
             return key
         key["projection"] = (
-            ("kda_mma" if cache.kda else "block_mma_activation_precision")
+            ("kda_mma" if cache.kda else "gdn_mma")
             if cache.projection_mode == "precompute" and cache.verify_width > 1
             else "inline"
         )

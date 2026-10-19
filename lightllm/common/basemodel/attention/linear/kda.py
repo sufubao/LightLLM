@@ -234,7 +234,7 @@ class KDADecodeAttState(BaseDecodeAttState):
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
         updater = self.infer_state.req_manager.recurrent_state.update_backend
         if updater is not None:
-            layer = self.infer_state.req_manager.linear_config.get_linear_layer_index(layer_num)
+            linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(layer_num)
             args = (
                 q,
                 k,
@@ -244,12 +244,12 @@ class KDADecodeAttState(BaseDecodeAttState):
                 layer_weight.linear_A_log.weight,
                 layer_weight.linear_dt_bias.weight,
             )
-            if layer == 0:
+            if linear_layer_idx == 0:
                 self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
                     updater.get_run_config(*args, self.b1_mtp_cu_q_seq_len)
                 )
             return updater.forward(
-                layer,
+                linear_layer_idx,
                 *args,
                 self.b_conv_buffer_idx,
                 self.b1_mtp_cu_q_seq_len,

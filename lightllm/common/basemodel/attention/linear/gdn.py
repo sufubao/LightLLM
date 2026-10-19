@@ -351,15 +351,18 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
         updater = backend.req_manager.recurrent_state.update_backend
         if updater is not None:
-            layer = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
+            linear_layer_idx = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
-            if layer == 0:
+            if linear_layer_idx == 0:
                 self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
                     updater.get_run_config(*args)
                 )
             return (
                 updater.forward(
-                    layer, *args, self.b_conv_buffer_idx, run_config=self.infer_state.recurrent_state_context.config
+                    linear_layer_idx,
+                    *args,
+                    self.b_conv_buffer_idx,
+                    run_config=self.infer_state.recurrent_state_context.config,
                 ),
                 z,
             )
@@ -410,14 +413,14 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
         updater = backend.req_manager.recurrent_state.update_backend
         if updater is not None:
-            layer = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
+            linear_layer_idx = backend.req_manager.linear_config.get_linear_layer_index(layer_weight.layer_num_)
             args = (query, key, value, a, b, layer_weight.linear_A_log.weight, layer_weight.linear_dt_bias.weight)
-            if layer == 0:
+            if linear_layer_idx == 0:
                 self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
                     updater.get_run_config(*args, cu_seqlens_q)
                 )
             return updater.forward(
-                layer,
+                linear_layer_idx,
                 *args,
                 self.b_conv_buffer_idx,
                 cu_seqlens_q,

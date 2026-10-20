@@ -121,6 +121,7 @@ def _fold_history(
     Keys,
     Deltas,
     DERIVED: tl.constexpr,
+    BL: tl.constexpr,
 ):
     count = tl.load(Active + N)
     work = tl.program_id(0)
@@ -144,7 +145,7 @@ def _fold_history(
         state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
         if DERIVED:
             tl.static_assert(not KDA)
-            ll = tl.arange(0, max(16, L))
+            ll = tl.arange(0, BL)
             g = tl.load(Gates + linear_layer_idx * GS + slot * (2 * L) + base + ll, ll < n, 0).to(tl.float32)
             prefix = tl.cumsum(g, 0)
             total_g = tl.sum(g, 0)
@@ -223,6 +224,8 @@ def _replay(
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
     PARALLEL_SOLVE: tl.constexpr,
+    BQK: tl.constexpr,
+    BR: tl.constexpr,
 ):
     """Output reconstruction with an exact raw-input recurrence at checkpoint folds."""
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -269,7 +272,7 @@ def _replay(
             tl.bfloat16 if State.dtype.element_ty == tl.bfloat16 and Q.dtype.element_ty == tl.bfloat16 else tl.float32
         )
         projection_precision: tl.constexpr = "tf32" if Q.dtype.element_ty == tl.bfloat16 else "tf32x3"
-        tt = tl.arange(0, max(16, 2 * BW))
+        tt = tl.arange(0, BQK)
         tokens = start + tt % BW
         valid = (tt < 2 * BW) & (tokens < end)
         h = hv // (HV // H)
@@ -326,7 +329,7 @@ def _replay(
     if PRECOMPUTE_STATE and not KDA:
         # Project the whole verify window against both accepted and new keys.
         # Only the small corrected-value solve below depends on token order.
-        jj = tl.arange(0, triton.next_power_of_2(max(16, L + BW)))
+        jj = tl.arange(0, BR)
         fresh_tokens = start + jj - L
         old = (jj < L) & (jj < n)
         fresh = (jj >= L) & (jj < L + end - start)
@@ -370,16 +373,16 @@ def _replay(
             projected_history = projections + tl.dot(
                 coefficients.to(projection_dtype), deltas.to(projection_dtype), input_precision=projection_precision
             )
-            wi = tl.arange(0, max(16, 2 * BW))
+            wi = tl.arange(0, BQK)
             active = (wi < BW) & (start + wi < end)
             key_rows = tl.gather(
                 projected_history, tl.broadcast_to((BW + wi % BW)[:, None], projected_history.shape), 0
             )
-            fresh_values = tl.gather(values, tl.broadcast_to((L + wi % BW)[:, None], (max(16, 2 * BW), BV)), 0)
+            fresh_values = tl.gather(values, tl.broadcast_to((L + wi % BW)[:, None], (BQK, BV)), 0)
             beta_rows = tl.sigmoid(tl.load(B + (start + wi) * SB + hv, active, 0).to(tl.float32))
             rhs = tl.where(active[:, None], beta_rows[:, None] * (fresh_values - key_rows), 0.0)
             cross = tl.gather(coefficients, tl.broadcast_to((BW + wi % BW)[:, None], coefficients.shape), 0)
-            cross = tl.gather(cross, tl.broadcast_to((L + wi % BW)[None, :], (max(16, 2 * BW), max(16, 2 * BW))), 1)
+            cross = tl.gather(cross, tl.broadcast_to((L + wi % BW)[None, :], (BQK, BQK)), 1)
             lower = active[:, None] & active[None, :] & (wi[:, None] > wi[None, :])
             power = tl.where(lower, -beta_rows[:, None] * cross, 0.0)
             inverse = (wi[:, None] == wi[None, :]).to(tl.float32)
@@ -711,6 +714,7 @@ class ReplaySSMCache:
             self.keys,
             self.deltas,
             self.fold_method == "derived",
+            BL=max(16, self.capacity),
             num_warps=2,
             num_stages=1,
         )
@@ -786,6 +790,9 @@ class ReplaySSMCache:
         precompute_state = self.verify_width > 1 and bv >= 16 and self.projection_mode in ("precompute", "parallel")
         if self.projection_mode == "parallel":
             assert precompute_state, "Parallel ReplaySSM requires BV >= 16"
+        # Resolve tile dimensions in Python: bare max() in Triton JIT code
+        # lowers to a tensor operation, which cannot define static shapes.
+        bw = triton.next_power_of_2(self.verify_width)
         _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
             q,
             k,
@@ -821,11 +828,13 @@ class ReplaySSMCache:
             bv,
             cu_seqlens is not None,
             precompute_state,
-            triton.next_power_of_2(self.verify_width),
+            bw,
             reqs.numel() > 12 and self.projection_mode != "parallel",
             self.kda,
             self.lower_bound,
             self.projection_mode == "parallel",
+            BQK=max(16, 2 * bw),
+            BR=triton.next_power_of_2(max(16, self.capacity + bw)),
             num_warps=config["num_warps"],
             num_stages=config.get("num_stages", 3),
         )

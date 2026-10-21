@@ -66,11 +66,7 @@ def test_copy_for_notify_preserves_local_task(page_kind, with_mark):
     assert notify.mem_indexes is None
     assert notify.xfer_handle is None
     assert vars(notify) == {
-        **{
-            key: value
-            for key, value in original.items()
-            if key != "shared_time_out_mark"
-        },
+        **{key: value for key, value in original.items() if key != "shared_time_out_mark"},
         "mem_indexes": None,
         "xfer_handle": None,
     }
@@ -129,12 +125,8 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
         transporter.host_ip = "127.0.0.1"
         transporter.control_channel = SimpleNamespace(port=1234, send_notif=Mock())
         transporter.kv_move_buffer = SimpleNamespace(dtype="float16")
-        transporter.page_size = (
-            transporter.num_layers
-        ) = transporter.kv_head_num = transporter.head_dims = 1
-        transporter._get_remote_metadata = Mock(
-            return_value=SimpleNamespace(host_ip="127.0.0.2", control_port=4321)
-        )
+        transporter.page_size = transporter.num_layers = transporter.kv_head_num = transporter.head_dims = 1
+        transporter._get_remote_metadata = Mock(return_value=SimpleNamespace(host_ip="127.0.0.2", control_port=4321))
         transporter._get_peer = Mock(return_value=SimpleNamespace(start_recv=Mock()))
     else:
         transporter.page_reg_desc = object()
@@ -169,9 +161,7 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
     assert result.returncode == 0, result.stderr.decode()
     notify = pickle.loads(payload)
     sender = "prefill" if destination == "decode" else "decode"
-    expected = {
-        key: value for key, value in original.items() if key != "shared_time_out_mark"
-    }
+    expected = {key: value for key, value in original.items() if key != "shared_time_out_mark"}
     expected.update(mem_indexes=None, xfer_handle=None, write_stage=stage)
     expected.update(
         {

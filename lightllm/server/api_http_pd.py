@@ -33,6 +33,7 @@ async def register_and_keep_alive(websocket: WebSocket):
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
     regist_json = json.loads(await websocket.receive_text())
     peer = f"{regist_json.get('mode')}@{regist_json.get('client_ip_port')}"
+    peer += f" dp_index={regist_json.get('dp_index')} connection_id={regist_json.get('connection_id')}"
     logger.debug("PD registration received: peer=%s", peer)
     await g_objs.httpserver_manager.register_pd(regist_json, websocket)
 

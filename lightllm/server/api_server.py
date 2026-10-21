@@ -19,7 +19,13 @@ def launch_server(args: StartArgs):
         args.model_name,
         extra={"event": "service.starting", "run_mode": args.run_mode, "model": args.model_name},
     )
-    from .api_start import pd_master_start, normal_or_p_d_start, config_server_start, visual_only_start
+    from .api_start import (
+        pd_master_start,
+        pd_master_multi_worker_start,
+        normal_or_p_d_start,
+        config_server_start,
+        visual_only_start,
+    )
 
     try:
         # this code will not be ok for settings to fork to subprocess
@@ -31,7 +37,12 @@ def launch_server(args: StartArgs):
         raise e
 
     if args.run_mode == "pd_master":
-        pd_master_start(args)
+        if args.httpserver_workers < 1:
+            raise ValueError("--httpserver_workers must be at least 1")
+        if args.httpserver_workers == 1:
+            pd_master_start(args)
+        else:
+            pd_master_multi_worker_start(args)
     elif args.run_mode == "config_server":
         config_server_start(args)
     elif args.run_mode in ["visual_only"]:

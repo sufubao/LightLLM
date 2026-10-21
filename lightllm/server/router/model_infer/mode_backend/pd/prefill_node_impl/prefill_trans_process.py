@@ -76,11 +76,13 @@ def _init_env(
             mem_managers=mem_managers,
         )
         assert manager is not None
+        task_out_queue.put("module_ready")
 
         while True:
             time.sleep(100)
 
     except Exception:
+        task_out_queue.put("init_failed")
         logger.exception("KV transfer worker initialization failed")
         pass
 

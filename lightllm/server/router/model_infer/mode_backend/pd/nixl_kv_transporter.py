@@ -1,5 +1,4 @@
 import pickle
-import copy
 import os
 import threading
 import time
@@ -136,10 +135,8 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_decode_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+        new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
         new_trans_task.write_stage = "done"
-        new_trans_task.mem_indexes = None
-        new_trans_task.xfer_handle = None
         new_trans_task.decode_agent_metadata = None
         new_trans_task.decode_page_reg_desc = None
         new_trans_task.prefill_agent_name = self.agent_name
@@ -159,10 +156,8 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_decode_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+        new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
         new_trans_task.write_stage = "request"
-        new_trans_task.mem_indexes = None
-        new_trans_task.xfer_handle = None
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
         new_trans_task.prefill_num_pages = self.num_pages
@@ -180,10 +175,8 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_prefill_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+        new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
         new_trans_task.write_stage = "ready"
-        new_trans_task.mem_indexes = None
-        new_trans_task.xfer_handle = None
         new_trans_task.decode_agent_name = self.agent_name
         new_trans_task.decode_agent_metadata = self.agent_metadata
         new_trans_task.decode_num_pages = self.num_pages
@@ -207,10 +200,8 @@ class NixlKVTransporter:
                 _remote_agent = trans_task.create_prefill_agent_obj()
                 self.connect_add_remote_agent(_remote_agent)
             assert trans_task.error_info is not None
-            new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+            new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
             new_trans_task.write_stage = "error"
-            new_trans_task.mem_indexes = None
-            new_trans_task.xfer_handle = None
             new_trans_task.decode_agent_name = self.agent_name
             new_trans_task.decode_agent_metadata = self.agent_metadata
             new_trans_task.decode_num_pages = self.num_pages
@@ -232,10 +223,8 @@ class NixlKVTransporter:
                 _remote_agent = trans_task.create_decode_agent_obj()
                 self.connect_add_remote_agent(_remote_agent)
             assert trans_task.error_info is not None
-            new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+            new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
             new_trans_task.write_stage = "error"
-            new_trans_task.mem_indexes = None
-            new_trans_task.xfer_handle = None
             new_trans_task.prefill_agent_name = self.agent_name
             new_trans_task.prefill_agent_metadata = self.agent_metadata
             new_trans_task.prefill_num_pages = self.num_pages

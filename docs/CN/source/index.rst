@@ -50,6 +50,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
 
    日志配置与分级 <tutorial/logging>
    DeepSeek R1 部署 <tutorial/deepseek_deployment>
+   单机多进程 PD Master <tutorial/pd_master_multiprocess>
    FP8 KV 量化与校准 <tutorial/fp8_kv_quantization>
    多级缓存部署 <tutorial/multi_level_cache_deployment>
    多模态部署 <tutorial/multimodal>
@@ -58,7 +59,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    工具调用（Function Calling） <tutorial/function_calling>
    思考解析（Reasoning Parser） <tutorial/reasoning_parser>
    Prefill 排队策略 <tutorial/prefill_queue_strategy>
-   APIServer 参数详解 <tutorial/api_server_args_zh>
+   APIServer 参数详解 <tutorial/api_server_args>
    lightllm api介绍 <tutorial/api_param>
 
 .. toctree::

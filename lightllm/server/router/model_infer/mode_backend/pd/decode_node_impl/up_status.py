@@ -44,7 +44,7 @@ class UpStatusManager:
                 # Connection changes are already logged by the HTTP registration loop.
 
                 if id_to_pd_master_obj is not None:
-                    for node_id, pd_master_obj in self.id_to_handle_task.items():
+                    for node_id, pd_master_obj in list(self.id_to_handle_task.items()):
                         if node_id not in id_to_pd_master_obj:
                             self.id_to_handle_task[node_id].cancel()
                             self.id_to_handle_task.pop(node_id, None)

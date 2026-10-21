@@ -230,6 +230,13 @@ class PDChunckedTransTask:
     def transfer_time(self):
         return time.time() - self.start_trans_time
 
+    def copy_for_notify(self) -> "PDChunckedTransTask":
+        task = copy.copy(self)
+        task.__dict__.pop("shared_time_out_mark", None)
+        task.mem_indexes = None
+        task.xfer_handle = None
+        return task
+
     def get_key(self) -> str:
         # page_kind 参与 P/D 任务匹配，发送端和接收端必须使用一致的协议取值。
         return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"

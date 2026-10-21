@@ -35,7 +35,13 @@ from lightllm.utils.envs_utils import (
     get_lightllm_websocket_max_message_size,
     is_stop_matching_in_reasoning_enabled,
 )
-from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    GenerationError,
+    InvalidRequestError,
+    SERVER_BUSY_MESSAGE,
+    ServerBusyError,
+)
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -89,6 +95,15 @@ async def _safe_stream_wrapper(stream_generator):
             # the application-level handler returns HTTP 400.
             raise InvalidRequestError(str(e)) from e
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except GenerationError as e:
+        # Early-header mode starts the response before the first body chunk.
+        if not first_chunk_sent and not get_env_start_args().disable_delay_response_start:
+            raise
+        error_data = json.dumps(
+            {"error": {"message": str(e), "type": "server_error", "code": "stream_error"}}, ensure_ascii=False
+        )
         yield f"data: {error_data}\n\n"
         yield "data: [DONE]\n\n"
     except ServerBusyError as e:
@@ -554,6 +569,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
+            if current_finish_reason == "error" and completion_tokens == 1:
+                raise GenerationError("Generation failed before producing output")
 
             # Emit the initial role-only chunk once per choice, as required by the
             # OpenAI SSE spec: role appears only in the first delta with content="".

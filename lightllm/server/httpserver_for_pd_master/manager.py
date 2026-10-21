@@ -418,6 +418,7 @@ class HttpServerManagerForPDMaster:
                     sampling_params,
                     multimodal_params,
                     request,
+                    origin_request_id=origin_request_id,
                 )
                 raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
@@ -713,6 +714,7 @@ class HttpServerManagerForPDMaster:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
+        origin_request_id: Optional[int] = None,
     ):
         if sampling_params.disable_prompt_cache:
             assert False, "pd mode dont support set disable_prompt_cache to True"
@@ -761,7 +763,8 @@ class HttpServerManagerForPDMaster:
                     break
 
         except BaseException as error:
-            if not isinstance(error, GeneratorExit) or not finish_reasons:
+            stopped = origin_request_id is not None and origin_request_id not in self.active_req_ids
+            if not isinstance(error, GeneratorExit) or not finish_reasons or stopped:
                 interrupted = isinstance(error, (ClientDisconnected, asyncio.CancelledError, GeneratorExit))
                 finish_reasons.add("abort" if interrupted else "error")
             raise

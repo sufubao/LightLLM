@@ -63,6 +63,7 @@ class NixlKVTransporter:
         return self.nixl_agent.get_new_notifs()
 
     def _register_kv_move_buffer(self, kv_move_buffer: Tensor):
+        self.kv_move_buffer = kv_move_buffer
         self.num_pages, self.page_size, self.num_layers, self.kv_head_num, self.head_dims = kv_move_buffer.shape
         self.dtype_byte_size = kv_move_buffer.element_size()
         self.page_len = self.page_size * self.num_layers * self.kv_head_num * self.head_dims * self.dtype_byte_size

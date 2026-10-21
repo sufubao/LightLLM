@@ -80,7 +80,7 @@ def _collect(
 ):
     segment_iter = iter(segments)
 
-    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request, **_kwargs):
         mgr.segment_inputs.append(
             pickle.loads(pickle.dumps((prompt_ids, sp.constraint_out_params.pd_previous_output_len)))
         )
@@ -145,7 +145,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         params.init(None, stop_sequences=[stop_ids], stop_str_match_mode=mode, max_new_tokens=6)
         segments = []
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request, **_kwargs):
             index = len(segments)
             segments.append(sp.group_request_id)
             req = InferReq.__new__(InferReq)
@@ -262,7 +262,7 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     sampling_params.best_of = 1
     sampling_params.max_new_tokens = 1
 
-    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args):
+    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args, **_kwargs):
         yield (
             sp.group_request_id,
             "",
@@ -310,7 +310,7 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
         _initial_reasoning_state=1,
     )
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         assert sp.stop_str_match_mode.get_mode() == (StopStrMatchMode.ALL_TEXT)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
         yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
@@ -352,7 +352,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
     )
     segment_modes = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         segment_modes.append(sp._initial_reasoning_state)
         assert sp.stop_str_match_mode.get_mode() == StopStrMatchMode.CONTENT_ONLY
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
@@ -463,7 +463,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     )
     segments = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         segments.append(prompt)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
@@ -554,7 +554,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 
         manager.stop_request = stop_and_notify
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
             segments.append(prompt)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
             try:
@@ -689,9 +689,7 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, late_status):
         summaries = summary.call_args_list
         assert len(summaries) == 1
         assert summaries[0].args[0] == 1
-        assert summaries[0].kwargs["status"] == (
-            "continued" if late_status == FinishStatus.FINISHED_PD_DECODE_CAPACITY else "abort"
-        )
+        assert summaries[0].kwargs["status"] == "abort"
         manager.metric_client.histogram_observe.assert_any_call("lightllm_request_generated_tokens", 2)
 
     asyncio.run(run())
@@ -719,7 +717,7 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
 
         manager.remove_req = remove_req
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
             index = len(segments)
             segments.append(sp.group_request_id)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}

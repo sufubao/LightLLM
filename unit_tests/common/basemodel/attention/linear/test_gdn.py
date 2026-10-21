@@ -12,8 +12,8 @@ import lightllm.common.basemodel.attention.create_linear_utils as linear_create_
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
-from lightllm.common.recurrent_state import RecurrentState
-from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
+from lightllm.common.linear_state import LinearStateManager
+from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
 from lightllm.server.api_cli import make_argument_parser
@@ -39,7 +39,7 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     infer_state = InferStateInfo()
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1], dtype=torch.int32)
     infer_state.b_ready_cache_len = 0
-    state = gdn.LinearAttPrefillAttState(
+    state = gdn.GDNLinearAttPrefillAttState(
         backend=backend,
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
@@ -72,19 +72,19 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
     )
     # Only CPU metadata is needed for these layout tests.
     req_manager = object.__new__(ReqManagerForMamba)
-    req_manager.recurrent_state = object.__new__(RecurrentState)
+    req_manager.linear_state_manager = object.__new__(LinearStateManager)
     req_manager.HOLD_REQUEST_ID = req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1
-    req_manager.recurrent_state.accepted_index = req_to_mtp_state_index
-    req_manager.recurrent_state.updates = None
+    req_manager.linear_state_manager.accepted_state_index = req_to_mtp_state_index
+    req_manager.linear_state_manager.ssm_backend = None
+    req_manager.linear_state_manager.ssm_slots_per_req = draft_step + 1
     infer_state = InferStateInfo()
     infer_state.batch_size = b_req_idx.shape[0]
     infer_state.b_req_idx = b_req_idx
     infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
     infer_state.req_manager = req_manager
-    state = gdn.LinearAttDecodeAttState(
+    state = gdn.GDNLinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,
-            req_manager=req_manager,
             uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
         ),
         _infer_state_weak_ref=weakref.ref(infer_state),
@@ -135,7 +135,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
 
     def build_params(**kwargs):
         build_calls.append(kwargs)
-        return expected_cu_q_seq_len, expected_conv_buffer_idx, expected_num_accepted_tokens
+        return expected_cu_q_seq_len, expected_conv_buffer_idx
 
     monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build_params)
     state, infer_state = _create_decode_state(
@@ -149,7 +149,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
 
     assert state.b1_mtp_cu_q_seq_len is expected_cu_q_seq_len
     assert state.b_conv_buffer_idx is expected_conv_buffer_idx
-    assert state.b_num_accepted_tokens is expected_num_accepted_tokens
+    torch.testing.assert_close(state.b_num_accepted_tokens, expected_num_accepted_tokens)
     torch.testing.assert_close(
         state.b_ssm_buffer_idx,
         torch.tensor(
@@ -160,11 +160,10 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
     assert len(build_calls) == 1
     assert build_calls[0]["b_req_idx"] is state.infer_state.b_req_idx
     assert build_calls[0]["b_mtp_index"] is state.infer_state.b_mtp_index
-    assert build_calls[0]["req_to_mtp_state_index"] is req_to_mtp_state_index
     assert build_calls[0]["hold_req_id"] == 5
 
 
-def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
+def test_decode_state_passes_actual_verify_lengths_to_ssm_backend(monkeypatch):
     state, infer_state = _create_decode_state(
         draft_step=3,
         dynamic_layout=True,
@@ -174,15 +173,13 @@ def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
     cu = torch.tensor([0, 2, 5], dtype=torch.int32)
     reqs = torch.tensor([0, 1], dtype=torch.int32)
     positions = torch.tensor([5, 6], dtype=torch.int32)
-    monkeypatch.setattr(
-        gdn, "build_dynamic_mtp_linear_att_state_params", lambda **kwargs: (cu, reqs, torch.ones(2, dtype=torch.int32))
-    )
+    monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", lambda **kwargs: (cu, reqs))
 
     def prepare_decode(actual_reqs, actual_cu):
         assert actual_reqs is reqs and actual_cu is cu
         return positions
 
-    state.backend.req_manager.recurrent_state.updates = SimpleNamespace(
+    infer_state.req_manager.linear_state_manager.ssm_backend = SimpleNamespace(
         prepare_decode=prepare_decode,
         accept_updates=lambda *args: pytest.fail("speculative updates must wait for acceptance"),
     )
@@ -192,27 +189,9 @@ def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
 
 
 def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
-    assert inspect.isabstract(gdn.LinearAttBackend)
+    assert inspect.isabstract(gdn.GDNLinearAttBackend)
     backend = object.__new__(TritonLinearAttBackend)
     assert backend.get_prefill_kernel() is fla_ops.chunk_gated_delta_rule
-
-
-@pytest.mark.parametrize("manager_class", [ReqManager, ReqManagerForMamba])
-def test_linear_backend_checks_req_manager_at_construction(monkeypatch, manager_class):
-    manager = object.__new__(manager_class)
-    model = SimpleNamespace(req_manager=manager, config={}, tp_world_size_=1)
-    backend = object.__new__(TritonLinearAttBackend)
-    monkeypatch.setattr(backend, "_init_linear_layer_metadata", lambda **kwargs: None)
-
-    if manager_class is ReqManager:
-        with pytest.raises(TypeError, match="LinearAttBackend requires ReqManagerForMamba, got ReqManager$"):
-            backend.__init__(model)
-    else:
-        backend.__init__(model)
-        assert backend.req_manager is manager
-        infer_state = InferStateInfo()
-        assert backend.create_att_prefill_state(infer_state).backend.req_manager is manager
-        assert backend.create_att_decode_state(infer_state).backend.req_manager is manager
 
 
 @pytest.fixture

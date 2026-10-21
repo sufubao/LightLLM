@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.recurrent_state import RecurrentState
+from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 
@@ -131,7 +131,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
     from types import SimpleNamespace
 
     from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttDecodeAttState
     from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
 
     torch.manual_seed(53)
@@ -194,28 +194,30 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
         uses_dynamic_spec_verify_layout=lambda: dynamic,
         split_qkv=lambda x: x.split(hidden, -1),
     )
-    recurrent_state = object.__new__(RecurrentState)
-    recurrent_state.accepted_index = accepted_offsets
-    recurrent_state.updates = None
-    recurrent_state.slots_per_req = width
+    linear_state_manager = object.__new__(LinearStateManager)
+    linear_state_manager.accepted_state_index = accepted_offsets
+    linear_state_manager.ssm_backend = None
+    linear_state_manager.ssm_slots_per_req = width
     manager = SimpleNamespace(
-        recurrent_state=recurrent_state,
+        linear_state_manager=linear_state_manager,
         HOLD_REQUEST_ID=3,
         get_mamba_cache=lambda layer: (conv, ssm),
         linear_config=SimpleNamespace(get_linear_layer_index=lambda layer: 0),
     )
     if mode != "native":
-        from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
-        from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
+        from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+        from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
 
         indexes = torch.arange(4, device="cuda") * width + accepted_offsets
         ssm = ssm[indexes].clone()
         before_verify = ssm.clone()
-        manager.recurrent_state.slots_per_req = 1
+        manager.linear_state_manager.ssm_slots_per_req = 1
         if mode == "replay":
-            manager.recurrent_state.updates = ReplaySSMCache(ssm.unsqueeze(0), 8, width, kda=True)
+            manager.linear_state_manager.ssm_backend = ReplaySSMBackend(ssm.unsqueeze(0), 8, width, kda=True)
         else:
-            manager.recurrent_state.updates = CompactSSMCache(ssm.unsqueeze(0), width, torch.bfloat16, kda=True)
+            manager.linear_state_manager.ssm_backend = CompactSSMBackend(
+                ssm.unsqueeze(0), width, torch.bfloat16, kda=True
+            )
     infer = InferStateInfo()
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)
@@ -226,7 +228,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
         linear_A_log=SimpleNamespace(weight=a),
         linear_dt_bias=SimpleNamespace(weight=bias),
     )
-    state = KDADecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+    state = KDALinearAttDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
     state.init_state()
     actual = state.decode_att(
         None,
@@ -248,8 +250,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step
         for req, length in zip(requests, lengths):
             accepted[req] = min(length, 2) - 1
         if mtp_step:
-            manager.recurrent_state.updates.accept_updates(state.b_conv_buffer_idx, accepted)
-        manager.recurrent_state.updates.merge_accepted_updates(state.b_conv_buffer_idx)
+            manager.linear_state_manager.ssm_backend.accept_updates(state.b_conv_buffer_idx, accepted)
+        manager.linear_state_manager.ssm_backend.merge_accepted_updates(state.b_conv_buffer_idx)
         for req in requests:
             torch.testing.assert_close(ssm[req], expected_ssm[req * width + accepted[req]], atol=2e-3, rtol=1e-2)
     if dynamic and mtp_step:
@@ -261,9 +263,9 @@ def test_kda_prefill_materializes_accepted_history_and_uses_single_state_slot(mo
     import triton
     from types import SimpleNamespace
     from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDAPrefillAttState
-    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
-    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttPrefillAttState
+    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+    from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
 
     torch.manual_seed(1353)
     triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
@@ -271,21 +273,21 @@ def test_kda_prefill_materializes_accepted_history_and_uses_single_state_slot(mo
     hidden = heads * dim
     checkpoint = torch.randn(1, 4, heads, dim, dim, device="cuda") * 0.01
     if mode == "replay":
-        updates = ReplaySSMCache(checkpoint, 8, width, kda=True)
+        ssm_backend = ReplaySSMBackend(checkpoint, 8, width, kda=True)
     else:
-        updates = CompactSSMCache(checkpoint, width, torch.bfloat16, kda=True)
+        ssm_backend = CompactSSMBackend(checkpoint, width, torch.bfloat16, kda=True)
     ids = torch.tensor([1], dtype=torch.int32, device="cuda")
     verify = torch.randn(1, width, heads, dim, dtype=torch.bfloat16, device="cuda")
     gate = torch.randn(width, hidden, dtype=torch.bfloat16, device="cuda")
     beta = torch.randn(width, heads, dtype=torch.bfloat16, device="cuda")
     alog = torch.randn(heads, device="cuda") * 0.1
     bias = torch.randn(hidden, device="cuda") * 0.1
-    updates.prepare_decode(ids, ids.new_tensor([0, width]))
-    updates.forward(0, verify, verify, verify, gate, beta, alog, bias, ids, ids.new_tensor([0, width]))
-    updates.accept_updates(ids, ids.new_tensor([0, 1, 0, 0]))
-    canonical = updates.snapshot_accepted_state(1).clone()
+    ssm_backend.prepare_decode(ids, ids.new_tensor([0, width]))
+    ssm_backend.forward(0, verify, verify, verify, gate, beta, alog, bias, ids, ids.new_tensor([0, width]))
+    ssm_backend.accept_updates(ids, ids.new_tensor([0, 1, 0, 0]))
+    canonical = ssm_backend.get_accepted_state(1).clone()
     if mode == "replay":
-        assert updates.cursors[1] == 2
+        assert ssm_backend.cursors[1] == 2
 
     conv = torch.randn(4, 3 * hidden, 5, dtype=torch.bfloat16, device="cuda") * 0.1
     native_conv = conv.clone()
@@ -310,20 +312,22 @@ def test_kda_prefill_materializes_accepted_history_and_uses_single_state_slot(mo
     gate = torch.randn(tokens, hidden, dtype=torch.bfloat16, device="cuda")
     beta = torch.randn(tokens, heads, dtype=torch.bfloat16, device="cuda")
     outputs = []
-    for cache, conv_pool, ssm_pool, slots in [
+    for state_backend, conv_pool, ssm_pool, slots in [
         (None, native_conv, native_ssm, width),
-        (updates, conv, checkpoint[0], 1),
+        (ssm_backend, conv, checkpoint[0], 1),
     ]:
-        recurrent_state = object.__new__(RecurrentState)
-        recurrent_state.updates = cache
-        recurrent_state.slots_per_req = slots
-        manager = SimpleNamespace(recurrent_state=recurrent_state, get_mamba_cache=lambda layer: (conv_pool, ssm_pool))
+        linear_state_manager = object.__new__(LinearStateManager)
+        linear_state_manager.ssm_backend = state_backend
+        linear_state_manager.ssm_slots_per_req = slots
+        manager = SimpleNamespace(
+            linear_state_manager=linear_state_manager, get_mamba_cache=lambda layer: (conv_pool, ssm_pool)
+        )
         infer = InferStateInfo()
         infer.b_req_idx = ids
         infer.b_ready_cache_len = ids.new_tensor([2])
         infer.b1_cu_q_seq_len = ids.new_tensor([0, tokens])
         infer.req_manager = manager
-        state = KDAPrefillAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+        state = KDALinearAttPrefillAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
         state.init_state()
         assert state.b_ssm_buffer_idx.tolist() == [slots]
         outputs.append(
@@ -343,4 +347,4 @@ def test_kda_prefill_materializes_accepted_history_and_uses_single_state_slot(mo
     torch.testing.assert_close(checkpoint[0, 1], native_ssm[width], atol=0, rtol=0)
     torch.testing.assert_close(conv[1], native_conv[1], atol=0, rtol=0)
     if mode == "replay":
-        assert updates.cursors[1] == 0
+        assert ssm_backend.cursors[1] == 0

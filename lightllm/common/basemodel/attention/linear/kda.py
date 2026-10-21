@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.recurrent_state_types import SSMRunConfig
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
@@ -49,24 +48,23 @@ class KDALinearAttBackend(BaseAttBackend):
         self.mtp_step = model.args.mtp_step
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
-        return KDAPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+        return KDALinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state: "InferStateInfo"):
-        return KDADecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+        return KDALinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def split_qkv(self, mixed_qkv: torch.Tensor):
         return mixed_qkv.split(self.tp_hidden_size, dim=-1)
 
 
 @dataclasses.dataclass
-class KDAPrefillAttState(BasePrefillAttState):
+class KDALinearAttPrefillAttState(BasePrefillAttState):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        manager = self.infer_state.req_manager
-        self.b_ssm_buffer_idx = manager.recurrent_state.prepare_prefill(self.infer_state.b_req_idx)
+        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        self.b_conv_buffer_idx, self.b_ssm_buffer_idx = linear_state_manager.prepare_prefill(self.infer_state.b_req_idx)
 
     def prefill_att(
         self,
@@ -126,7 +124,7 @@ class KDAPrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class KDADecodeAttState(BaseDecodeAttState):
+class KDALinearAttDecodeAttState(BaseDecodeAttState):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -137,29 +135,29 @@ class KDADecodeAttState(BaseDecodeAttState):
         if mtp_step == 0:
             self._init_normal_decode_state()
         elif self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(mtp_step + 1)
+            self._init_dynamic_mtp_decode_state()
         else:
             self._init_fixed_mtp_decode_state(mtp_step)
-        self.infer_state.req_manager.recurrent_state.prepare_decode(
-            self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len, single_token=mtp_step == 0
-        )
+        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        if mtp_step == 0:
+            linear_state_manager.prepare_decode(self.b_conv_buffer_idx, single_token=True)
+        else:
+            (
+                self.b_conv_buffer_idx,
+                self.b_ssm_buffer_idx,
+                self.b_num_accepted_tokens,
+            ) = linear_state_manager.prepare_mtp_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx
 
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int):
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
+    def _init_dynamic_mtp_decode_state(self):
+        (self.b1_mtp_cu_q_seq_len, self.b_conv_buffer_idx,) = build_dynamic_mtp_linear_att_state_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.infer_state.req_manager.recurrent_state.accepted_index,
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_fixed_mtp_decode_state(self, mtp_step: int):
         mtp_size = mtp_step + 1
@@ -178,24 +176,6 @@ class KDADecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = (
-            self.infer_state.req_manager.recurrent_state.accepted_index[self.b_conv_buffer_idx] + 1
-        )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        if self.infer_state.req_manager.recurrent_state.update_backend is not None:
-            self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-            return
-        att_batch_size = self.b_conv_buffer_idx.shape[0]
-        # Each request owns mtp_size consecutive recurrent-state slots.
-        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, mtp_size)
-        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
 
     def decode_att(
         self,
@@ -232,10 +212,11 @@ class KDADecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
-        updater = self.infer_state.req_manager.recurrent_state.update_backend
-        if updater is not None:
+        ssm_backend = self.infer_state.req_manager.linear_state_manager.ssm_backend
+        if ssm_backend is not None:
             linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(layer_num)
-            args = (
+            output, self.infer_state.ssm_run_config = ssm_backend.forward(
+                linear_layer_idx,
                 q,
                 k,
                 v,
@@ -243,18 +224,11 @@ class KDADecodeAttState(BaseDecodeAttState):
                 raw_beta.view(-1, backend.tp_num_heads),
                 layer_weight.linear_A_log.weight,
                 layer_weight.linear_dt_bias.weight,
-            )
-            if linear_layer_idx == 0:
-                self.infer_state.ssm_run_config = SSMRunConfig.from_mapping(
-                    updater.get_run_config(*args, self.b1_mtp_cu_q_seq_len)
-                )
-            return updater.forward(
-                linear_layer_idx,
-                *args,
                 self.b_conv_buffer_idx,
                 self.b1_mtp_cu_q_seq_len,
                 run_config=self.infer_state.ssm_run_config,
             )
+            return output
         output, _ = fused_recurrent_kda(
             q=q,
             k=k,

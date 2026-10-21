@@ -33,8 +33,8 @@ def make_mems(monkeypatch, request):
 
     def check_shm_refs(mem, req):
         assert mem.req_to_indexer_tail is req.req_to_indexer_tail
-        assert mem.recurrent_state.conv_state is req.recurrent_state.conv_state
-        assert mem.recurrent_state.ssm_state is req.recurrent_state.ssm_state
+        assert mem.linear_state_manager.conv_state is req.linear_state_manager.conv_state
+        assert mem.linear_state_manager.ssm_state is req.linear_state_manager.ssm_state
         assert mem.big_page_buffers is None
 
     monkeypatch.setattr(MemoryManager, "write_to_shm", check_shm_refs)
@@ -67,8 +67,10 @@ def make_mems(monkeypatch, request):
         for _ in range(tp):
             mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0), config)
             req = Glm5NextReqManager(3, 32, mem, config)
-            assert req.recurrent_state.slots_per_req == (mtp_step + 1 if args.ssm_state_mode == "native" else 1)
-            assert (req.recurrent_state.updates is None) == (args.ssm_state_mode == "native")
+            assert req.linear_state_manager.ssm_slots_per_req == (
+                mtp_step + 1 if args.ssm_state_mode == "native" else 1
+            )
+            assert (req.linear_state_manager.ssm_backend is None) == (args.ssm_state_mode == "native")
             mem.write_to_shm(req)
             assert mem.big_page_buffers is not None
             mems.append(mem)
@@ -98,11 +100,13 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     for rank, mem in enumerate(source):
         heads = slice(rank * 8 // prefill_tp, (rank + 1) * 8 // prefill_tp)
         mem.kv_buffer.view(torch.uint8)[:, src_indexes] = packed
-        mem.recurrent_state.conv_state.buffer[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        mem.recurrent_state.ssm_state.buffer[:, src_req * mem.recurrent_state.slots_per_req].copy_(ssm[:, heads])
+        mem.linear_state_manager.conv_state.buffer[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
+        mem.linear_state_manager.ssm_state.buffer[:, src_req * mem.linear_state_manager.ssm_slots_per_req].copy_(
+            ssm[:, heads]
+        )
         mem.req_to_indexer_tail.buffer[:, src_req].copy_(tail)
-        updates = mem.recurrent_state.updates
-        if updates is not None:
+        ssm_backend = mem.linear_state_manager.ssm_backend
+        if ssm_backend is not None:
             # The exported checkpoint must contain accepted, unfurled KDA history.
             h = mem.linear_config.num_linear_v_heads
             q = torch.randn(1, 1, h, 128, dtype=torch.bfloat16, device="cuda")
@@ -110,9 +114,9 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
             beta = torch.randn(1, h, dtype=torch.bfloat16, device="cuda")
             reqs = torch.tensor([src_req], dtype=torch.int32, device="cuda")
             cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
-            updates.prepare_decode(reqs, cu)
+            ssm_backend.prepare_decode(reqs, cu)
             for layer in range(6):
-                updates.forward(
+                ssm_backend.forward(
                     layer,
                     q,
                     q,
@@ -124,25 +128,27 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
                     reqs,
                     cu,
                 )
-            updates.accept_updates(reqs, torch.zeros(4, dtype=torch.int32, device="cuda"))
-            ssm[:, heads].copy_(updates.snapshot_accepted_state(src_req))
+            ssm_backend.accept_updates(reqs, torch.zeros(4, dtype=torch.int32, device="cuda"))
+            ssm[:, heads].copy_(ssm_backend.get_accepted_state(src_req))
 
     untouched = []
     for mem in dest:
         mem.kv_buffer.zero_()
-        mem.recurrent_state.conv_state.buffer.normal_()
-        mem.recurrent_state.ssm_state.buffer.normal_()
+        mem.linear_state_manager.conv_state.buffer.normal_()
+        mem.linear_state_manager.ssm_state.buffer.normal_()
         mem.req_to_indexer_tail.buffer.normal_()
-        if mem.recurrent_state.updates is not None and hasattr(mem.recurrent_state.updates, "cursors"):
-            mem.recurrent_state.updates.cursors[dst_req] = 5
-        if mem.recurrent_state.accepted_index is not None:
-            mem.recurrent_state.accepted_index[dst_req] = mtp_size - 1
+        if mem.linear_state_manager.ssm_backend is not None and hasattr(
+            mem.linear_state_manager.ssm_backend, "cursors"
+        ):
+            mem.linear_state_manager.ssm_backend.cursors[dst_req] = 5
+        if mem.linear_state_manager.accepted_state_index is not None:
+            mem.linear_state_manager.accepted_state_index[dst_req] = mtp_size - 1
         untouched.append(
             [
                 x.buffer[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
                 for x, stride in (
-                    (mem.recurrent_state.conv_state, 1),
-                    (mem.recurrent_state.ssm_state, mem.recurrent_state.slots_per_req),
+                    (mem.linear_state_manager.conv_state, 1),
+                    (mem.linear_state_manager.ssm_state, mem.linear_state_manager.ssm_slots_per_req),
                     (mem.req_to_indexer_tail, 1),
                 )
             ]
@@ -161,20 +167,26 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
         heads = slice(rank * 8 // decode_tp, (rank + 1) * 8 // decode_tp)
         assert torch.equal(mem.kv_buffer.view(torch.uint8)[:, dst_indexes], packed)
         assert torch.equal(
-            mem.recurrent_state.conv_state.buffer[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3)
+            mem.linear_state_manager.conv_state.buffer[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3)
         )
         assert torch.equal(
-            mem.recurrent_state.ssm_state.buffer[:, dst_req * mem.recurrent_state.slots_per_req], ssm[:, heads]
+            mem.linear_state_manager.ssm_state.buffer[:, dst_req * mem.linear_state_manager.ssm_slots_per_req],
+            ssm[:, heads],
         )
         assert torch.equal(mem.req_to_indexer_tail.buffer[:, dst_req], tail)
-        if mem.recurrent_state.updates is not None and hasattr(mem.recurrent_state.updates, "cursors"):
-            assert mem.recurrent_state.updates.cursors[dst_req] == 0
-        if mem.recurrent_state.accepted_index is not None and mem.recurrent_state.updates is not None:
-            assert mem.recurrent_state.accepted_index[dst_req] == 0
+        if mem.linear_state_manager.ssm_backend is not None and hasattr(
+            mem.linear_state_manager.ssm_backend, "cursors"
+        ):
+            assert mem.linear_state_manager.ssm_backend.cursors[dst_req] == 0
+        if (
+            mem.linear_state_manager.accepted_state_index is not None
+            and mem.linear_state_manager.ssm_backend is not None
+        ):
+            assert mem.linear_state_manager.accepted_state_index[dst_req] == 0
         for (state, stride), expected in zip(
             (
-                (mem.recurrent_state.conv_state, 1),
-                (mem.recurrent_state.ssm_state, mem.recurrent_state.slots_per_req),
+                (mem.linear_state_manager.conv_state, 1),
+                (mem.linear_state_manager.ssm_state, mem.linear_state_manager.ssm_slots_per_req),
                 (mem.req_to_indexer_tail, 1),
             ),
             untouched[rank],

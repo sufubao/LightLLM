@@ -98,11 +98,11 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     slot = cache.alloc_one_state_cache()
     source_req = SimpleNamespace(req_idx=0)
     req.init_hybrid_attention_state(source_req)
-    req.recurrent_state.conv_state.buffer[:, 0].normal_()
-    req.recurrent_state.ssm_state.buffer[:, 0].normal_()
-    conv = req.recurrent_state.conv_state.buffer[:, 0, ..., :3].clone()
-    updates = req.recurrent_state.updates
-    if updates is not None:
+    req.linear_state_manager.conv_state.buffer[:, 0].normal_()
+    req.linear_state_manager.ssm_state.buffer[:, 0].normal_()
+    conv = req.linear_state_manager.conv_state.buffer[:, 0, ..., :3].clone()
+    ssm_backend = req.linear_state_manager.ssm_backend
+    if ssm_backend is not None:
         # Save an accepted suffix, not merely an already folded checkpoint.
         heads, dim = config.num_linear_v_heads, config.head_linear_k_dim
         width = mtp_step + 1
@@ -113,23 +113,23 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         bias = torch.zeros(heads * dim, device="cuda")
         ids = torch.tensor([0], dtype=torch.int32, device="cuda")
         cu = torch.tensor([0, width], dtype=torch.int32, device="cuda")
-        updates.prepare_decode(ids, cu)
+        ssm_backend.prepare_decode(ids, cu)
         for layer in range(config.linear_layer_num):
-            updates.forward(layer, q, q, q, gate, beta, alog, bias, ids, cu)
+            ssm_backend.forward(layer, q, q, q, gate, beta, alog, bias, ids, cu)
         accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
-        updates.accept_updates(ids, accepted)
-        ssm = updates.snapshot_accepted_state(0).clone()
+        ssm_backend.accept_updates(ids, accepted)
+        ssm = ssm_backend.get_accepted_state(0).clone()
         if mtp_step:
-            req.recurrent_state.accepted_index[2] = mtp_step
+            req.linear_state_manager.accepted_state_index[2] = mtp_step
     else:
-        ssm = req.recurrent_state.ssm_state.buffer[:, 0].clone()
+        ssm = req.linear_state_manager.ssm_state.buffer[:, 0].clone()
     if small_page:
         req.save_state(0, slot, cache)
     else:
         req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot])
     torch.cuda.synchronize()
-    req.recurrent_state.conv_state.buffer[:, 0].zero_()
-    req.recurrent_state.ssm_state.buffer[:, 0].zero_()
+    req.linear_state_manager.conv_state.buffer[:, 0].zero_()
+    req.linear_state_manager.ssm_state.buffer[:, 0].zero_()
     req.req_to_indexer_tail.buffer.normal_()
     unchanged = req.req_to_indexer_tail.buffer[:, [0, 1, 3]].clone()
     dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
@@ -138,23 +138,25 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     else:
         req.restore_big_page_state(slot, dest_req)
     torch.cuda.synchronize()
-    if updates is not None:
-        assert updates.kda
+    if ssm_backend is not None:
+        assert ssm_backend.kda
         if mode == "replay":
-            assert updates.cursors[2] == 0
+            assert ssm_backend.cursors[2] == 0
         if mtp_step:
-            assert req.recurrent_state.accepted_index[2] == 0
-    assert torch.equal(req.recurrent_state.conv_state.buffer[:, 2, ..., :3], conv)
-    assert torch.equal(req.recurrent_state.ssm_state.buffer[:, 2 * req.recurrent_state.slots_per_req], ssm)
+            assert req.linear_state_manager.accepted_state_index[2] == 0
+    assert torch.equal(req.linear_state_manager.conv_state.buffer[:, 2, ..., :3], conv)
+    assert torch.equal(
+        req.linear_state_manager.ssm_state.buffer[:, 2 * req.linear_state_manager.ssm_slots_per_req], ssm
+    )
     # Both page sizes are aligned to complete pools. Restoring a prefix must
     # discard stale tail values from a previously allocated request slot.
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     req.req_to_indexer_tail.buffer[:, 2].normal_()
     req.init_hybrid_attention_state(dest_req)
-    assert not req.recurrent_state.conv_state.buffer[:, 2].any()
-    assert not req.recurrent_state.ssm_state.buffer[
-        :, 2 * req.recurrent_state.slots_per_req : 3 * req.recurrent_state.slots_per_req
+    assert not req.linear_state_manager.conv_state.buffer[:, 2].any()
+    assert not req.linear_state_manager.ssm_state.buffer[
+        :, 2 * req.linear_state_manager.ssm_slots_per_req : 3 * req.linear_state_manager.ssm_slots_per_req
     ].any()
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)

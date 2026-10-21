@@ -536,12 +536,18 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 yield sub_req_id, request_output, metadata, finish_status
 
         except (asyncio.CancelledError, BaseException) as e:
-            cancelled = isinstance(
-                e, (ClientDisconnected, asyncio.CancelledError, GeneratorExit, PDPrefillNodeStopGenToken)
-            )
+            cancelled = isinstance(e, (ClientDisconnected, asyncio.CancelledError, GeneratorExit))
             log_request_summary(
                 group_request_id,
-                status="cancelled" if cancelled else "timeout" if isinstance(e, asyncio.TimeoutError) else "error",
+                status=(
+                    "completed"
+                    if isinstance(e, PDPrefillNodeStopGenToken)
+                    else "cancelled"
+                    if cancelled
+                    else "timeout"
+                    if isinstance(e, asyncio.TimeoutError)
+                    else "error"
+                ),
                 timing_scope=self.args.run_mode if self.args.run_mode in ("prefill", "decode") else "end_to_end",
                 error_type=type(e).__name__,
             )
@@ -871,7 +877,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     yield sub_req_id, out_str, metadata, finish_status
                     # 如果有子请求完成，就更新计数
                     if finish_status.is_finished():
-                        finish_reasons.add(finish_status.get_finish_reason())
+                        finish_reasons.add(
+                            "pd_capacity"
+                            if finish_status.is_finished_pd_decode_capacity()
+                            else finish_status.get_finish_reason()
+                        )
                         unfinished_count -= 1
 
                     if unfinished_count == 0:

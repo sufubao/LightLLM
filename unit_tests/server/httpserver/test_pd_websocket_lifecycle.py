@@ -97,6 +97,7 @@ def test_registration_disconnect_keeps_dp_connection_identity(monkeypatch):
         receive_bytes=AsyncMock(side_effect=WebSocketDisconnect()),
     )
     asyncio.run(api_http_pd.register_and_keep_alive(websocket))
+    assert len(logger.info.call_args_list) == 3
     for call in logger.info.call_args_list[1:]:
         assert "dp_index=2 connection_id=connection-a" in call.args[0]
 

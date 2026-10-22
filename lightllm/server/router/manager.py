@@ -260,16 +260,12 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                 self.engine_throughput.resume(last_poll)
                 stats_logger.last_time = last_poll
                 seen_ready = True
-            if self.service_ready.get_value() and stats_logger.active is not True and active and not resumed:
+            if seen_ready and stats_logger.active is not True and active and not resumed:
                 self.engine_throughput.resume(last_poll)
                 stats_logger.last_time = last_poll
                 resumed = True
             last_poll = now
-            if (
-                (self.dp_size > 1 or self.node_rank == 0)
-                and self.service_ready.get_value()
-                and stats_logger.should_log(active)
-            ):
+            if (self.dp_size > 1 or self.node_rank == 0) and seen_ready and stats_logger.should_log(active):
                 resumed = False
                 stats_logger.log(
                     scope="node",

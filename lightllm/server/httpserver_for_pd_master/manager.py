@@ -407,6 +407,7 @@ class HttpServerManagerForPDMaster:
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
+                summary_state.clear()
                 block_prompt = prompt + "".join(history_gen_token_strs)
                 if segment_index > 0:
                     pending_prefill_load_chars = len(block_prompt)
@@ -430,7 +431,6 @@ class HttpServerManagerForPDMaster:
                     sampling_params.constraint_out_params.pd_previous_output_len = max(
                         0, block_token_num - input_token_num
                     )
-                summary_state.clear()
                 self._summary_states[origin_request_id] = summary_state
                 results_generator = self._wait_to_token_package(
                     p_node,

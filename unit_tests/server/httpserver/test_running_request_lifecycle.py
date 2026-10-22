@@ -570,10 +570,20 @@ def test_real_supported_max_req_total_len_reserves_mtp_overlap_tokens():
 
 
 @pytest.mark.parametrize(
-    "kind,status", [("busy", "busy"), ("invalid", "rejected"), ("timeout", "timeout"), ("error", "error")]
+    "kind,status",
+    [
+        ("busy", "busy"),
+        ("invalid", "rejected"),
+        ("timeout", "timeout"),
+        ("error", "error"),
+        ("cancel", "cancelled"),
+        ("exit", "cancelled"),
+        ("disconnect", "cancelled"),
+    ],
 )
-def test_generate_failure_summary_preserves_reason(monkeypatch, kind, status):
-    from lightllm.utils.error_utils import ServerBusyError, InvalidRequestError
+@pytest.mark.parametrize("slave", [False, True])
+def test_generate_failure_summary_preserves_reason(monkeypatch, kind, status, slave):
+    from lightllm.utils.error_utils import ServerBusyError, InvalidRequestError, ClientDisconnected
 
     summary = MagicMock()
     monkeypatch.setattr("lightllm.server.httpserver.manager.log_request_summary", summary)
@@ -582,11 +592,19 @@ def test_generate_failure_summary_preserves_reason(monkeypatch, kind, status):
         "invalid": InvalidRequestError,
         "timeout": asyncio.TimeoutError,
         "error": RuntimeError,
+        "cancel": asyncio.CancelledError,
+        "exit": GeneratorExit,
+        "disconnect": ClientDisconnected,
     }[kind]
 
     async def run():
         manager = _make_manager(NodeRole.NORMAL)
-        manager._encode.side_effect = error_type("request rejected reason")
+        manager.is_multinode_tp_slave = slave
+        manager._encode.side_effect = (
+            ClientDisconnected(8, "request rejected reason")
+            if kind == "disconnect"
+            else error_type("request rejected reason")
+        )
         with pytest.raises(error_type):
             await _drain_generate(manager, _sampling_params(), _multimodal_params())
         summary.assert_called_once()

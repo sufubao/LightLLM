@@ -553,6 +553,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
     from types import SimpleNamespace
     from lightllm.common.linear_state import LinearStateManager
     from lightllm.common.req_manager.linear_att import ReqManagerForMamba
+    from lightllm.common.req_manager.linear_att_pd_state import LinearAttPDState
     from lightllm.common.state_cache_manager import LinearAttCacheManager, LayerCache
     from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextLinearAttPageHelper
 
@@ -636,9 +637,11 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
     import lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager as memory_module
 
     monkeypatch.setattr(memory_module, "get_env_start_args", lambda: SimpleNamespace(mtp_step=2))
+    manager.pd_state = LinearAttPDState(manager.linear_state_manager)
     mem = SimpleNamespace(
         linear_config=config,
-        linear_state_manager=manager.linear_state_manager,
+        req_manager=manager,
+        kv_move_buffer=torch.empty((1, manager.get_pd_state_size()), dtype=torch.uint8, device="cuda"),
     )
     helper = Qwen3NextLinearAttPageHelper(mem)
     # A second pending suffix exercises PD export, independently of CPU save.
@@ -655,16 +658,15 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeyp
         ssm_backend.raw_values[:, 1, :, 0].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
     )
     expected += key[..., None] * delta[..., None, :]
-    conv_page = torch.empty(helper.conv_shape, device="cuda", dtype=torch.bfloat16)
     expected = expected.to(dtype)
-    ssm_page = torch.empty(helper.ssm_shape, device="cuda", dtype=dtype)
-    helper._write_one_rank(mem, 0, 1, conv_page, ssm_page)
+    helper.write_req_to_page(0, 1, [mem])
+    conv_page, ssm_page = manager.pd_state._view_block_to_linear_att_state(mem.kv_move_buffer[0])
     torch.testing.assert_close(ssm_page, expected, rtol=state_rtol, atol=2e-5)
     torch.testing.assert_close(manager.linear_state_manager.ssm_state.buffer[:, 1], active_before, rtol=0, atol=0)
     assert ssm_backend.cursors[1].item() == 1
     ssm_backend.cursors[2] = 7
     manager.linear_state_manager.accepted_state_index[2] = 2
-    helper._read_one_rank(mem, 0, 2, conv_page, ssm_page)
+    helper.read_page_to_req(0, 2, [mem])
     torch.testing.assert_close(manager.linear_state_manager.ssm_state.buffer[:, 2], ssm_page, rtol=0, atol=0)
     torch.testing.assert_close(
         manager.linear_state_manager.conv_state.buffer[:, 2, :, :3], conv_expected, rtol=0, atol=0

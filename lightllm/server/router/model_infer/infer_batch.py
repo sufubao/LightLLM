@@ -471,10 +471,9 @@ class InferenceContext:
                     req.tail_small_page_buffer_id = self.radix_cache.small_page_buffers.alloc_one_state_cache()
                     if req.tail_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_small_page_buffer_id
-                        self.req_manager.save_state(
+                        self.req_manager.save_small_page_state(
                             req_idx=req.req_idx,
                             buffer_idx=dst_buffer_idx,
-                            state_cache_manager=self.radix_cache.small_page_buffers,
                         )
         return
 

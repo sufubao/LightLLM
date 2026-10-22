@@ -32,9 +32,11 @@ def make_mems(monkeypatch, request):
     set_env_start_args(dataclasses.asdict(args))
 
     def check_shm_refs(mem, req):
-        assert mem.req_to_indexer_tail is req.req_to_indexer_tail
-        assert mem.linear_state_manager.conv_state is req.linear_state_manager.conv_state
-        assert mem.linear_state_manager.ssm_state is req.linear_state_manager.ssm_state
+        assert mem.req_manager is req
+        for field in ("mem_manager", "small_page_buffers", "req_list", "req_sampling_params_manager"):
+            assert field not in vars(req)
+        for field in ("linear_state_manager", "pd_state", "req_to_indexer_tail"):
+            assert field not in vars(mem)
         assert mem.big_page_buffers is None
 
     monkeypatch.setattr(MemoryManager, "write_to_shm", check_shm_refs)
@@ -100,12 +102,14 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     for rank, mem in enumerate(source):
         heads = slice(rank * 8 // prefill_tp, (rank + 1) * 8 // prefill_tp)
         mem.kv_buffer.view(torch.uint8)[:, src_indexes] = packed
-        mem.linear_state_manager.conv_state.buffer[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        mem.linear_state_manager.ssm_state.buffer[:, src_req * mem.linear_state_manager.ssm_slots_per_req].copy_(
-            ssm[:, heads]
+        mem.req_manager.linear_state_manager.conv_state.buffer[:, src_req, ..., :3].copy_(
+            conv[:, :, heads].reshape(6, -1, 3)
         )
-        mem.req_to_indexer_tail.buffer[:, src_req].copy_(tail)
-        ssm_backend = mem.linear_state_manager.ssm_backend
+        mem.req_manager.linear_state_manager.ssm_state.buffer[
+            :, src_req * mem.req_manager.linear_state_manager.ssm_slots_per_req
+        ].copy_(ssm[:, heads])
+        mem.req_manager.req_to_indexer_tail.buffer[:, src_req].copy_(tail)
+        ssm_backend = mem.req_manager.linear_state_manager.ssm_backend
         if ssm_backend is not None:
             # The exported checkpoint must contain accepted, unfurled KDA history.
             h = mem.linear_config.num_linear_v_heads
@@ -134,22 +138,25 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     untouched = []
     for mem in dest:
         mem.kv_buffer.zero_()
-        mem.linear_state_manager.conv_state.buffer.normal_()
-        mem.linear_state_manager.ssm_state.buffer.normal_()
-        mem.req_to_indexer_tail.buffer.normal_()
-        if mem.linear_state_manager.ssm_backend is not None and hasattr(
-            mem.linear_state_manager.ssm_backend, "cursors"
+        mem.req_manager.linear_state_manager.conv_state.buffer.normal_()
+        mem.req_manager.linear_state_manager.ssm_state.buffer.normal_()
+        mem.req_manager.req_to_indexer_tail.buffer.normal_()
+        if mem.req_manager.linear_state_manager.ssm_backend is not None and hasattr(
+            mem.req_manager.linear_state_manager.ssm_backend, "cursors"
         ):
-            mem.linear_state_manager.ssm_backend.cursors[dst_req] = 5
-        if mem.linear_state_manager.accepted_state_index is not None:
-            mem.linear_state_manager.accepted_state_index[dst_req] = mtp_size - 1
+            mem.req_manager.linear_state_manager.ssm_backend.cursors[dst_req] = 5
+        if mem.req_manager.linear_state_manager.accepted_state_index is not None:
+            mem.req_manager.linear_state_manager.accepted_state_index[dst_req] = mtp_size - 1
         untouched.append(
             [
                 x.buffer[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
                 for x, stride in (
-                    (mem.linear_state_manager.conv_state, 1),
-                    (mem.linear_state_manager.ssm_state, mem.linear_state_manager.ssm_slots_per_req),
-                    (mem.req_to_indexer_tail, 1),
+                    (mem.req_manager.linear_state_manager.conv_state, 1),
+                    (
+                        mem.req_manager.linear_state_manager.ssm_state,
+                        mem.req_manager.linear_state_manager.ssm_slots_per_req,
+                    ),
+                    (mem.req_manager.req_to_indexer_tail, 1),
                 )
             ]
         )
@@ -158,7 +165,15 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     # Model a byte-preserving transport between separate P/D page buffers.
     dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
     dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp)
+    state_nbytes = source[0].req_manager.get_pd_state_size()
+    source_state_bytes = source[0].kv_move_buffer[0].view(torch.uint8).reshape(-1)[:state_nbytes]
+    source_state_bytes.zero_()
     source[0].write_mem_to_page_kv_move_buffer([], 0, 0, source, prefill_tp, "att_state", src_req)
+    # The public request interface packs the same complete block as the PD helper.
+    request_state_block = torch.zeros(state_nbytes, dtype=torch.uint8, device="cuda")
+    for rank, mem in enumerate(source):
+        mem.req_manager.get_pd_state(src_req, request_state_block, rank)
+    assert torch.equal(source_state_bytes, request_state_block)
     dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
     dest[0].read_page_kv_move_buffer_to_mem([], 0, 0, dest, decode_tp, "att_state", dst_req)
     torch.cuda.synchronize()
@@ -167,27 +182,30 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
         heads = slice(rank * 8 // decode_tp, (rank + 1) * 8 // decode_tp)
         assert torch.equal(mem.kv_buffer.view(torch.uint8)[:, dst_indexes], packed)
         assert torch.equal(
-            mem.linear_state_manager.conv_state.buffer[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3)
+            mem.req_manager.linear_state_manager.conv_state.buffer[:, dst_req, ..., :3],
+            conv[:, :, heads].reshape(6, -1, 3),
         )
         assert torch.equal(
-            mem.linear_state_manager.ssm_state.buffer[:, dst_req * mem.linear_state_manager.ssm_slots_per_req],
+            mem.req_manager.linear_state_manager.ssm_state.buffer[
+                :, dst_req * mem.req_manager.linear_state_manager.ssm_slots_per_req
+            ],
             ssm[:, heads],
         )
-        assert torch.equal(mem.req_to_indexer_tail.buffer[:, dst_req], tail)
-        if mem.linear_state_manager.ssm_backend is not None and hasattr(
-            mem.linear_state_manager.ssm_backend, "cursors"
+        assert torch.equal(mem.req_manager.req_to_indexer_tail.buffer[:, dst_req], tail)
+        if mem.req_manager.linear_state_manager.ssm_backend is not None and hasattr(
+            mem.req_manager.linear_state_manager.ssm_backend, "cursors"
         ):
-            assert mem.linear_state_manager.ssm_backend.cursors[dst_req] == 0
-        if (
-            mem.linear_state_manager.accepted_state_index is not None
-            and mem.linear_state_manager.ssm_backend is not None
-        ):
-            assert mem.linear_state_manager.accepted_state_index[dst_req] == 0
+            assert mem.req_manager.linear_state_manager.ssm_backend.cursors[dst_req] == 0
+        if mem.req_manager.linear_state_manager.accepted_state_index is not None:
+            assert mem.req_manager.linear_state_manager.accepted_state_index[dst_req] == 0
         for (state, stride), expected in zip(
             (
-                (mem.linear_state_manager.conv_state, 1),
-                (mem.linear_state_manager.ssm_state, mem.linear_state_manager.ssm_slots_per_req),
-                (mem.req_to_indexer_tail, 1),
+                (mem.req_manager.linear_state_manager.conv_state, 1),
+                (
+                    mem.req_manager.linear_state_manager.ssm_state,
+                    mem.req_manager.linear_state_manager.ssm_slots_per_req,
+                ),
+                (mem.req_manager.req_to_indexer_tail, 1),
             ),
             untouched[rank],
         ):
@@ -206,7 +224,7 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
         all_indexes = indexes + new_indexes
         compress_pools(
             raw=raw,
-            tail=mem.req_to_indexer_tail.buffer[0],
+            tail=mem.req_manager.req_to_indexer_tail.buffer[0],
             packed_buffer=mem.get_indexer_k_buffer(3),
             ape=ape,
             lengths=tensor(range(length + 1, length + count + 1)),
@@ -224,8 +242,8 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
 def test_pd_page_capacity_includes_tail_without_resizing(make_mems):
     mem = make_mems(1)[0]
     helper = mem.att_state_page_helper
-    # A page that fits Conv+SSM but not the appended tail must be rejected.
-    mem.kv_move_buffer = torch.empty((1, helper.tail_offset), dtype=torch.uint8, device="cuda")
+    # Reject a block missing even one byte of the complete state, including the tail.
+    mem.kv_move_buffer = torch.empty((1, mem.req_manager.get_pd_state_size() - 1), dtype=torch.uint8, device="cuda")
     with pytest.raises(AssertionError, match="smaller than global linear att state"):
         helper.assert_page_size()
     shape = mem.get_paged_kv_move_buffer_shape(2, 2048)

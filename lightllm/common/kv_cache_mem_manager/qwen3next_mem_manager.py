@@ -72,18 +72,14 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def write_to_shm(self, req_manager):
-        # LinearStateManager contains only IPC-safe state/operator configuration;
-        # worker execution resources must remain outside this shared object.
-        self.linear_state_manager = req_manager.linear_state_manager
-        # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
-        # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本
-        # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针
-        # 启动会报 "Pointer argument cannot be accessed from Triton (cpu tensor?)"。
-        # 跨进程消费方并不使用 cpu 侧大页 state cache，序列化期间临时剔除以保住 pinned。
+        self.req_manager = req_manager
+        # ForkingPickler 会将 CPU tensor 的 storage 迁到共享内存，导致原 pinned 缓冲区退化。
+        # 序列化时暂摘 CPU 大页池，并由请求管理器移除其进程专用资源；结束后全部恢复。
         big_page_buffers = self.big_page_buffers
         self.big_page_buffers = None
         try:
-            return super().write_to_shm(req_manager)
+            with req_manager.pd_sharing_context():
+                return super().write_to_shm(req_manager)
         finally:
             self.big_page_buffers = big_page_buffers
 
@@ -94,7 +90,9 @@ class Qwen3NextMemManager(MemoryManager):
         return kv_move_buffer
 
     def _create_att_state_page_helper(self):
-        return Qwen3NextLinearAttPageHelper(self)
+        helper = Qwen3NextLinearAttPageHelper(self)
+        helper.state_nbytes = self.req_manager.get_pd_state_size()
+        return helper
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -222,7 +220,7 @@ class Qwen3NextLinearAttPageHelper:
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         assert len(dp_mems) == dp_world_size
         for mem in dp_mems:
-            assert hasattr(mem, "linear_state_manager")
+            assert mem.req_manager.get_pd_state_size() == self.state_nbytes
             assert mem.linear_config.linear_layer_num == self.linear_config.linear_layer_num
             assert mem.linear_config.conv_kernel_size == self.linear_config.conv_kernel_size
             assert mem.linear_config.head_linear_k_dim == self.linear_config.head_linear_k_dim
@@ -247,9 +245,9 @@ class Qwen3NextLinearAttPageHelper:
         req_idx: int,
         dp_mems: List["Qwen3NextMemManager"],
     ):
-        conv_page, ssm_page = self.view_page_to_linear_att_state(page_index)
+        state_block = self.mem_manager.kv_move_buffer[page_index]
         for tp_index, mem in enumerate(dp_mems):
-            self._write_one_rank(mem, tp_index, req_idx, conv_page, ssm_page)
+            mem.req_manager.get_pd_state(req_idx, state_block, tp_index)
         return
 
     def read_page_to_req(
@@ -258,9 +256,9 @@ class Qwen3NextLinearAttPageHelper:
         req_idx: int,
         dp_mems: List["Qwen3NextMemManager"],
     ):
-        conv_page, ssm_page = self.view_page_to_linear_att_state(page_index)
+        state_block = self.mem_manager.kv_move_buffer[page_index]
         for tp_index, mem in enumerate(dp_mems):
-            self._read_one_rank(mem, tp_index, req_idx, conv_page, ssm_page)
+            mem.req_manager.load_pd_state(req_idx, state_block, tp_index)
         return
 
     def _write_one_rank(

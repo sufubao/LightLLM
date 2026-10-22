@@ -42,8 +42,8 @@ class LinearStateTensors(NamedTuple):
 class LinearStateManager:
     """Own request state and its lifecycle, without dispatching attention.
 
-    PD currently shares this object through CUDA IPC as part of the memory
-    manager. Keep its fields limited to tensors, cache operators, and pickleable
+    PD accesses this object through the shared request manager's interfaces.
+    Keep its fields limited to tensors, cache operators, and pickleable
     static configuration. Graphs, streams, callbacks, batch contexts, and pinned
     CPU checkpoint pools belong to their existing worker/runner owners. Adding
     such resources requires an explicit transport view rather than serializing

@@ -1,3 +1,4 @@
+from lightllm.common.cache_coordinator import HybridCacheCoordinator
 from types import SimpleNamespace
 
 from sortedcontainers import SortedDict
@@ -417,6 +418,7 @@ def test_hybrid_match_refs_only_valid_prefix_after_tail_state_eviction():
         hash_page_size=4,
         big_page_num=2,
         kv_cache_mem_manager=mem_manager,
+        big_page_buffers=mem_manager.big_page_buffers,
         small_page_buffers=small_page_buffers,
     )
     key = torch.arange(12, dtype=torch.int64)
@@ -457,9 +459,8 @@ def hybrid_tree():
         rank_in_node=102,
         hash_page_size=4,
         big_page_num=2,
-        kv_cache_mem_manager=SimpleNamespace(
-            big_page_buffers=SimpleNamespace(free_state_cache=freed_big_states.extend)
-        ),
+        kv_cache_mem_manager=SimpleNamespace(),
+        big_page_buffers=SimpleNamespace(free_state_cache=freed_big_states.extend),
         small_page_buffers=SimpleNamespace(free_state_cache=lambda **kwargs: None),
     )
     return tree, freed_big_states
@@ -526,9 +527,8 @@ def test_hybrid_match_falls_back_along_matched_branch(monkeypatch, small_state_v
         rank_in_node=104,
         hash_page_size=64,
         big_page_num=4,
-        kv_cache_mem_manager=SimpleNamespace(
-            big_page_buffers=SimpleNamespace(free_state_cache=freed_big_states.extend)
-        ),
+        kv_cache_mem_manager=SimpleNamespace(),
+        big_page_buffers=SimpleNamespace(free_state_cache=freed_big_states.extend),
         small_page_buffers=SimpleNamespace(get_free_cache_num=lambda: 0, free_state_cache=lambda **kwargs: None),
     )
     # The older request leaves a small-page state at 384, before the image.
@@ -652,7 +652,11 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
         hybrid_token_hash_list=SimpleNamespace(get_all=lambda: block_hashs),
     )
     released = []
-    context._hybrid_att_free_req(released, req)
+    coordinator = HybridCacheCoordinator()
+    coordinator.bind_mem_manager(tree.mem_manager)
+    coordinator.small_page_buffers = tree.small_page_buffers
+    coordinator.big_page_buffers = tree.big_page_buffers
+    released.extend(coordinator.release_request_cache(req, context.req_manager, tree, context.args, publish_cache=True))
     assert torch.cat(released).tolist() == list(range(100 + retained, 100 + max(24, computed)))
     assert not req.hybrid_len_to_big_page_id
     assert req.tail_small_page_buffer_id is None
@@ -670,3 +674,42 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
 
 if __name__ == "__main__":
     pytest.main()
+
+
+@pytest.mark.parametrize("publish_cache", [False, True])
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_coordinator_releases_each_checkpoint_once(hybrid_tree, publish_cache, duplicate):
+    tree, freed_big = hybrid_tree
+    freed_small = []
+    tree.small_page_buffers.free_state_cache = lambda free_indexes: freed_small.extend(free_indexes)
+    tree.insert(torch.arange(8), torch.arange(100, 108), [1, 2], [None, None], SortedDict({8: 5}))
+    if duplicate:
+        tree.insert(torch.arange(12), torch.arange(100, 112), [1, 2, 3], [None, None, 7], SortedDict())
+    node, _, _ = tree.match_prefix(torch.arange(8), block_hashs=[1, 2], update_refs=True)
+    assert tree.get_refed_tokens_num() == 8
+    coordinator = HybridCacheCoordinator()
+    coordinator.bind_mem_manager(tree.mem_manager)
+    coordinator.small_page_buffers = tree.small_page_buffers
+    coordinator.big_page_buffers = tree.big_page_buffers
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=12,
+        hold_kv_len=16,
+        hybrid_cache_len=12,
+        shared_kv_node=node,
+        tail_small_page_buffer_id=8,
+        hybrid_len_to_big_page_id=SortedDict({8: 6}),
+        get_input_token_ids=lambda: list(range(12)),
+        shm_req=SimpleNamespace(hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [1, 2, 3])),
+    )
+    requests = SimpleNamespace(req_to_token_indexs=torch.arange(100, 116).view(1, -1))
+    args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    released = coordinator.release_request_cache(req, requests, tree, args, publish_cache)
+    assert sorted(torch.cat(released).tolist()) == list(range(108 if duplicate or not publish_cache else 112, 116))
+    assert freed_big == [6]
+    assert freed_small == ([8] if duplicate or not publish_cache else [])
+    assert req.shared_kv_node is None
+    assert req.tail_small_page_buffer_id is None
+    assert not req.hybrid_len_to_big_page_id
+    assert tree.get_refed_tokens_num() == 0
+    assert tree.get_tree_total_tokens_num() == (12 if publish_cache or duplicate else 8)

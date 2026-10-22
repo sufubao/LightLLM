@@ -7,6 +7,7 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.common.kv_transfer_resources import KVTransferResources, KVTransferView
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
@@ -15,7 +16,6 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.req_manager import HybridAttentionReqManager
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
@@ -148,10 +148,10 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
-        self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
+        self.is_hybrid_att_model = self.model.cache_coordinator.has_state_cache
 
         if self.is_hybrid_att_model:
-            self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
+            self.small_page_buffers = self.model.cache_coordinator.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size,
             )
         else:
@@ -168,6 +168,7 @@ class ModeBackend:
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
                     small_page_buffers=self.small_page_buffers,
+                    big_page_buffers=self.model.cache_coordinator.big_page_buffers,
                 )
             else:
                 self.radix_cache = RadixCache(
@@ -195,6 +196,7 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
             cache_placement_controller=cache_placement_controller,
+            cache_coordinator=self.model.cache_coordinator,
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
@@ -219,9 +221,12 @@ class ModeBackend:
             )
 
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
-            # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
-            # 读取
-            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            self.kv_transfer_resources = KVTransferResources(
+                KVTransferView.from_mem_manager(self.model.mem_manager, include_page_layout=self.is_pd_mode),
+                self.model.req_manager.req_to_token_indexs,
+                self.model.cache_coordinator.create_state_transfer(),
+            )
+            self.kv_transfer_resources.write_to_shm()
             dist.barrier(group=self.node_nccl_group)
 
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
@@ -274,7 +279,6 @@ class ModeBackend:
 
     def init_dp_kv_shared(self):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         torch.cuda.set_device(get_current_device_id())
 
@@ -284,13 +288,12 @@ class ModeBackend:
             backend=self,
         )
 
-        # Collect mem_managers from all ranks
-        self.mem_managers = []
-        for rank_idx in range(self.node_world_size):
-            if rank_idx != self.rank_in_node:
-                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
-            else:
-                self.mem_managers.append(self.model.mem_manager)
+        resources = [
+            self.kv_transfer_resources if rank == self.rank_in_node else KVTransferResources.loads_from_shm(rank)
+            for rank in range(self.node_world_size)
+        ]
+        self.kv_views = [resource.kv for resource in resources]
+        self.req_to_token_indexes_by_rank = [resource.req_to_token_indexes for resource in resources]
         return
 
     def get_max_total_token_num(self):

@@ -119,6 +119,7 @@ class HybridAttPagedRadixCache:
         big_page_num: int,
         kv_cache_mem_manager=None,
         small_page_buffers=None,
+        big_page_buffers=None,
     ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
@@ -132,7 +133,7 @@ class HybridAttPagedRadixCache:
 
         self.mem_manager: MemoryManager = kv_cache_mem_manager
 
-        self.big_page_buffers: StateCacheManager = self.mem_manager.big_page_buffers
+        self.big_page_buffers: StateCacheManager = big_page_buffers
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 

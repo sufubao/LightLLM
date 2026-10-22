@@ -1,3 +1,4 @@
+from lightllm.common.cache_coordinator import HybridCacheCoordinator, CacheCoordinator
 from types import SimpleNamespace
 from collections import deque
 
@@ -48,7 +49,9 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
     free_token_indexes = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    free_token_indexes.extend(
+        CacheCoordinator().release_request_cache(req, context.req_manager, context.radix_cache, None, False)
+    )
 
     assert free_token_indexes[0].tolist() == [12, 13, 14, 15, 16]
     assert released_refs == [shared_node]
@@ -60,7 +63,11 @@ def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
     context.radix_cache = object()
     context.is_hybrid_att_model = False
     inserted_reqs = []
-    context._full_att_free_req = lambda free_token_index, req: inserted_reqs.append(req)
+    context.req_manager = None
+    context.args = None
+    context.cache_coordinator = SimpleNamespace(
+        release_request_cache=lambda req, *args, **kwargs: inserted_reqs.append(req) or []
+    )
     req = SimpleNamespace(
         cache_tiers=(CacheTier.GPU, CacheTier.CPU, CacheTier.DISK),
         cur_kv_len=3,
@@ -131,7 +138,8 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     assert len(module.cpu_cache_handle_queue) == 2
 
 
-def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
+@pytest.mark.parametrize("with_radix", [False, True])
+def test_non_gpu_linear_cache_tiers_release_pending_state_pages(with_radix):
     freed_small_pages = []
     freed_big_pages = []
     context = InferenceContext()
@@ -148,16 +156,27 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
         shared_kv_node=None,
         tail_small_page_buffer_id=7,
         hybrid_len_to_big_page_id={128: 8, 256: 9},
+        cache_tiers=(CacheTier.CPU,),
+        shm_req=SimpleNamespace(shm_cur_kv_len=3),
     )
     free_token_indexes = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    coordinator = HybridCacheCoordinator()
+    coordinator.bind_mem_manager(context.radix_cache)
+    coordinator.small_page_buffers = context.radix_cache.small_page_buffers
+    coordinator.big_page_buffers = context.radix_cache.big_page_buffers
+    context.cache_coordinator = coordinator
+    context.args = None
+    if not with_radix:
+        context.radix_cache = None
+    context.free_a_req_mem(free_token_indexes, req)
 
     assert free_token_indexes[0].tolist() == [10, 11, 12]
     assert freed_small_pages == [7]
     assert freed_big_pages == [8, 9]
     assert req.tail_small_page_buffer_id is None
     assert req.hybrid_len_to_big_page_id == {}
+    assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == 0
 
 
 def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
@@ -189,6 +208,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),
+            cache_coordinator=operator,
             req_manager=SimpleNamespace(req_to_token_indexs=table),
         ),
         _alloc_req_kv_mem=alloc_req_kv_mem,

@@ -121,7 +121,6 @@ class MultiLevelKvCacheModule(object):
                         torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
                         # g_infer_context.get_overlap_stream().synchronize()
 
-                    mem_manager = self.backend.model.mem_manager
                     req_manager = self.backend.model.req_manager
 
                     mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
@@ -144,7 +143,7 @@ class MultiLevelKvCacheModule(object):
                     idle_token_num -= need_token_num
                     req.cur_kv_len = req.cur_kv_len + need_token_num
 
-                    mem_manager.operator.load_cpu_cache_to_gpu(
+                    self.backend.model.cache_coordinator.load_cpu_cache_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
                         cpu_cache_client=self.cpu_cache_client,
@@ -288,12 +287,11 @@ class MultiLevelKvCacheModule(object):
             assert req.cur_kv_len >= move_token_num
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
-            mem_manager = self.backend.model.mem_manager
-
-            mem_manager.operator.offload_gpu_kv_to_cpu_cache(
+            self.backend.model.cache_coordinator.offload_gpu_kv_to_cpu_cache(
                 mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,
+                radix_cache=self.backend.radix_cache,
                 cpu_cache_client=self.cpu_cache_client,
                 req=req,
             )

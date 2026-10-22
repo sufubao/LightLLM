@@ -31,8 +31,9 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    if backend.is_hybrid_att_model:
-        backend.model.req_manager.update_mtp_state(
+    linear_state_manager = backend.model.cache_coordinator.linear_state_manager
+    if linear_state_manager is not None:
+        linear_state_manager.commit_accepted_state(
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,

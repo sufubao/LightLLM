@@ -69,6 +69,12 @@ class LinearAttCacheConfig:
         )
         return kv_layer_index
 
+    def get_full_att_kv_layer_mapping(self):
+        return tuple(
+            self.get_full_att_kv_layer_index(index)
+            for index in range(self.all_layer_num + self.draft_full_att_kv_layer_num)
+        )
+
     def get_conv_state_shape(self):
         # Base committed sliding-window state, without speculative MTP tail.
         return (self.get_conv_dim(), self.conv_kernel_size - 1)
@@ -125,9 +131,13 @@ class LinearAttCacheConfig:
         except:
             pass
 
-        n_layer = llm_config["num_hidden_layers"]
+        return LinearAttCacheConfig.from_model_config(llm_config, args)
 
-        tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+    @staticmethod
+    def from_model_config(llm_config, args) -> "LinearAttCacheConfig":
+        n_layer = llm_config["n_layer"] if "n_layer" in llm_config else llm_config["num_hidden_layers"]
+
+        tp_world_size = args.tp // args.dp
         full_att_dtype = (
             torch.uint8 if args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else get_torch_dtype(args.data_type)
         )

@@ -1,3 +1,4 @@
+from lightllm.common.cache_coordinator import CacheCoordinator
 from types import SimpleNamespace
 
 import pytest
@@ -79,13 +80,18 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
         small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7),
         free_one_small_page_buffer=lambda: None,
     )
-    context.req_manager = SimpleNamespace(
-        save_big_page_states=lambda **kwargs: big_snapshots.append(req.get_chuncked_input_token_len()),
-        save_state=lambda **kwargs: small_snapshots.append(req.get_chuncked_input_token_len()),
+    from lightllm.common.cache_coordinator import HybridCacheCoordinator
+
+    context.cache_coordinator = HybridCacheCoordinator()
+    context.cache_coordinator.big_page_buffers = context.radix_cache.big_page_buffers
+    context.cache_coordinator.small_page_buffers = context.radix_cache.small_page_buffers
+    context.cache_coordinator.save_big_page_states = lambda **kwargs: big_snapshots.append(
+        req.get_chuncked_input_token_len()
     )
+    context.cache_coordinator.save_state = lambda **kwargs: small_snapshots.append(req.get_chuncked_input_token_len())
 
     while req.cur_kv_len < req.get_cur_total_len():
-        context.save_hybrid_state_to_cache(torch.tensor([0]), [req])
+        context.save_cache_state(torch.tensor([0]), [req])
         req.cur_kv_len = req.get_chuncked_input_token_len()
 
     assert big_snapshots == expected_big
@@ -131,6 +137,7 @@ def test_full_attention_gpu_restore_stays_outside_image(
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
+    monkeypatch.setattr(g_infer_context, "cache_coordinator", CacheCoordinator())
     req._match_radix_cache()
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
@@ -273,6 +280,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             ),
         ),
     )
+    module.backend.model.cache_coordinator = module.backend.model.mem_manager.operator
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False

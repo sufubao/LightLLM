@@ -182,3 +182,51 @@ def test_glm_storage_selection(monkeypatch):
     monkeypatch.setattr(model, "get_env_start_args", lambda: SimpleNamespace(llm_kv_type="fp8kv_sph"))
     with pytest.raises(ValueError, match="does not support"):
         model.Glm5NextTpPartModel.get_mem_manager_class()
+
+
+@pytest.mark.parametrize("layer_count", [5, 8])
+@pytest.mark.parametrize("draft_layers", [0, 2])
+def test_hybrid_mapping_excludes_linear_layers(layer_count, draft_layers):
+    from lightllm.common.state_cache_manager import LinearAttCacheConfig
+
+    config = LinearAttCacheConfig(
+        tp_world_size=1,
+        full_att_all_num_kv_heads=1,
+        full_att_dtype=torch.bfloat16,
+        full_att_num_kv_heads=1,
+        full_att_head_dim=8,
+        global_linear_k_heads=1,
+        global_linear_v_heads=1,
+        num_linear_k_heads=1,
+        num_linear_v_heads=1,
+        head_linear_k_dim=8,
+        head_linear_v_dim=8,
+        conv_kernel_size=4,
+        linear_layer_num=layer_count - layer_count // 4,
+        conv_state_dtype=torch.bfloat16,
+        ssm_state_dtype=torch.float32,
+        full_attention_interval=4,
+        all_layer_num=layer_count,
+        draft_full_att_kv_layer_num=draft_layers,
+    )
+    expected = (None, None, None, 0, None)
+    if layer_count == 8:
+        expected += (None, None, 1)
+    expected += tuple(range(layer_count // 4, layer_count // 4 + draft_layers))
+    assert config.get_full_att_kv_layer_mapping() == expected
+    mem = MemoryManager.__new__(MemoryManager)
+    mem.layer_num, mem.head_num = config.get_full_att_kv_layer_num_with_draft_model(), 1
+    mem.kv_buffer = torch.randn(mem.layer_num, 2, 2, 8)
+    mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
+    for layer, slot in enumerate(expected):
+        if slot is None:
+            with pytest.raises(ValueError, match="no full-attention KV storage"):
+                config.get_full_att_kv_layer_index(layer)
+            with pytest.raises(ValueError, match="no KV storage"):
+                mem.get_att_input_params(layer)
+            with pytest.raises(ValueError, match="no KV storage"):
+                mem.operator_class(mem).copy_kv_to_mem_manager(layer, torch.tensor([0]), torch.empty(1, 2, 8))
+        else:
+            assert config.get_full_att_kv_layer_index(layer) == slot
+            k, v = mem.get_att_input_params(layer)
+            torch.testing.assert_close(torch.cat((k, v), dim=1), mem.kv_buffer[slot])

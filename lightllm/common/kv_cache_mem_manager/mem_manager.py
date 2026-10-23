@@ -51,12 +51,15 @@ class MemoryManager:
 
     def set_kv_layer_mapping(self, layer_mapping):
         layer_mapping = tuple(layer_mapping)
-        if not layer_mapping or any(not 0 <= index < self.layer_num for index in layer_mapping):
+        if not layer_mapping or any(index is not None and not 0 <= index < self.layer_num for index in layer_mapping):
             raise ValueError("KV layer mapping must refer to allocated layers")
         self.kv_layer_mapping = layer_mapping
 
     def get_kv_layer_index(self, layer_index):
-        return layer_index if self.kv_layer_mapping is None else self.kv_layer_mapping[layer_index]
+        kv_layer_index = layer_index if self.kv_layer_mapping is None else self.kv_layer_mapping[layer_index]
+        if kv_layer_index is None:
+            raise ValueError(f"layer {layer_index} has no KV storage")
+        return kv_layer_index
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         layer_index = self.get_kv_layer_index(layer_index)

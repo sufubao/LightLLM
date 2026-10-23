@@ -59,6 +59,8 @@ class LinearAttCacheConfig:
         """Map a global target/draft layer index to the packed full-attention cache."""
 
         layer_index = int(layer_index)
+        if 0 <= layer_index < self.all_layer_num and (layer_index + 1) % self.full_attention_interval != 0:
+            raise ValueError(f"layer {layer_index} has no full-attention KV storage")
         if layer_index >= self.all_layer_num:
             kv_layer_index = layer_index - self.linear_layer_num
         else:
@@ -72,6 +74,8 @@ class LinearAttCacheConfig:
     def get_full_att_kv_layer_mapping(self):
         return tuple(
             self.get_full_att_kv_layer_index(index)
+            if index >= self.all_layer_num or (index + 1) % self.full_attention_interval == 0
+            else None
             for index in range(self.all_layer_num + self.draft_full_att_kv_layer_num)
         )
 

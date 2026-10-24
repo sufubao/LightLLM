@@ -87,14 +87,20 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         if topk_mem_indices.ndim == 2:
             topk_mem_indices = topk_mem_indices.unsqueeze(1)
 
+        tokens, heads, dim = q.shape
+        padded_heads = ((heads + 63) // 64) * 64
+        padded_q = q
+        if padded_heads != heads:
+            padded_q = q.new_zeros((tokens, padded_heads, dim))
+            padded_q[:, :heads] = q
         mla_out, _, _ = flash_mla_sparse_fwd(
-            q=q,
+            q=padded_q,
             kv=kv,
             indices=topk_mem_indices,
             sm_scale=softmax_scale,
             d_v=kv_lora_rank,
         )
-        return mla_out
+        return mla_out[:, :heads]
 
 
 @dataclasses.dataclass

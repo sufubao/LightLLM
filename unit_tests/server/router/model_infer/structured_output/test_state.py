@@ -8,6 +8,7 @@ import pytest
 import torch
 import xgrammar as xgr
 
+from lightllm.common.cache_coordinator import CacheCoordinator, HybridCacheCoordinator
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.grammar import OutputGrammarCompiler
 from unit_tests.server.grammar_helpers import (
@@ -50,7 +51,7 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
         context.register(
             backend=SimpleNamespace(dp_rank_in_node=0),
             req_manager=SimpleNamespace(req_sampling_params_manager=None, mem_manager=None),
-            cache_coordinator=infer_batch.HybridCacheCoordinator(),
+            cache_coordinator=HybridCacheCoordinator(),
             radix_cache=None,
             shm_req_manager=None,
             vocab_size=257,
@@ -164,8 +165,13 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
         )
         requests.append((req_id, index, SimpleNamespace(to_dict=lambda: {}), owner_dp_rank))
     monkeypatch.setattr(compiler, "_compile", lambda *args: pytest.fail("Inference must not compile"))
-    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False, mtp_step=0))
+    monkeypatch.setattr(
+        infer_batch,
+        "get_env_start_args",
+        lambda: SimpleNamespace(diverse_mode=False, mtp_step=0, disable_chunked_mm_input=False),
+    )
     context = infer_batch.InferenceContext(
+        cache_coordinator=CacheCoordinator(),
         req_manager=SimpleNamespace(
             alloc=count().__next__,
             req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None),

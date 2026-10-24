@@ -44,7 +44,7 @@ class DiskCacheWorker:
         self._pages_all_idle = False
 
         assert disk_cache_storage_size > 0
-        storage_size = int(disk_cache_storage_size * (1024**3))
+        storage_size = int(disk_cache_storage_size * (1024 ** 3))
         # 为了发挥afs性能，2TiB以内使用8个shard；容量超过2TiB后，每增加1TiB增加4个shard。
         num_shard = max(8, math.ceil(disk_cache_storage_size / 1024) * 4)
         num_worker = 24

@@ -181,7 +181,7 @@ class NsaInfer:
 
         if self.tp_world_size_ > 1:
             q_merge = torch.empty(
-                size=(self.tp_world_size_ * q.numel()),
+                size=(self.tp_world_size_ * q.numel(),),
                 dtype=q.dtype,
                 device=q.device,
             )

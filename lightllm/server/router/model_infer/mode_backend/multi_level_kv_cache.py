@@ -365,15 +365,17 @@ class MultiLevelKvCacheModule(object):
             move_token_nums = [task.move_token_num for task in trans_ok_tasks]
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
-                # 分组update，避免不同请求的page交叉，导致disk cache hash不一致
-                for task, pages, move_token_num in zip(trans_ok_tasks, page_array_list, move_token_nums):
-                    self.cpu_cache_client.update_pages_status_to_ready(
-                        page_list=pages,
-                        deref=True,
-                        disk_offload_enable=CacheTier.DISK in task.req_obj.cache_tiers,
-                        token_num_in_page_list=move_token_num,
-                    )
-                self.cpu_cache_client.lock.release()
+                try:
+                    # 分组update，避免不同请求的page交叉，导致disk cache hash不一致
+                    for task, pages, move_token_num in zip(trans_ok_tasks, page_array_list, move_token_nums):
+                        self.cpu_cache_client.update_pages_status_to_ready(
+                            page_list=pages,
+                            deref=True,
+                            disk_offload_enable=CacheTier.DISK in task.req_obj.cache_tiers,
+                            token_num_in_page_list=move_token_num,
+                        )
+                finally:
+                    self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:
                 task.req_obj.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         return

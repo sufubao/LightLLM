@@ -81,7 +81,9 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
             req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),
             mem_manager=SimpleNamespace(
                 operator=SimpleNamespace(
-                    load_cpu_cache_to_gpu=lambda **kwargs: copied_pages.extend(kwargs["page_indexes"].tolist())
+                    load_cpu_cache_to_gpu=lambda mem_indexes, page_indexes, cpu_cache_client, req: copied_pages.extend(
+                        page_indexes.tolist()
+                    )
                 )
             ),
         ),

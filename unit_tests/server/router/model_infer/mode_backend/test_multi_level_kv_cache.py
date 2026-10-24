@@ -15,6 +15,34 @@ from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
 
 
+def test_cpu_cache_completion_releases_lock_after_error(monkeypatch):
+    calls = []
+
+    def fail_update(**kwargs):
+        raise ValueError("invalid page")
+
+    task = SimpleNamespace(
+        sync_event=SimpleNamespace(query=lambda: True),
+        page_indexes=torch.tensor([0], dtype=torch.int32),
+        move_token_num=64,
+        req_obj=SimpleNamespace(cache_tiers=(CacheTier.CPU, CacheTier.DISK)),
+    )
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(is_master_in_dp=True)
+    module.filter_group = None
+    module.cpu_cache_handle_queue = deque([task])
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(acquire_sleep1ms=lambda: calls.append("acquire"), release=lambda: calls.append("release")),
+        update_pages_status_to_ready=fail_update,
+    )
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "broadcast_object_list", lambda *args, **kwargs: None)
+
+    with pytest.raises(ValueError, match="invalid page"):
+        module.update_cpu_cache_task_states()
+
+    assert calls == ["acquire", "release"]
+
+
 def test_cache_tiers_reassignment_is_rejected():
     context = InferenceContext()
     context.cache_placement_controller = AdaptiveCachePlacementController(

@@ -179,7 +179,8 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages(with_radix):
     assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == 0
 
 
-def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
+@pytest.mark.parametrize("checkpoint_len", ["full", None, 128, 132])
+def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
     table = torch.full((1, 136), -1, dtype=torch.int32)
     table[0, :4] = torch.arange(4, dtype=torch.int32)
     next_index = 4
@@ -201,14 +202,17 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         return mem_indexes
 
     operator = SimpleNamespace(
-        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist())
+        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist()),
     )
+    coordinator = CacheCoordinator() if checkpoint_len == "full" else HybridCacheCoordinator()
+    coordinator.cpu_cache_transfer = SimpleNamespace(get_checkpoint_lens=lambda *args: [checkpoint_len])
+    coordinator.load_cpu_cache_to_gpu = operator.load_cpu_cache_to_gpu
     backend = SimpleNamespace(
         is_master_in_dp=False,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),
-            cache_coordinator=operator,
+            cache_coordinator=coordinator,
             req_manager=SimpleNamespace(req_to_token_indexs=table),
         ),
         _alloc_req_kv_mem=alloc_req_kv_mem,
@@ -239,9 +243,14 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
 
     module.load_cpu_cache_to_reqs([req])
 
+    if checkpoint_len not in ("full", 132):
+        assert not alloc_sizes and not loaded_indexes
+        assert req.cur_kv_len == req.hold_kv_len == 4
+        return
     assert alloc_sizes == [128]
     assert req.cur_kv_len == 132
     assert req.hold_kv_len == 132

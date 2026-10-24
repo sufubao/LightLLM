@@ -87,8 +87,14 @@ class MultiLevelKvCacheModule(object):
                 match_tokens = page_len_list[matched_page_num - 1]
                 cache_len = clamp_mm_cache_len(match_tokens, req.mm_input_spans)
                 if cache_len == match_tokens:
-                    break
-                matched_page_num = bisect.bisect_right(page_len_list, cache_len, hi=matched_page_num)
+                    valid_page_num = self.backend.model.cache_coordinator.get_cpu_cache_match_page_num(
+                        page_list[:matched_page_num], page_len_list[:matched_page_num], self.cpu_cache_client
+                    )
+                    if valid_page_num == matched_page_num:
+                        break
+                    matched_page_num = valid_page_num
+                else:
+                    matched_page_num = bisect.bisect_right(page_len_list, cache_len, hi=matched_page_num)
             match_tokens = page_len_list[matched_page_num - 1] if matched_page_num else 0
 
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
@@ -148,6 +154,7 @@ class MultiLevelKvCacheModule(object):
                         page_indexes=page_indexes_cuda,
                         cpu_cache_client=self.cpu_cache_client,
                         req=req,
+                        page_indexes_cpu=need_pages,
                     )
 
                 torch.cuda.current_stream().synchronize()
@@ -296,6 +303,8 @@ class MultiLevelKvCacheModule(object):
                 radix_cache=self.backend.radix_cache,
                 cpu_cache_client=self.cpu_cache_client,
                 req=req,
+                page_indexes_cpu=page_list,
+                page_readies_cpu=ready_list,
             )
 
             # 这个操作只是为了在offload 对应的cuda stream中，同步标记下对应的kv cache offload 操作已经完成，

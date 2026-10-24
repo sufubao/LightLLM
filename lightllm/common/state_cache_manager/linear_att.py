@@ -101,7 +101,7 @@ class LinearAttCacheConfig:
         b = self.get_cpu_cache_conv_bytes()
         c = self.get_cpu_cache_ssm_bytes()
 
-        return triton.cdiv(a + b + c, 16) * 16
+        return triton.cdiv(a + b + c, 16) * 16 + 16
 
     def get_cpu_cache_full_att_bytes(self):
         big_page_token_num = (

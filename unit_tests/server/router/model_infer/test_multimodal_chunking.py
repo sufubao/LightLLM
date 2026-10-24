@@ -77,21 +77,23 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     context.args = req.args
     context.is_hybrid_att_model = True
     context.radix_cache = SimpleNamespace(
-        big_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: next(slots)),
-        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7),
+        big_page_buffers=SimpleNamespace(
+            alloc_one_state_cache=lambda: next(slots), checkpoint_lens=[None] * len(page_ends)
+        ),
+        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7, checkpoint_lens=[None] * 8),
         free_one_small_page_buffer=lambda: None,
     )
     from lightllm.common.cache_coordinator import HybridCacheCoordinator
 
     context.cache_coordinator = HybridCacheCoordinator(
-        state_manager=SimpleNamespace(capture_intermediate_checkpoints=False)
+        state_manager=SimpleNamespace(
+            capture_intermediate_checkpoints=False,
+            save_checkpoints=lambda req_idx, reqs, slots, pool, lengths: big_snapshots.extend(lengths),
+            save_state=lambda req_idx, slot, pool, length: small_snapshots.append(length),
+        )
     )
     context.cache_coordinator.big_page_buffers = context.radix_cache.big_page_buffers
     context.cache_coordinator.small_page_buffers = context.radix_cache.small_page_buffers
-    context.cache_coordinator.save_big_page_states = lambda **kwargs: big_snapshots.append(
-        req.get_chuncked_input_token_len()
-    )
-    context.cache_coordinator.save_state = lambda **kwargs: small_snapshots.append(req.get_chuncked_input_token_len())
 
     while req.cur_kv_len < req.get_cur_total_len():
         context.save_cache_state(torch.tensor([0]), [req])
@@ -102,6 +104,10 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     assert sorted(req.hybrid_len_to_big_page_id) == page_ends
     assert len(set(req.hybrid_len_to_big_page_id.values())) == len(page_ends)
     assert big_snapshots == [end for end in page_ends if not any(start < end < stop for start, stop in spans)]
+    assert context.radix_cache.big_page_buffers.checkpoint_lens == [
+        end if end in expected_big else None for end in page_ends
+    ]
+    assert context.radix_cache.small_page_buffers.checkpoint_lens[7] == (expected_small[0] if expected_small else None)
 
 
 @pytest.mark.parametrize(
@@ -280,6 +286,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             mem_manager=SimpleNamespace(
                 operator=SimpleNamespace(
                     load_cpu_cache_to_gpu=lambda **kwargs: loaded.append(req.cur_kv_len),
+                    get_cpu_cache_match_page_num=lambda pages, *args: len(pages),
                 )
             ),
         ),

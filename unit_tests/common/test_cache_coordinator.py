@@ -68,14 +68,18 @@ def test_restore_prefix(hit):
         ),
         SimpleNamespace(reset=lambda req_idx: events.append("tail"), state=None),
     )
-    manager.small_page_buffers = SimpleNamespace(get_state_cache=lambda slot: (slot, slot))
+    manager.small_page_buffers = SimpleNamespace(
+        get_state_cache=lambda slot: (slot, slot), has_checkpoint=lambda slot, length: slot is not None
+    )
     mem = SimpleNamespace(
         allocator=SimpleNamespace(can_use_mem_size=4 if hit.startswith("fallback") else 8),
         alloc=lambda need_size: torch.arange(20, 20 + need_size, dtype=torch.int32),
         operator=SimpleNamespace(copy_mem_to_mem=lambda src, dst: events.append("copy")),
     )
     manager.mem_manager = mem
-    manager.big_page_buffers = SimpleNamespace(get_state_cache=lambda slot: (slot, slot))
+    manager.big_page_buffers = SimpleNamespace(
+        get_state_cache=lambda slot: (slot, slot), has_checkpoint=lambda slot, length: slot is not None
+    )
     requests = SimpleNamespace(mem_manager=mem, req_to_token_indexs=torch.full((2, 16), -1, dtype=torch.int32))
     radix = SimpleNamespace(
         match_prefix=match,
@@ -308,9 +312,13 @@ def test_peer_runtime_without_intermediate_checkpoints_is_not_published(local_pr
     from unittest.mock import Mock
 
     coordinator = HybridCacheCoordinator()
-    coordinator.big_page_buffers = SimpleNamespace(free_state_cache=Mock())
-    coordinator.small_page_buffers = SimpleNamespace(free_state_cache=Mock())
-    shared = SimpleNamespace(node_prefix_total_len=local_prefix) if local_prefix else None
+    coordinator.big_page_buffers = SimpleNamespace(
+        free_state_cache=Mock(), has_checkpoint=lambda slot, length: slot is not None
+    )
+    coordinator.small_page_buffers = SimpleNamespace(
+        free_state_cache=Mock(), has_checkpoint=lambda slot, length: slot is not None
+    )
+    shared = SimpleNamespace(node_prefix_total_len=local_prefix, big_page_buffer_idx=0) if local_prefix else None
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=28,
@@ -336,8 +344,12 @@ def test_release_keeps_only_the_checkpoint_complete_prefix():
     from unittest.mock import Mock
 
     coordinator = HybridCacheCoordinator()
-    coordinator.big_page_buffers = SimpleNamespace(free_state_cache=Mock())
-    coordinator.small_page_buffers = SimpleNamespace(free_state_cache=Mock())
+    coordinator.big_page_buffers = SimpleNamespace(
+        free_state_cache=Mock(), has_checkpoint=lambda slot, length: slot is not None
+    )
+    coordinator.small_page_buffers = SimpleNamespace(
+        free_state_cache=Mock(), has_checkpoint=lambda slot, length: slot is not None
+    )
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=28,
@@ -388,3 +400,48 @@ def test_dp_restore_copies_linear_state_and_indexer_tail():
     torch.testing.assert_close(indexer.state.buffer[:, 0], peer.req_to_indexer_tail.buffer[:, 1])
     assert not state.conv_state.buffer[:, 0, ..., 3:].any()
     assert state.mtp_state_index.tolist() == [0, 2]
+
+
+def test_checkpoint_lengths(monkeypatch):
+    from unittest.mock import Mock
+    from lightllm.common.state_cache_manager import StateCacheManager
+
+    class Pool(StateCacheManager):
+        def get_state_cache(self, buffer_idx):
+            return buffer_idx
+
+    state = SimpleNamespace(save_state=Mock(), restore_checkpoint=Mock())
+    coordinator = HybridCacheCoordinator(state_manager=state)
+    pool = coordinator.big_page_buffers = Pool(4, keep_num=1)
+    coordinator.small_page_buffers = Pool(1)
+    slot = pool.alloc_one_state_cache()
+    with pytest.raises(AssertionError):
+        coordinator.restore_state(0, pool, slot, 8)
+    coordinator.save_state(0, slot, pool, 8)
+    with pytest.raises(AssertionError):
+        coordinator.restore_state(0, pool, slot, 16)
+    coordinator.restore_state(0, pool, slot, 8)
+    state.restore_checkpoint.assert_called_once_with(0, 8, pool, slot)
+    pool.free_state_cache([slot])
+    assert not pool.has_checkpoint(slot, 8)
+
+    args = SimpleNamespace(cpu_cache_token_page_size=8, linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    monkeypatch.setattr("lightllm.common.cache_coordinator.get_env_start_args", lambda: args)
+    coordinator.cpu_cache_transfer = SimpleNamespace(
+        load=Mock(), get_checkpoint_lens=lambda pages, client: [None, 16][: len(pages)]
+    )
+    assert coordinator.get_cpu_cache_match_page_num([0], [8], None) == 0
+    assert coordinator.get_cpu_cache_match_page_num([0, 1], [8, 16], None) == 2
+    req = SimpleNamespace(req_idx=0, cur_kv_len=16, mm_input_spans=[], hybrid_len_to_big_page_id={})
+    coordinator.load_cpu_cache_to_gpu(torch.arange(16), torch.arange(2), None, req)
+    first, last = [req.hybrid_len_to_big_page_id[length] for length in (8, 16)]
+    assert not pool.has_checkpoint(first, 8)
+    assert pool.has_checkpoint(last, 16)
+    state.restore_checkpoint.assert_called_with(0, 16, pool, last)
+    req.hybrid_cache_len = req.cur_kv_len
+    req.tail_small_page_buffer_id = req.shared_kv_node = None
+    assert coordinator.get_cacheable_prefix_len(req, args) == 16
+    req.cur_kv_len = 8
+    assert coordinator.get_cacheable_prefix_len(req, args) == 0
+    pool.clear_to_init_state()
+    assert pool.checkpoint_lens == [None] * pool.size

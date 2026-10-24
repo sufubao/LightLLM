@@ -184,6 +184,58 @@ def test_glm_storage_selection(monkeypatch):
         model.Glm5NextTpPartModel.get_mem_manager_class()
 
 
+@pytest.mark.parametrize("manager_class", [FP8StaticPerTensorQuantMemManager, PPLINT8KVMemoryManager])
+def test_dp_fetch_startup_rejects_unsupported_storage(monkeypatch, manager_class):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.server.router.model_infer.mode_backend import base_backend
+
+    mem = manager_class.__new__(manager_class)
+    mem.operator = mem.operator_class(mem)
+    model = SimpleNamespace(mem_manager=mem)
+    backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
+    monkeypatch.setattr(backend, "init_rank_infos", lambda: None)
+    monkeypatch.setattr(base_backend, "init_distributed_env", lambda _: None)
+    monkeypatch.setattr(base_backend.dist_group_manager, "create_groups", lambda group_size: None)
+    monkeypatch.setattr(base_backend, "TokenLoad", lambda *args: None)
+    monkeypatch.setattr(base_backend.PretrainedConfig, "get_config_dict", lambda _: ({}, {}))
+    monkeypatch.setattr(base_backend, "get_model", lambda *args: (model, False))
+    with pytest.raises(ValueError, match=f"--enable_dp_prompt_cache_fetch.*{manager_class.__name__}"):
+        backend.init_model(
+            {
+                "args": StartArgs(tp=2, dp=2, enable_dp_prompt_cache_fetch=True),
+                "world_size": 2,
+                "load_way": "HF",
+                "weight_dir": "/model",
+                "max_total_token_num": 16,
+            }
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_glm_dp_fetch_copies_packed_indexer_bytes():
+    from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
+    from lightllm.common.kv_transfer_resources import KVTransferView
+
+    sources = [
+        torch.randint(0, 256, (2, 8, 1, 1168), dtype=torch.uint8, device="cuda").view(torch.bfloat16) for _ in range(4)
+    ]
+    mem = Glm5NextMemManager.__new__(Glm5NextMemManager)
+    mem.kv_buffer = torch.zeros_like(sources[0])
+    operator = mem.operator_class(mem)
+    views = [KVTransferView(source, None, source.dtype, True) for source in sources]
+    operator.copy_kv_from_other_dp_ranks(
+        kv_views=views,
+        move_token_indexes=torch.tensor([1, 3, 6], dtype=torch.int64, device="cuda"),
+        token_dp_indexes=torch.tensor([0, 1, 1], dtype=torch.int32, device="cuda"),
+        mem_indexes=torch.tensor([2, 4, 7], dtype=torch.int64, device="cuda"),
+        dp_size_in_node=2,
+        rank_in_dp=1,
+    )
+    expected = torch.stack([sources[1][:, 1], sources[3][:, 3], sources[3][:, 6]], dim=1)
+    assert torch.equal(mem.kv_buffer.view(torch.uint8)[:, [2, 4, 7]], expected.view(torch.uint8))
+    assert not mem.kv_buffer.view(torch.uint8)[:, [0, 1, 3, 5, 6]].any()
+
+
 @pytest.mark.parametrize("layer_count", [5, 8])
 @pytest.mark.parametrize("draft_layers", [0, 2])
 def test_hybrid_mapping_excludes_linear_layers(layer_count, draft_layers):

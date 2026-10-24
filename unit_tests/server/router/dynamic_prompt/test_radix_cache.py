@@ -96,7 +96,6 @@ def test_case3():
 
 
 def test_case4():
-
     tree = RadixCache(100, 2)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
@@ -251,7 +250,13 @@ def test_case10():
     测试场景：测试 flush_cache 函数
     """
     print("\nTest Case 10: Testing flush_cache function\n")
-    tree = RadixCache(100, 0)
+    freed = []
+    mem_manager = SimpleNamespace(
+        page_size=1,
+        allocator=SimpleNamespace(can_use_mem_size=95),
+        free=lambda indexes: freed.extend(indexes.tolist()),
+    )
+    tree = RadixCache(100, 0, mem_manager=mem_manager)
     tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
     tree_node, size, values = tree.match_prefix(
@@ -259,7 +264,9 @@ def test_case10():
     )
     assert tree_node is not None
     assert size == 3
+    tree.dec_node_ref_counter(tree_node)
     tree.flush_cache()
+    assert sorted(freed) == [1, 2, 3, 4, 5]
     tree_node, size, values = tree.match_prefix(
         torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True
     )
@@ -410,8 +417,11 @@ def test_hybrid_match_refs_only_valid_prefix_after_tail_state_eviction():
     small_page_buffers = SimpleNamespace(
         get_free_cache_num=lambda: 0,
         free_state_cache=lambda free_indexes: freed_state_ids.extend(free_indexes),
+        has_checkpoint=lambda slot, length: slot is not None,
     )
-    mem_manager = SimpleNamespace(big_page_buffers=SimpleNamespace())
+    mem_manager = SimpleNamespace(
+        big_page_buffers=SimpleNamespace(has_checkpoint=lambda slot, length: slot is not None)
+    )
     tree = HybridAttPagedRadixCache(
         total_token_num=100,
         rank_in_node=101,
@@ -460,8 +470,12 @@ def hybrid_tree():
         hash_page_size=4,
         big_page_num=2,
         kv_cache_mem_manager=SimpleNamespace(),
-        big_page_buffers=SimpleNamespace(free_state_cache=freed_big_states.extend),
-        small_page_buffers=SimpleNamespace(free_state_cache=lambda **kwargs: None),
+        big_page_buffers=SimpleNamespace(
+            free_state_cache=freed_big_states.extend, has_checkpoint=lambda slot, length: slot is not None
+        ),
+        small_page_buffers=SimpleNamespace(
+            free_state_cache=lambda **kwargs: None, has_checkpoint=lambda slot, length: slot is not None
+        ),
     )
     return tree, freed_big_states
 
@@ -495,7 +509,6 @@ def test_hybrid_match_traverses_pages_inside_image(hybrid_tree):
         tree.dec_node_ref_counter(node)
         assert tree.get_refed_tokens_num() == 0
 
-    # Duplicate requests release their slots; no per-page validity metadata is needed.
     tree.insert(key[:8], key[:8] + 100, [1, 2], [None, None], SortedDict({8: 8}))
     tree.insert(key[:16], key[:16] + 100, [1, 2, 3, 4], [None] * 4, SortedDict({8: 9, 16: 10}))
     assert first_page.big_page_buffer_idx == 5
@@ -504,6 +517,55 @@ def test_hybrid_match_traverses_pages_inside_image(hybrid_tree):
     tree._evict(20, lambda *args: None)
     assert sorted(freed) == [5, 6, 8, 9, 10]
     assert not tree.root_node.children
+
+
+def test_hybrid_checkpoint_validity(hybrid_tree):
+    from lightllm.common.state_cache_manager.base import StateCacheManager
+
+    class Pool(StateCacheManager):
+        def get_state_cache(self, buffer_idx):
+            raise NotImplementedError
+
+    tree, freed = hybrid_tree
+    pool = Pool(3)
+    tree.big_page_buffers = pool
+    invalid, endpoint, replacement = pool.alloc_state_cache(3)
+    pool.checkpoint_lens[endpoint] = 16
+    pool.checkpoint_lens[replacement] = 8
+    free_slots = pool.free_state_cache
+
+    def free_state_cache(slots):
+        freed.extend(slots)
+        free_slots(slots)
+
+    pool.free_state_cache = free_state_cache
+    key = torch.arange(16)
+    tree.insert(key, key + 100, [1, 2, 3, 4], [None] * 4, SortedDict({8: invalid, 16: endpoint}))
+    first = tree.root_node.children[2]
+    second = first.children[4]
+
+    node, length, values = tree.match_prefix(key[:8], block_hashs=[1, 2], update_refs=True, mm_input_spans=[])
+    assert node is None and length == 0 and values is None
+    assert tree.get_refed_tokens_num() == 0
+    node, length, values = tree.match_prefix(key, block_hashs=[1, 2, 3, 4], update_refs=True, mm_input_spans=[])
+    assert node is second and length == 16
+    assert values.tolist() == list(range(100, 116))
+    assert tree.get_refed_tokens_num() == 16
+    tree.dec_node_ref_counter(node)
+
+    prefix, _ = tree.insert(key[:8], key[:8] + 200, [1, 2], [None] * 2, SortedDict({8: replacement}))
+    assert prefix == 8 and first.big_page_buffer_idx == replacement
+    assert freed == [invalid]
+    assert pool.checkpoint_lens[invalid] is None
+    node, length, values = tree.match_prefix(key[:8], block_hashs=[1, 2], update_refs=True)
+    assert node is first and length == 8
+    assert values.tolist() == list(range(100, 108))
+    tree.dec_node_ref_counter(node)
+    tree._evict(16, lambda *args: None)
+    assert sorted(freed) == [invalid, endpoint, replacement]
+    assert pool.get_free_cache_num() == 3
+    assert pool.checkpoint_lens == [None] * 3
+    assert tree.get_refed_tokens_num() == 0 and tree.root_node.ref_counter == 1
 
 
 @pytest.mark.parametrize(
@@ -528,8 +590,14 @@ def test_hybrid_match_falls_back_along_matched_branch(monkeypatch, small_state_v
         hash_page_size=64,
         big_page_num=4,
         kv_cache_mem_manager=SimpleNamespace(),
-        big_page_buffers=SimpleNamespace(free_state_cache=freed_big_states.extend),
-        small_page_buffers=SimpleNamespace(get_free_cache_num=lambda: 0, free_state_cache=lambda **kwargs: None),
+        big_page_buffers=SimpleNamespace(
+            free_state_cache=freed_big_states.extend, has_checkpoint=lambda slot, length: slot is not None
+        ),
+        small_page_buffers=SimpleNamespace(
+            get_free_cache_num=lambda: 0,
+            free_state_cache=lambda **kwargs: None,
+            has_checkpoint=lambda slot, length: slot is not None,
+        ),
     )
     # The older request leaves a small-page state at 384, before the image.
     old_values = torch.arange(1000, 1384)
@@ -600,6 +668,7 @@ def test_hybrid_match_falls_back_along_matched_branch(monkeypatch, small_state_v
 @pytest.mark.parametrize("require_state", [False, True])
 def test_hybrid_fallback_distinguishes_kv_ownership_from_state_restore(hybrid_tree, first_outside_image, require_state):
     tree, freed = hybrid_tree
+    tree.big_page_buffers.has_checkpoint = lambda slot, length: first_outside_image and length == 8
     tree.insert(
         torch.arange(20),
         block_hashs=[1, 2, 3, 4, 5],
@@ -610,7 +679,7 @@ def test_hybrid_fallback_distinguishes_kv_ownership_from_state_restore(hybrid_tr
     node, _, _ = tree.match_prefix(
         torch.arange(20), block_hashs=[1, 2, 3, 4, 5], update_refs=True, mm_input_spans=spans
     )
-    node = tree.deref_to_first_big_page_node(node, mm_input_spans=spans if require_state else ())
+    node = tree.deref_to_first_big_page_node(node, require_state=require_state)
     expected = 16 if not require_state else (8 if first_outside_image else 0)
     assert (0 if node is None else node.node_prefix_total_len) == expected
     assert tree.get_refed_tokens_num() == expected

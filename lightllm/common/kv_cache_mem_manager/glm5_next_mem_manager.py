@@ -1,11 +1,11 @@
 import torch
 
 from .mla_mem_manager import MlaMemoryManager
-from .operator import BaseMemManagerOperator
+from .operator import NormalMemOperator
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 
 
-class Glm5NextMemOperator(BaseMemManagerOperator):
+class Glm5NextMemOperator(NormalMemOperator):
     def copy_kv_to_mem_manager(self, layer_index, mem_index, kv):
         output = self.mem_manager.get_att_input_params(layer_index)[:, :, : kv.shape[-1]]
         destindex_copy_kv(kv, mem_index, output)

@@ -106,9 +106,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     conv = req.linear_state_manager.conv_state.buffer[:, 0, ..., :3].clone()
     ssm = req.linear_state_manager.ssm_state.buffer[:, 0].clone()
     if small_page:
-        req.save_state(0, slot, cache)
+        req.save_state(0, slot, cache, checkpoint_len=4)
     else:
-        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot])
+        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot], checkpoint_lens=[4])
     torch.cuda.synchronize()
     req.linear_state_manager.conv_state.buffer[:, 0].zero_()
     req.linear_state_manager.ssm_state.buffer[:, 0].zero_()
@@ -127,7 +127,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         )
         assert state.mtp_state_index.tolist() == [0, 1, mtp_step, mtp_step]
     dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
-    req.restore_state(dest_req.req_idx, cache, slot)
+    req.restore_state(dest_req.req_idx, cache, slot, restored_len=4)
     if mtp_step:
         assert req.linear_state_manager.mtp_state_index.tolist() == [0, 1, 0, mtp_step]
     torch.cuda.synchronize()

@@ -147,6 +147,10 @@ class ModeBackend:
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
+        if self.args.enable_dp_prompt_cache_fetch and not self.model.mem_manager.operator.supports_dp_cache_fetch:
+            raise ValueError(
+                f"--enable_dp_prompt_cache_fetch is not supported by {type(self.model.mem_manager).__name__}"
+            )
         set_random_seed(2147483647)
         self.is_hybrid_att_model = self.model.cache_coordinator.has_state_cache
 

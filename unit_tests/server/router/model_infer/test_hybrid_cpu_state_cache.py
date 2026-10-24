@@ -98,11 +98,14 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     for end in range(128, token_num + 1, 128):
         slot = big.alloc_one_state_cache()
         big_states[end] = slot
+        if end != 128 or first_page_has_state:
+            big.checkpoint_lens[slot] = end
         for tensor in big.get_state_cache(slot):
             tensor.normal_()
     tail_slot = None
     if token_num % 128:
         tail_slot = coordinator.small_page_buffers.alloc_one_state_cache()
+        coordinator.small_page_buffers.checkpoint_lens[tail_slot] = token_num
         for tensor in coordinator.small_page_buffers.get_state_cache(tail_slot):
             tensor.normal_()
         final_states = coordinator.small_page_buffers.get_state_cache(tail_slot)
@@ -176,6 +179,7 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     assert sorted(req.hybrid_len_to_big_page_id) == list(range(128, token_num + 1, 128))
     # Even the invalid page is copied normally; only restoring from it is forbidden.
     for end, slot in req.hybrid_len_to_big_page_id.items():
+        assert big.has_checkpoint(slot, end) == (end != 128 or first_page_has_state)
         for actual, expected in zip(big.get_state_cache(slot), expected_big_states[end]):
             torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(coordinator.linear_state_manager.conv_state.buffer[:, 0].cpu(), expected_states[0])
@@ -195,7 +199,6 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
             torch.arange(length),
             block_hashs=list(range(1, length // 64 + 1)),
             update_refs=True,
-            mm_input_spans=req.mm_input_spans,
         )
         assert matched == expected
         tree.dec_node_ref_counter(node)
@@ -220,6 +223,8 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
     for index in range(2):
         big_slot = coordinator.big_page_buffers.alloc_one_state_cache()
         small_slot = coordinator.small_page_buffers.alloc_one_state_cache()
+        coordinator.big_page_buffers.checkpoint_lens[big_slot] = 128
+        coordinator.small_page_buffers.checkpoint_lens[small_slot] = 192
         for state in coordinator.big_page_buffers.get_state_cache(big_slot):
             state.fill_(index + 10)
         states = coordinator.small_page_buffers.get_state_cache(small_slot)

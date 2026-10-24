@@ -6,8 +6,11 @@ if TYPE_CHECKING:
     from ..mem_manager import MemoryManager
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
+
 # 定义一个抽象基类
 class BaseMemManagerOperator(ABC):
+    supports_dp_cache_fetch = False
+
     def __init__(self, mem_manager: "MemoryManager") -> None:
         super().__init__()
         self.mem_manager = mem_manager

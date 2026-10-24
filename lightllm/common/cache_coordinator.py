@@ -1,6 +1,7 @@
 import torch
 import triton
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 
 
 class CacheCoordinator:
@@ -72,12 +73,23 @@ class CacheCoordinator:
     def restore_peer_state(self, req_idx, restored_len, peer_state, peer_req_idx):
         return
 
-    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req) -> None:
+    def get_cpu_cache_match_page_num(self, page_indexes, page_lens, cpu_cache_client):
+        return len(page_indexes)
+
+    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req, page_indexes_cpu=None) -> None:
         """Enqueue KV and any live request-state restoration on the current stream."""
         self.mem_manager.operator.load_cpu_cache_to_gpu(mem_indexes, page_indexes, cpu_cache_client, req)
 
     def offload_gpu_kv_to_cpu_cache(
-        self, mem_indexes, page_indexes, page_readies, cpu_cache_client, req, radix_cache=None
+        self,
+        mem_indexes,
+        page_indexes,
+        page_readies,
+        cpu_cache_client,
+        req,
+        radix_cache=None,
+        page_indexes_cpu=None,
+        page_readies_cpu=None,
     ):
         return self.mem_manager.operator.offload_gpu_kv_to_cpu_cache(
             mem_indexes, page_indexes, page_readies, cpu_cache_client, req
@@ -145,7 +157,8 @@ class HybridCacheCoordinator(CacheCoordinator):
         if self.indexer_state_manager is not None:
             self.indexer_state_manager.reset(req_idx)
 
-    def restore_state(self, req_idx, state_cache_manager, buffer_idx, restored_len=None):
+    def restore_state(self, req_idx, state_cache_manager, buffer_idx, restored_len):
+        assert state_cache_manager.has_checkpoint(buffer_idx, restored_len)
         self.state_manager.restore_checkpoint(req_idx, restored_len, state_cache_manager, buffer_idx)
         if self.indexer_state_manager is not None:
             self.indexer_state_manager.reset(req_idx)
@@ -157,13 +170,16 @@ class HybridCacheCoordinator(CacheCoordinator):
                 peer_state.req_to_indexer_tail.buffer[:, peer_req_idx], non_blocking=True
             )
 
-    def save_state(self, req_idx, buffer_idx, state_cache_manager, checkpoint_len=None):
+    def save_state(self, req_idx, buffer_idx, state_cache_manager, checkpoint_len):
         self.state_manager.save_state(req_idx, buffer_idx, state_cache_manager, checkpoint_len)
+        state_cache_manager.checkpoint_lens[buffer_idx] = checkpoint_len
 
-    def save_big_page_states(self, b_req_idx, req_indexes, buffer_indexes, checkpoint_lens=None):
+    def save_big_page_states(self, b_req_idx, req_indexes, buffer_indexes, checkpoint_lens):
         self.state_manager.save_checkpoints(
             b_req_idx, req_indexes, buffer_indexes, self.big_page_buffers, checkpoint_lens
         )
+        for slot, length in zip(buffer_indexes, checkpoint_lens):
+            self.big_page_buffers.checkpoint_lens[slot] = length
 
     def _restore_shared_prefix(
         self, req_idx, token_indexes, cached_indexes, restored_len, checkpoint_pool, checkpoint_slot
@@ -215,7 +231,7 @@ class HybridCacheCoordinator(CacheCoordinator):
                             req.req_idx, self.small_page_buffers, share_node.small_page_buffer_idx, matched_len
                         )
                         restored_kv_len = matched_len
-                        retained_node = radix_cache.deref_to_first_big_page_node(node=share_node)
+                        retained_node = radix_cache.deref_to_first_big_page_node(node=share_node, require_state=False)
                         share_node = None
                     else:
                         share_node = radix_cache.deref_to_first_big_page_node(
@@ -297,10 +313,28 @@ class HybridCacheCoordinator(CacheCoordinator):
         page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         end = min(req.cur_kv_len, req.hybrid_cache_len)
+        cacheable_len = 0
+        node = req.shared_kv_node
+        while node is not None and node.node_prefix_total_len:
+            length = node.node_prefix_total_len
+            pool, slot = (
+                (self.big_page_buffers, node.big_page_buffer_idx)
+                if length % page_size == 0
+                else (self.small_page_buffers, node.small_page_buffer_idx)
+            )
+            if pool.has_checkpoint(slot, length):
+                cacheable_len = length
+                break
+            node = node.parent
         for boundary in range((shared_len // page_size + 1) * page_size, end + 1, page_size):
             if boundary not in req.hybrid_len_to_big_page_id:
-                return boundary - page_size
-        return end
+                return cacheable_len
+            slot = req.hybrid_len_to_big_page_id[boundary]
+            if self.big_page_buffers.has_checkpoint(slot, boundary):
+                cacheable_len = boundary
+        if self.small_page_buffers.has_checkpoint(req.tail_small_page_buffer_id, end):
+            cacheable_len = end
+        return cacheable_len
 
     def release_request_cache(self, req, req_manager, radix_cache, args, publish_cache) -> list[torch.Tensor]:
         """Publish reusable cache and release unpublished checkpoints and held radix refs.
@@ -373,31 +407,56 @@ class HybridCacheCoordinator(CacheCoordinator):
             req.shared_kv_node = None
         return free_indexes
 
-    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req) -> None:
+    def get_cpu_cache_match_page_num(self, page_indexes, page_lens, cpu_cache_client):
+        lengths = self.cpu_cache_transfer.get_checkpoint_lens(page_indexes, cpu_cache_client)
+        for index in range(len(lengths) - 1, -1, -1):
+            if lengths[index] == page_lens[index]:
+                return index + 1
+        return 0
+
+    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req, page_indexes_cpu=None) -> None:
         """Enqueue KV and any live request-state restoration on the current stream."""
         args = get_env_start_args()
         page_size = args.cpu_cache_token_page_size
         assert page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
         assert triton.cdiv(len(mem_indexes), page_size) == len(page_indexes)
+        assert clamp_mm_cache_len(req.cur_kv_len, req.mm_input_spans) == req.cur_kv_len
+        if page_indexes_cpu is None:
+            page_indexes_cpu = page_indexes.cpu().tolist()
+        checkpoint_lens = self.cpu_cache_transfer.get_checkpoint_lens(page_indexes_cpu, cpu_cache_client)
+        assert checkpoint_lens[-1] == req.cur_kv_len
         page_count = len(mem_indexes) // page_size
         end = req.cur_kv_len // page_size * page_size
         slots = self.big_page_buffers.alloc_state_cache(page_count)
         assert slots is not None, "Insufficient checkpoint slots for CPU cache restoration"
         first_end = end - (page_count - 1) * page_size
         for index, slot in enumerate(slots):
-            req.hybrid_len_to_big_page_id[first_end + index * page_size] = slot
+            length = first_end + index * page_size
+            req.hybrid_len_to_big_page_id[length] = slot
+            if checkpoint_lens[index] == length:
+                self.big_page_buffers.checkpoint_lens[slot] = length
         if len(mem_indexes) % page_size:
             slots.append(self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID)
+            self.big_page_buffers.checkpoint_lens[slots[-1]] = req.cur_kv_len
         self.cpu_cache_transfer.load(mem_indexes, page_indexes, cpu_cache_client, slots)
         self.restore_state(req.req_idx, self.big_page_buffers, slots[-1], req.cur_kv_len)
 
     def offload_gpu_kv_to_cpu_cache(
-        self, mem_indexes, page_indexes, page_readies, cpu_cache_client, req, radix_cache=None
+        self,
+        mem_indexes,
+        page_indexes,
+        page_readies,
+        cpu_cache_client,
+        req,
+        radix_cache=None,
+        page_indexes_cpu=None,
+        page_readies_cpu=None,
     ):
         page_size = get_env_start_args().cpu_cache_token_page_size
-        slots = [] if radix_cache is None else radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
         end = len(mem_indexes) // page_size * page_size
+        slots = [] if radix_cache is None else radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
+        slots = slots[: end // page_size]
         for length in range((len(slots) + 1) * page_size, end + 1, page_size):
             slots.append(req.hybrid_len_to_big_page_id[length])
         tail_state = None
@@ -405,4 +464,16 @@ class HybridCacheCoordinator(CacheCoordinator):
             assert req.tail_small_page_buffer_id is not None
             tail_state = self.small_page_buffers.get_state_cache(req.tail_small_page_buffer_id)
             slots.append(self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID)
-        self.cpu_cache_transfer.offload(mem_indexes, page_indexes, page_readies, cpu_cache_client, slots, tail_state)
+            self.big_page_buffers.checkpoint_lens[slots[-1]] = self.small_page_buffers.checkpoint_lens[
+                req.tail_small_page_buffer_id
+            ]
+        self.cpu_cache_transfer.offload(
+            mem_indexes,
+            page_indexes,
+            page_readies,
+            cpu_cache_client,
+            slots,
+            tail_state,
+            page_indexes_cpu=page_indexes_cpu,
+            page_readies_cpu=page_readies_cpu,
+        )

@@ -11,6 +11,11 @@ class HybridCpuCacheTransfer:
         self.linear_config = linear_config
         self.big_page_buffers = big_page_buffers
 
+    def get_checkpoint_lens(self, page_indexes, cpu_cache_client):
+        cache = cpu_cache_client.cpu_kv_cache_tensor
+        metadata = cache.view(cache.shape[0], -1).view(torch.uint8)[:, -16:].view(torch.int64).numpy()
+        return [int(length) if version == 1 and length >= 0 else None for length, version in metadata[page_indexes]]
+
     def load(self, mem_indexes, page_indexes, cpu_cache_client, big_page_buffer_ids_cpu):
         args = get_env_start_args()
         assert mem_indexes.is_cuda and page_indexes.is_cuda
@@ -46,7 +51,17 @@ class HybridCpuCacheTransfer:
             linear_config=self.linear_config,
         )
 
-    def offload(self, mem_indexes, page_indexes, page_readies, cpu_cache_client, big_page_buffer_ids_cpu, tail_state):
+    def offload(
+        self,
+        mem_indexes,
+        page_indexes,
+        page_readies,
+        cpu_cache_client,
+        big_page_buffer_ids_cpu,
+        tail_state,
+        page_indexes_cpu=None,
+        page_readies_cpu=None,
+    ):
         args = get_env_start_args()
         if not hasattr(self, "big_page_ids_buffer_store"):
             self.big_page_ids_buffer_store = torch.empty((1024 * 1024 * 4,), dtype=torch.int64, device="cuda")
@@ -84,6 +99,20 @@ class HybridCpuCacheTransfer:
             )
 
         assert len(big_page_buffer_ids_cpu) == len(page_indexes) == len(page_readies)
+
+        if get_current_rank_in_dp() == 0:
+            if page_indexes_cpu is None:
+                page_indexes_cpu = page_indexes.cpu().tolist()
+            if page_readies_cpu is None:
+                page_readies_cpu = page_readies.cpu().tolist()
+            cache = cpu_cache_client.cpu_kv_cache_tensor
+            metadata = cache.view(cache.shape[0], -1).view(torch.uint8)[:, -16:].view(torch.int64).numpy()
+            for page_index, ready, slot in zip(
+                page_indexes_cpu, page_readies_cpu, big_page_buffer_ids_cpu, strict=True
+            ):
+                if page_index != -1 and not ready:
+                    length = self.big_page_buffers.checkpoint_lens[slot]
+                    metadata[page_index] = (-1 if length is None else length, 1)
 
         big_page_buffer_ids_cpu = torch.tensor(
             big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu", pin_memory=True

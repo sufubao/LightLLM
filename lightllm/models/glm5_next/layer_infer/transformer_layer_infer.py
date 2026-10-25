@@ -71,11 +71,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn_norm(self, input, infer_state, layer_weight):
         return layer_weight.ffn_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
-    def _tpsp_reduce(self, input, infer_state):
-        if self.tp_world_size_ == 1:
-            return input
-        return super()._tpsp_reduce(input.float(), infer_state).to(input.dtype)
-
     def _ffn(self, input, infer_state, layer_weight):
         input = self._tpsp_allgather(input=input.view(-1, self.embed_dim_), infer_state=infer_state)
         if self.is_moe:

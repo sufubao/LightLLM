@@ -1,6 +1,8 @@
 import torch
 import triton
 
+from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+
 from .triton_kernel.index_quant import hadamard_transform_quant_fp8
 from .triton_kernel.kpool import compress_pools, gather_pools, gather_paged_pools, get_pool_ranges, expand_topk
 
@@ -17,14 +19,18 @@ class Glm5NextNsaInfer:
 
     def select_topk_indices(self, logits, lengths, indices):
         """Select row-relative indices, with valid entries before -1 padding."""
-        positions = torch.arange(logits.shape[1], device=logits.device)
-        bits = torch.where(logits == 0, 0, logits.view(torch.int32))
-        ordered = bits ^ ((bits >> 31) & 0x7FFFFFFF)
-        keys = ordered.to(torch.int64).bitwise_left_shift_(32)
-        keys.bitwise_or_(logits.shape[1] - 1 - positions)
-        keys.masked_fill_(positions[None, :] >= lengths[:, None], torch.iinfo(torch.int64).min)
-        selected = torch.topk(keys, indices.shape[1], dim=-1, sorted=True).indices
-        indices.copy_(selected.masked_fill(selected >= lengths[:, None], -1))
+        if HAS_VLLM:
+            # next_n=1 treats each query as an independent row, including prefill.
+            # The decode entry splits long rows before merging their candidates.
+            # Tested with vLLM 0.22.1; persistent_topk can drop candidates (#51782).
+            vllm_ops.top_k_per_row_decode(
+                logits, 1, lengths, indices, logits.shape[0], logits.stride(0), logits.stride(1), indices.shape[1]
+            )
+        else:
+            positions = torch.arange(logits.shape[1], device=logits.device)
+            logits.masked_fill_(positions[None, :] >= lengths[:, None], -float("inf"))
+            selected = torch.topk(logits, indices.shape[1], dim=-1, sorted=True).indices
+            indices.copy_(selected.masked_fill(selected >= lengths[:, None], -1))
 
     def _get_indices(self, hidden_states, q_lora, infer_state, att_state, layer_weight):
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.eps)
@@ -77,7 +83,9 @@ class Glm5NextNsaInfer:
             att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
         groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
-        chunk_size = max(1, min(q_fp8.shape[0], 4 * 1024 * 1024 // max_pools))
+        # Budget 64 MiB for FP32 logits. At 1M tokens this permits 64 queries per chunk,
+        # limiting Q parallelism even when the prefill batch contains many tokens.
+        chunk_size = max(1, min(q_fp8.shape[0], 16 * 1024 * 1024 // max_pools))
         import deep_gemm
 
         for start in range(0, q_fp8.shape[0], chunk_size):

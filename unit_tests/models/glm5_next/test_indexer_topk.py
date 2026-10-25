@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.models.glm5_next.indexer import HAS_VLLM, Glm5NextNsaInfer
+from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -14,11 +14,6 @@ def indexer():
     return Glm5NextNsaInfer(
         0, {"index_topk": 2048, "index_n_heads": 32, "index_head_dim": 128, "rms_norm_eps": 1e-5}, 1
     )
-
-
-def _require_vllm_topk():
-    if not HAS_VLLM:
-        pytest.skip("vLLM top_k_per_row_decode required")
 
 
 def _assert_topk(logits, lengths, indices):
@@ -34,14 +29,12 @@ def _assert_topk(logits, lengths, indices):
     got = logits.gather(1, indices.long().clamp_min(0)).masked_fill(~valid, -float("inf"))
     positions = torch.arange(logits.shape[1], device=logits.device)
     masked = logits.masked_fill(positions[None, :] >= lengths[:, None], -float("inf"))
-    # Compare values, since different equal-valued candidates are valid top-k.
     torch.testing.assert_close(got.sort(descending=True).values, masked.topk(topk).values, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("pools", [640, 8192, 65536, 262144])
 @pytest.mark.parametrize("distribution", ["normal", "concentrated", "ties"])
 def test_topk_variable_lengths(indexer, pools, distribution):
-    _require_vllm_topk()
     torch.manual_seed(42)
     # DeepGEMM logits can have a padded row stride, and output is a query chunk.
     logits = torch.randn(8, pools + 128, device="cuda")[:, :pools]
@@ -61,7 +54,6 @@ def test_topk_variable_lengths(indexer, pools, distribution):
 
 @pytest.mark.parametrize("pools", [8192, 262144])
 def test_topk_cuda_graph_with_changing_lengths(indexer, pools):
-    _require_vllm_topk()
     logits = torch.zeros(8, pools, device="cuda")
     lengths = torch.zeros(8, device="cuda", dtype=torch.int32)
     indices = torch.empty(8, 512, device="cuda", dtype=torch.int32)
@@ -86,10 +78,7 @@ def test_topk_cuda_graph_with_changing_lengths(indexer, pools):
         _assert_topk(logits, lengths, indices)
 
 
-def test_topk_without_vllm(indexer, monkeypatch):
-    from lightllm.models.glm5_next import indexer as indexer_module
-
-    monkeypatch.setattr(indexer_module, "HAS_VLLM", False)
+def test_topk_short_lengths(indexer):
     logits = torch.randn(5, 640, device="cuda")
     lengths = torch.tensor([0, 1, 511, 512, 639], device="cuda", dtype=torch.int32)
     indices = torch.empty(5, 512, device="cuda", dtype=torch.int32)
@@ -101,7 +90,6 @@ def test_topk_without_vllm(indexer, monkeypatch):
 @pytest.mark.parametrize("max_pools", [1024, 262144])
 def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, mtp_size, max_pools):
     pytest.importorskip("deep_gemm")
-    _require_vllm_topk()
     torch.manual_seed(27)
     rows = 5 * mtp_size
     storage = torch.empty(1024, 1, 584, device="cuda", dtype=torch.bfloat16)
@@ -148,14 +136,44 @@ def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, 
         seqs[-1].zero_()
         lengths.copy_(seqs.flatten())
         graph.replay()
-        indexer._get_prefill_indices(q, weights, packed, infer_state, att_state, max_pools)
-        reference_logits = logits_outputs.pop()
+        reference = indexer._get_prefill_indices(q, weights, packed, infer_state, att_state, max_pools)
+        reference_logits = torch.cat(logits_outputs, dim=0)
+        logits_outputs.clear()
         pool_lengths = lengths // 4
         valid = torch.arange(max_pools, device="cuda")[None, :] < pool_lengths[:, None]
         torch.testing.assert_close(graph_logits[valid], reference_logits[valid], rtol=0, atol=0)
-        # Fragmented tables deliberately repeat keys; equal-score top-k ties
-        # may choose different indices. Check exact selected values and uniqueness.
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
         _assert_topk(reference_logits, pool_lengths, actual)
         assert (actual[-mtp_size:] == -1).all()
         # Exercise request-slot reuse and speculative rollback on the same graph.
         req_idx.copy_(req_idx.roll(mtp_size))
+
+
+@pytest.mark.parametrize("rows", [1, 2, 512])
+def test_topk_ties_are_repeatable(indexer, rows):
+    logits = torch.randint(0, 4, (rows, 1024), generator=torch.Generator().manual_seed(732)).float().cuda()
+    lengths = torch.full((rows,), 1024, dtype=torch.int32, device="cuda")
+    indices = torch.empty((rows, 512), dtype=torch.int32, device="cuda")
+    expected = logits.argsort(dim=-1, descending=True, stable=True)[:, :512].int()
+    for _ in range(8):
+        indexer.select_topk_indices(logits, lengths, indices)
+        torch.testing.assert_close(indices, expected, rtol=0, atol=0)
+
+
+def test_topk_float_order_and_padding(indexer):
+    near_one = torch.nextafter(torch.tensor(1.0), torch.tensor(float("inf"))).item()
+    values = torch.tensor([float("inf"), -0.0, 0.0, -float("inf"), 1.0, near_one, -1.0, -1e-30, 1e-30], device="cuda")
+    storage = torch.full((3, 16), float("nan"), device="cuda")
+    logits = storage[:, :9]
+    logits.copy_(values)
+    lengths = torch.tensor([9, 4, 0], device="cuda", dtype=torch.int32)
+    positions = torch.arange(9, device="cuda")[None, :]
+    logits.masked_fill_(positions >= lengths[:, None], float("nan"))
+    before = logits.clone()
+    indices = torch.empty((3, 7), device="cuda", dtype=torch.int32)
+    expected = logits.masked_fill(positions >= lengths[:, None], -float("inf"))
+    expected = expected.argsort(dim=-1, descending=True, stable=True)[:, :7].int()
+    expected.masked_fill_(torch.arange(7, device="cuda")[None, :] >= lengths[:, None], -1)
+    indexer.select_topk_indices(logits, lengths, indices)
+    torch.testing.assert_close(indices, expected, rtol=0, atol=0)
+    torch.testing.assert_close(logits, before, rtol=0, atol=0, equal_nan=True)

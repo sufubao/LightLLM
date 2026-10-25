@@ -4,7 +4,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 
 
-class CacheCoordinator:
+class RequestCacheManager:
     has_state_cache = False
     state_manager = None
     linear_state_manager = None
@@ -15,12 +15,12 @@ class CacheCoordinator:
 
     def bind_mem_manager(self, mem_manager):
         if self.mem_manager is not None and self.mem_manager is not mem_manager:
-            raise ValueError("CacheCoordinator is already bound to a different memory manager")
+            raise ValueError("RequestCacheManager is already bound to a different memory manager")
         self.mem_manager = mem_manager
 
     def validate_radix_cache(self, radix_cache):
         if radix_cache is not None and radix_cache.mem_manager is not self.mem_manager:
-            raise ValueError("Radix cache and coordinator must share the memory manager")
+            raise ValueError("Radix cache and request cache manager must share the memory manager")
 
     def create_state_transfer(self):
         return None
@@ -96,7 +96,7 @@ class CacheCoordinator:
         )
 
 
-class HybridCacheCoordinator(CacheCoordinator):
+class HybridRequestCacheManager(RequestCacheManager):
     """Coordinate KV prefix reuse and hybrid attention state checkpoints."""
 
     def __init__(self, linear_state_manager=None, indexer_state_manager=None, *, state_manager=None):
@@ -115,7 +115,7 @@ class HybridCacheCoordinator(CacheCoordinator):
         if self.mem_manager is mem_manager:
             return
         if self.mem_manager is not None:
-            raise ValueError("HybridCacheCoordinator is already bound to a different memory manager")
+            raise ValueError("HybridRequestCacheManager is already bound to a different memory manager")
         if self.has_state_cache:
             args = get_env_start_args()
             big_page_tokens = args.linear_att_page_block_num * args.linear_att_hash_page_size
@@ -141,7 +141,7 @@ class HybridCacheCoordinator(CacheCoordinator):
                 radix_cache.big_page_buffers is not self.big_page_buffers
                 or radix_cache.small_page_buffers is not self.small_page_buffers
             ):
-                raise ValueError("Radix cache and coordinator must share checkpoint pools")
+                raise ValueError("Radix cache and request cache manager must share checkpoint pools")
 
     def create_small_page_cache_manager(self, size):
         if self.small_page_buffers is not None:

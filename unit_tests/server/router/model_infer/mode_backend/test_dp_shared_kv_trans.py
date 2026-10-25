@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
-from lightllm.common.cache_coordinator import HybridCacheCoordinator
+from lightllm.common.request_cache_manager import HybridRequestCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.state_cache_manager.base import StateCacheManager
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -34,9 +34,9 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     state.conv_state = SimpleNamespace(buffer=torch.full((2, 4, 1, 4), -10.0, dtype=torch.float64))
     state.ssm_state = SimpleNamespace(buffer=torch.full((2, 12, 1, 1), -20.0, dtype=torch.float64))
     indexer = SimpleNamespace(state=SimpleNamespace(buffer=torch.full((2, 4, 2, 1), -30.0, dtype=torch.float64)))
-    coordinator = HybridCacheCoordinator(state, indexer)
-    coordinator.big_page_buffers = _CheckpointPool(4)
-    coordinator.small_page_buffers = _CheckpointPool(2)
+    cache_manager = HybridRequestCacheManager(state, indexer)
+    cache_manager.big_page_buffers = _CheckpointPool(4)
+    cache_manager.small_page_buffers = _CheckpointPool(2)
     tables = [torch.arange(96, dtype=torch.int32).reshape(4, 24) for _ in range(6)]
     tables[1] = torch.full((4, 24), -1, dtype=torch.int32)
     views = [SimpleNamespace(kv_buffer=torch.full((2, 128), -100.0)) for _ in range(6)]
@@ -68,8 +68,8 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     source_rows = [2, 3]
     for req_idx, local_len, restored_len, rank, row in zip([0, 2], prefixes, restored_lens, source_ranks, source_rows):
         tokens = list(range(1 + req_idx, restored_len + 8 + req_idx))
-        shared_slot = coordinator.big_page_buffers.alloc_one_state_cache()
-        coordinator.big_page_buffers.checkpoint_lens[shared_slot] = local_len
+        shared_slot = cache_manager.big_page_buffers.alloc_one_state_cache()
+        cache_manager.big_page_buffers.checkpoint_lens[shared_slot] = local_len
         req = SimpleNamespace(
             req_idx=req_idx,
             args=args,
@@ -101,7 +101,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
 
     pool_baselines = [
         (pool.get_used_cache_num(), pool.checkpoint_lens.copy())
-        for pool in (coordinator.big_page_buffers, coordinator.small_page_buffers)
+        for pool in (cache_manager.big_page_buffers, cache_manager.small_page_buffers)
     ]
     copies = []
 
@@ -117,7 +117,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     backend = SimpleNamespace(
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=SimpleNamespace(copy_kv_from_other_dp_ranks=copy_kv)),
-            cache_coordinator=coordinator,
+            request_cache_manager=cache_manager,
         ),
         dp_world_size=2,
         dp_size_in_node=3,
@@ -187,14 +187,14 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
             torch.testing.assert_close(actual, expected)
         allocate(req, req._kv_cache_alloc_need(len(tokens)))
         req.cur_kv_len = len(tokens)
-        big_slot = coordinator.big_page_buffers.alloc_one_state_cache()
-        small_slot = coordinator.small_page_buffers.alloc_one_state_cache()
+        big_slot = cache_manager.big_page_buffers.alloc_one_state_cache()
+        small_slot = cache_manager.small_page_buffers.alloc_one_state_cache()
         req.hybrid_len_to_big_page_id[restored_len + 4] = big_slot
         req.tail_small_page_buffer_id = small_slot
-        coordinator.big_page_buffers.checkpoint_lens[big_slot] = restored_len + 4
-        coordinator.small_page_buffers.checkpoint_lens[small_slot] = req.hybrid_cache_len
-        assert coordinator.get_cacheable_prefix_len(req, args) == local_len
-        released = coordinator.release_request_cache(
+        cache_manager.big_page_buffers.checkpoint_lens[big_slot] = restored_len + 4
+        cache_manager.small_page_buffers.checkpoint_lens[small_slot] = req.hybrid_cache_len
+        assert cache_manager.get_cacheable_prefix_len(req, args) == local_len
+        released = cache_manager.release_request_cache(
             req, SimpleNamespace(req_to_token_indexs=tables[1]), radix, args, True
         )
         freed.extend(torch.cat(released).tolist())
@@ -205,7 +205,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     radix.insert.assert_not_called()
     assert [call.args[0] for call in radix.dec_node_ref_counter.call_args_list] == held_nodes
     for pool, (used, checkpoint_lens) in zip(
-        (coordinator.big_page_buffers, coordinator.small_page_buffers), pool_baselines
+        (cache_manager.big_page_buffers, cache_manager.small_page_buffers), pool_baselines
     ):
         assert pool.get_used_cache_num() == used
         assert pool.checkpoint_lens == checkpoint_lens

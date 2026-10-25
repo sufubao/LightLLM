@@ -87,7 +87,7 @@ class MultiLevelKvCacheModule(object):
                 match_tokens = page_len_list[matched_page_num - 1]
                 cache_len = clamp_mm_cache_len(match_tokens, req.mm_input_spans)
                 if cache_len == match_tokens:
-                    valid_page_num = self.backend.model.cache_coordinator.get_cpu_cache_match_page_num(
+                    valid_page_num = self.backend.model.request_cache_manager.get_cpu_cache_match_page_num(
                         page_list[:matched_page_num], page_len_list[:matched_page_num], self.cpu_cache_client
                     )
                     if valid_page_num == matched_page_num:
@@ -149,7 +149,7 @@ class MultiLevelKvCacheModule(object):
                     idle_token_num -= need_token_num
                     req.cur_kv_len = req.cur_kv_len + need_token_num
 
-                    self.backend.model.cache_coordinator.load_cpu_cache_to_gpu(
+                    self.backend.model.request_cache_manager.load_cpu_cache_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
                         cpu_cache_client=self.cpu_cache_client,
@@ -249,7 +249,7 @@ class MultiLevelKvCacheModule(object):
                     req=req, move_block_size=move_block_size, page_len_list=page_len_list
                 )
 
-                cacheable_len = self.backend.model.cache_coordinator.get_cacheable_prefix_len(req, self.args)
+                cacheable_len = self.backend.model.request_cache_manager.get_cacheable_prefix_len(req, self.args)
                 move_block_size = min(move_block_size, bisect.bisect_right(page_len_list, cacheable_len))
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -296,7 +296,7 @@ class MultiLevelKvCacheModule(object):
             assert req.cur_kv_len >= move_token_num
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
-            self.backend.model.cache_coordinator.offload_gpu_kv_to_cpu_cache(
+            self.backend.model.request_cache_manager.offload_gpu_kv_to_cpu_cache(
                 mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,

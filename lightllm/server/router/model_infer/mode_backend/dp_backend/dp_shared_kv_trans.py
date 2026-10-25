@@ -126,7 +126,7 @@ class DPKVSharedMoudle:
 
         for trans_task in trans_tasks:
             restored_len = trans_task.req.cur_kv_len + len(trans_task.mem_indexes)
-            self.backend.model.cache_coordinator.restore_peer_state(
+            self.backend.model.request_cache_manager.restore_peer_state(
                 trans_task.req.req_idx,
                 restored_len,
                 self.backend.peer_states[trans_task.max_kv_len_mem_manager_index],

@@ -152,10 +152,10 @@ class ModeBackend:
                 f"--enable_dp_prompt_cache_fetch is not supported by {type(self.model.mem_manager).__name__}"
             )
         set_random_seed(2147483647)
-        self.is_hybrid_att_model = self.model.cache_coordinator.has_state_cache
+        self.is_hybrid_att_model = self.model.request_cache_manager.has_state_cache
 
         if self.is_hybrid_att_model:
-            self.small_page_buffers = self.model.cache_coordinator.create_small_page_cache_manager(
+            self.small_page_buffers = self.model.request_cache_manager.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size,
             )
         else:
@@ -172,7 +172,7 @@ class ModeBackend:
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
                     small_page_buffers=self.small_page_buffers,
-                    big_page_buffers=self.model.cache_coordinator.big_page_buffers,
+                    big_page_buffers=self.model.request_cache_manager.big_page_buffers,
                 )
             else:
                 self.radix_cache = RadixCache(
@@ -200,7 +200,7 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
             cache_placement_controller=cache_placement_controller,
-            cache_coordinator=self.model.cache_coordinator,
+            request_cache_manager=self.model.request_cache_manager,
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
@@ -228,7 +228,7 @@ class ModeBackend:
             self.kv_transfer_resources = KVTransferResources(
                 self.model.mem_manager.get_transfer_view(include_page_layout=self.is_pd_mode),
                 self.model.req_manager.req_to_token_indexs,
-                self.model.cache_coordinator.create_state_transfer(),
+                self.model.request_cache_manager.create_state_transfer(),
             )
             self.kv_transfer_resources.write_to_shm()
             dist.barrier(group=self.node_nccl_group)

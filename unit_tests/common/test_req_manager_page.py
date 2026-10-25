@@ -1,4 +1,4 @@
-from lightllm.common.cache_coordinator import HybridCacheCoordinator, CacheCoordinator
+from lightllm.common.request_cache_manager import HybridRequestCacheManager, RequestCacheManager
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -395,7 +395,7 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
 
 def test_page_size_one_frees_all_preallocated_indexes():
     infer_context = InferenceContext.__new__(InferenceContext)
-    infer_context.cache_coordinator = CacheCoordinator()
+    infer_context.request_cache_manager = RequestCacheManager()
     infer_context.args = SimpleNamespace(page_size=1)
     infer_context.radix_cache = None
     infer_context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(16, dtype=torch.int32)[None, :])
@@ -416,7 +416,7 @@ def test_page_size_one_frees_all_preallocated_indexes():
 
 def test_linear_attention_frees_reserved_page_tail(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
-    infer_context.cache_coordinator = CacheCoordinator()
+    infer_context.request_cache_manager = RequestCacheManager()
     infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
     infer_context.radix_cache = SimpleNamespace()
     infer_context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(16, dtype=torch.int32)[None, :])
@@ -434,7 +434,7 @@ def test_linear_attention_frees_reserved_page_tail(monkeypatch):
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: infer_context.args)
 
     free_token_indexes.extend(
-        HybridCacheCoordinator().release_request_cache(
+        HybridRequestCacheManager().release_request_cache(
             req, infer_context.req_manager, infer_context.radix_cache, infer_context.args, publish_cache=True
         )
     )
@@ -444,7 +444,7 @@ def test_linear_attention_frees_reserved_page_tail(monkeypatch):
 
 def test_linear_attention_frees_preallocated_pages_before_first_forward(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
-    infer_context.cache_coordinator = CacheCoordinator()
+    infer_context.request_cache_manager = RequestCacheManager()
     infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
     infer_context.radix_cache = SimpleNamespace()
     infer_context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32)[None, :])
@@ -462,7 +462,7 @@ def test_linear_attention_frees_preallocated_pages_before_first_forward(monkeypa
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: infer_context.args)
 
     free_token_indexes.extend(
-        HybridCacheCoordinator().release_request_cache(
+        HybridRequestCacheManager().release_request_cache(
             req, infer_context.req_manager, infer_context.radix_cache, infer_context.args, publish_cache=True
         )
     )
@@ -501,7 +501,7 @@ def _make_paused_req(req_idx, target_kv_len, page_size, match_kv_len=0, chunk_kv
 
 def test_recover_paused_reqs_uses_page_allocation_need(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
-    infer_context.cache_coordinator = CacheCoordinator()
+    infer_context.request_cache_manager = RequestCacheManager()
     infer_context.args = SimpleNamespace(page_size=4)
     infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
     infer_context.radix_cache = None
@@ -529,7 +529,7 @@ def test_recover_paused_reqs_uses_page_allocation_need(monkeypatch):
 
 def test_recover_paused_reqs_requires_capacity_for_the_full_sequence(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
-    infer_context.cache_coordinator = CacheCoordinator()
+    infer_context.request_cache_manager = RequestCacheManager()
     infer_context.args = SimpleNamespace(page_size=4)
     infer_context.radix_cache = None
     infer_context.req_manager = SimpleNamespace(
@@ -550,7 +550,7 @@ def test_recover_paused_reqs_requires_capacity_for_the_full_sequence(monkeypatch
 
 def test_recover_paused_reqs_accounts_for_rematched_prefix(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
-    infer_context.cache_coordinator = CacheCoordinator()
+    infer_context.request_cache_manager = RequestCacheManager()
     infer_context.args = SimpleNamespace(page_size=4)
     infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
     infer_context.get_can_alloc_token_num = lambda: 12

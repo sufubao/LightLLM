@@ -6,7 +6,7 @@ import torch
 
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.cache_coordinator import HybridCacheCoordinator
+from lightllm.common.request_cache_manager import HybridRequestCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.indexer_state import IndexerStateManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
@@ -80,7 +80,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     full_layers = config.get_full_att_kv_layer_num_with_draft_model()
     mem = Glm5NextMemManager(16, torch.bfloat16, 1, 584, full_layers)
     mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
-    req = HybridCacheCoordinator(LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step))
+    req = HybridRequestCacheManager(LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step))
     req.bind_mem_manager(mem)
     att_kv = mem.get_att_input_params(3)
     assert att_kv.shape == (17, 1, 512)

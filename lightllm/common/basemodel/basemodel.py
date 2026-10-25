@@ -16,7 +16,7 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.cache_coordinator import CacheCoordinator
+from lightllm.common.request_cache_manager import RequestCacheManager
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
@@ -116,13 +116,13 @@ class TpPartBaseModel:
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
             if getattr(self, "is_mtp_draft_model", False):
-                self.cache_coordinator = self.main_model.cache_coordinator
+                self.request_cache_manager = self.main_model.request_cache_manager
             else:
-                self._init_cache_coordinator()
+                self._init_request_cache_manager()
             self._init_mem_manager()
 
         self.req_manager.bind_mem_manager(self.mem_manager)
-        self.cache_coordinator.bind_mem_manager(self.mem_manager)
+        self.request_cache_manager.bind_mem_manager(self.mem_manager)
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -236,8 +236,8 @@ class TpPartBaseModel:
 
         return
 
-    def _init_cache_coordinator(self):
-        self.cache_coordinator = CacheCoordinator()
+    def _init_request_cache_manager(self):
+        self.request_cache_manager = RequestCacheManager()
 
     def _init_req_manager(self):
         create_max_seq_len = 0
@@ -386,9 +386,9 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
-        infer_state.state_manager = self.cache_coordinator.state_manager
-        infer_state.linear_state_manager = self.cache_coordinator.linear_state_manager
-        infer_state.indexer_state_manager = self.cache_coordinator.indexer_state_manager
+        infer_state.state_manager = self.request_cache_manager.state_manager
+        infer_state.linear_state_manager = self.request_cache_manager.linear_state_manager
+        infer_state.indexer_state_manager = self.request_cache_manager.indexer_state_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index

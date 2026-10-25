@@ -17,7 +17,7 @@ from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
 )
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.cache_coordinator import HybridCacheCoordinator
+from lightllm.common.request_cache_manager import HybridRequestCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
 
@@ -82,12 +82,12 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         )
         self.mem_manager.set_kv_layer_mapping(self.linear_config.get_full_att_kv_layer_mapping())
 
-    def _init_cache_coordinator(self):
+    def _init_request_cache_manager(self):
         if self.args.mtp_step > 0:
             assert self.args.enable_prefill_decode_mixed is False
         self.linear_config = LinearAttCacheConfig.from_model_config(self.config, self.args)
         state = LinearStateManager(self.max_req_num, self.linear_config, self.args)
-        self.cache_coordinator = HybridCacheCoordinator(linear_state_manager=state)
+        self.request_cache_manager = HybridRequestCacheManager(linear_state_manager=state)
 
     def _init_att_backend1(self):
         # MTP draft models only keep full-attention layers and reuse the main

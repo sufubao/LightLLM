@@ -1,4 +1,4 @@
-from lightllm.common.cache_coordinator import CacheCoordinator
+from lightllm.common.request_cache_manager import RequestCacheManager
 from types import SimpleNamespace
 
 import pytest
@@ -83,17 +83,17 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
         small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7, checkpoint_lens=[None] * 8),
         free_one_small_page_buffer=lambda: None,
     )
-    from lightllm.common.cache_coordinator import HybridCacheCoordinator
+    from lightllm.common.request_cache_manager import HybridRequestCacheManager
 
-    context.cache_coordinator = HybridCacheCoordinator(
+    context.request_cache_manager = HybridRequestCacheManager(
         state_manager=SimpleNamespace(
             capture_intermediate_checkpoints=False,
             save_checkpoints=lambda req_idx, reqs, slots, pool, lengths: big_snapshots.extend(lengths),
             save_state=lambda req_idx, slot, pool, length: small_snapshots.append(length),
         )
     )
-    context.cache_coordinator.big_page_buffers = context.radix_cache.big_page_buffers
-    context.cache_coordinator.small_page_buffers = context.radix_cache.small_page_buffers
+    context.request_cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
+    context.request_cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
 
     while req.cur_kv_len < req.get_cur_total_len():
         context.save_cache_state(torch.tensor([0]), [req])
@@ -146,7 +146,7 @@ def test_full_attention_gpu_restore_stays_outside_image(
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
-    monkeypatch.setattr(g_infer_context, "cache_coordinator", CacheCoordinator())
+    monkeypatch.setattr(g_infer_context, "request_cache_manager", RequestCacheManager())
     req._match_radix_cache()
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
@@ -291,7 +291,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             ),
         ),
     )
-    module.backend.model.cache_coordinator = module.backend.model.mem_manager.operator
+    module.backend.model.request_cache_manager = module.backend.model.mem_manager.operator
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False

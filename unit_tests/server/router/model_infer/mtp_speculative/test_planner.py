@@ -202,15 +202,15 @@ def test_mode_proposals_own_their_schedule_metadata():
 
 @pytest.mark.parametrize("has_state", [False, True])
 def test_verify_mtp_state_provider(monkeypatch, has_state):
-    from lightllm.common.cache_coordinator import CacheCoordinator, HybridCacheCoordinator
+    from lightllm.common.request_cache_manager import RequestCacheManager, HybridRequestCacheManager
 
     commit_args = {}
     state = SimpleNamespace(commit_accepted_state=lambda **kwargs: commit_args.update(kwargs))
-    coordinator = HybridCacheCoordinator(state_manager=state) if has_state else CacheCoordinator()
+    cache_manager = HybridRequestCacheManager(state_manager=state) if has_state else RequestCacheManager()
     backend = SimpleNamespace(
         max_draft_step=1,
         model=SimpleNamespace(
-            cache_coordinator=coordinator,
+            request_cache_manager=cache_manager,
             req_manager=SimpleNamespace(req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=None)),
         ),
     )

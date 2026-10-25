@@ -1,4 +1,4 @@
-from lightllm.common.cache_coordinator import HybridCacheCoordinator, CacheCoordinator
+from lightllm.common.request_cache_manager import HybridRequestCacheManager, RequestCacheManager
 from types import SimpleNamespace
 from collections import deque
 
@@ -50,7 +50,7 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     free_token_indexes = []
 
     free_token_indexes.extend(
-        CacheCoordinator().release_request_cache(req, context.req_manager, context.radix_cache, None, False)
+        RequestCacheManager().release_request_cache(req, context.req_manager, context.radix_cache, None, False)
     )
 
     assert free_token_indexes[0].tolist() == [12, 13, 14, 15, 16]
@@ -65,7 +65,7 @@ def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
     inserted_reqs = []
     context.req_manager = None
     context.args = None
-    context.cache_coordinator = SimpleNamespace(
+    context.request_cache_manager = SimpleNamespace(
         release_request_cache=lambda req, *args, **kwargs: inserted_reqs.append(req) or []
     )
     req = SimpleNamespace(
@@ -161,11 +161,11 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages(with_radix):
     )
     free_token_indexes = []
 
-    coordinator = HybridCacheCoordinator()
-    coordinator.bind_mem_manager(context.radix_cache)
-    coordinator.small_page_buffers = context.radix_cache.small_page_buffers
-    coordinator.big_page_buffers = context.radix_cache.big_page_buffers
-    context.cache_coordinator = coordinator
+    cache_manager = HybridRequestCacheManager()
+    cache_manager.bind_mem_manager(context.radix_cache)
+    cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
+    cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
+    context.request_cache_manager = cache_manager
     context.args = None
     if not with_radix:
         context.radix_cache = None
@@ -204,15 +204,15 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
     operator = SimpleNamespace(
         load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist()),
     )
-    coordinator = CacheCoordinator() if checkpoint_len == "full" else HybridCacheCoordinator()
-    coordinator.cpu_cache_transfer = SimpleNamespace(get_checkpoint_lens=lambda *args: [checkpoint_len])
-    coordinator.load_cpu_cache_to_gpu = operator.load_cpu_cache_to_gpu
+    cache_manager = RequestCacheManager() if checkpoint_len == "full" else HybridRequestCacheManager()
+    cache_manager.cpu_cache_transfer = SimpleNamespace(get_checkpoint_lens=lambda *args: [checkpoint_len])
+    cache_manager.load_cpu_cache_to_gpu = operator.load_cpu_cache_to_gpu
     backend = SimpleNamespace(
         is_master_in_dp=False,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),
-            cache_coordinator=coordinator,
+            request_cache_manager=cache_manager,
             req_manager=SimpleNamespace(req_to_token_indexs=table),
         ),
         _alloc_req_kv_mem=alloc_req_kv_mem,

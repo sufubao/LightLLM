@@ -7,7 +7,7 @@ import torch
 
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.cache_coordinator import HybridCacheCoordinator
+from lightllm.common.request_cache_manager import HybridRequestCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -62,10 +62,10 @@ def linear_cache(monkeypatch, tmp_path, request):
     mem = MemoryManager(384, torch.bfloat16, 1, 8, 1)
     mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
     requests = ReqManager(2, 512, mem)
-    coordinator = HybridCacheCoordinator(LinearStateManager(2, config, args))
-    coordinator.bind_mem_manager(mem)
-    coordinator.create_small_page_cache_manager(2)
-    monkeypatch.setattr(g_infer_context, "cache_coordinator", None)
+    cache_manager = HybridRequestCacheManager(LinearStateManager(2, config, args))
+    cache_manager.bind_mem_manager(mem)
+    cache_manager.create_small_page_cache_manager(2)
+    monkeypatch.setattr(g_infer_context, "request_cache_manager", None)
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(g_infer_context, "req_manager", requests)
     monkeypatch.setattr(
@@ -74,10 +74,10 @@ def linear_cache(monkeypatch, tmp_path, request):
         SimpleNamespace(
             get_big_page_ids_by_node=lambda node: [],
             free_one_small_page_buffer=lambda: None,
-            small_page_buffers=coordinator.small_page_buffers,
+            small_page_buffers=cache_manager.small_page_buffers,
         ),
     )
-    yield mem, requests, coordinator, config
+    yield mem, requests, cache_manager, config
     get_env_start_args.cache_clear()
     get_unique_server_name.cache_clear()
 
@@ -90,10 +90,10 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
     from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 
-    mem, requests, coordinator, config = linear_cache
+    mem, requests, cache_manager, config = linear_cache
     disable_chunked_mm_input = get_env_start_args().disable_chunked_mm_input
     first_page_has_state = not disable_chunked_mm_input
-    big = coordinator.big_page_buffers
+    big = cache_manager.big_page_buffers
     big_states = {}
     for end in range(128, token_num + 1, 128):
         slot = big.alloc_one_state_cache()
@@ -104,11 +104,11 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
             tensor.normal_()
     tail_slot = None
     if token_num % 128:
-        tail_slot = coordinator.small_page_buffers.alloc_one_state_cache()
-        coordinator.small_page_buffers.checkpoint_lens[tail_slot] = token_num
-        for tensor in coordinator.small_page_buffers.get_state_cache(tail_slot):
+        tail_slot = cache_manager.small_page_buffers.alloc_one_state_cache()
+        cache_manager.small_page_buffers.checkpoint_lens[tail_slot] = token_num
+        for tensor in cache_manager.small_page_buffers.get_state_cache(tail_slot):
             tensor.normal_()
-        final_states = coordinator.small_page_buffers.get_state_cache(tail_slot)
+        final_states = cache_manager.small_page_buffers.get_state_cache(tail_slot)
     else:
         final_states = big.get_state_cache(big_states[token_num])
     expected_states = [tensor.clone() for tensor in final_states]
@@ -139,7 +139,7 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
         ),
     )
 
-    coordinator.offload_gpu_kv_to_cpu_cache(
+    cache_manager.offload_gpu_kv_to_cpu_cache(
         indexes, page_ids, torch.zeros_like(page_ids), client, req, g_infer_context.radix_cache
     )
     torch.cuda.synchronize()
@@ -148,7 +148,7 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     client.update_pages_status_to_ready(pages, deref=False)
     big.free_state_cache(list(big_states.values()))
     if tail_slot is not None:
-        coordinator.small_page_buffers.free_state_cache([tail_slot])
+        cache_manager.small_page_buffers.free_state_cache([tail_slot])
     req.hybrid_len_to_big_page_id = {}
     req.tail_small_page_buffer_id = None
     req.cur_kv_len = req.hold_kv_len = 0
@@ -166,7 +166,7 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         _alloc_req_kv_mem=allocate,
-        model=SimpleNamespace(mem_manager=mem, req_manager=requests, cache_coordinator=coordinator),
+        model=SimpleNamespace(mem_manager=mem, req_manager=requests, request_cache_manager=cache_manager),
     )
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
@@ -182,11 +182,13 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
         assert big.has_checkpoint(slot, end) == (end != 128 or first_page_has_state)
         for actual, expected in zip(big.get_state_cache(slot), expected_big_states[end]):
             torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(coordinator.linear_state_manager.conv_state.buffer[:, 0].cpu(), expected_states[0])
-    torch.testing.assert_close(coordinator.linear_state_manager.ssm_state.buffer[:, 0].cpu(), expected_states[1])
+    torch.testing.assert_close(cache_manager.linear_state_manager.conv_state.buffer[:, 0].cpu(), expected_states[0])
+    torch.testing.assert_close(cache_manager.linear_state_manager.ssm_state.buffer[:, 0].cpu(), expected_states[1])
 
     # Loaded intermediate pages must remain unusable as radix restore points.
-    tree = HybridAttPagedRadixCache(384, 103, 64, 2, mem, coordinator.small_page_buffers, coordinator.big_page_buffers)
+    tree = HybridAttPagedRadixCache(
+        384, 103, 64, 2, mem, cache_manager.small_page_buffers, cache_manager.big_page_buffers
+    )
     cache_len = max(req.hybrid_len_to_big_page_id)
     tree.insert(
         torch.arange(cache_len),
@@ -215,19 +217,19 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
     from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 
-    mem, requests, coordinator, config = linear_cache
+    mem, requests, cache_manager, config = linear_cache
     client = cpu_cache_factory(
         CpuKVCacheMeta(4, 1, 1, 1, config.get_cpu_cache_big_page_bytes(), torch.uint8, 0, torch.uint8),
     )
     reqs, expected = [], []
     for index in range(2):
-        big_slot = coordinator.big_page_buffers.alloc_one_state_cache()
-        small_slot = coordinator.small_page_buffers.alloc_one_state_cache()
-        coordinator.big_page_buffers.checkpoint_lens[big_slot] = 128
-        coordinator.small_page_buffers.checkpoint_lens[small_slot] = 192
-        for state in coordinator.big_page_buffers.get_state_cache(big_slot):
+        big_slot = cache_manager.big_page_buffers.alloc_one_state_cache()
+        small_slot = cache_manager.small_page_buffers.alloc_one_state_cache()
+        cache_manager.big_page_buffers.checkpoint_lens[big_slot] = 128
+        cache_manager.small_page_buffers.checkpoint_lens[small_slot] = 192
+        for state in cache_manager.big_page_buffers.get_state_cache(big_slot):
             state.fill_(index + 10)
-        states = coordinator.small_page_buffers.get_state_cache(small_slot)
+        states = cache_manager.small_page_buffers.get_state_cache(small_slot)
         for state in states:
             state.fill_(index + 1)
         expected.append([state.clone() for state in states])
@@ -252,13 +254,13 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
         indexes = torch.arange(index * 192, (index + 1) * 192, dtype=torch.int32, device="cuda")
         mem.kv_buffer[:, index * 192 : (index + 1) * 192].fill_(index + 1)
         page_ids = torch.tensor(pages, dtype=torch.int32, device="cuda")
-        coordinator.offload_gpu_kv_to_cpu_cache(
+        cache_manager.offload_gpu_kv_to_cpu_cache(
             indexes, page_ids, torch.zeros_like(page_ids), client, req, g_infer_context.radix_cache
         )
         torch.cuda.synchronize()
         client.update_pages_status_to_ready(pages, deref=False)
-        coordinator.big_page_buffers.free_state_cache([big_slot])
-        coordinator.small_page_buffers.free_state_cache([small_slot])
+        cache_manager.big_page_buffers.free_state_cache([big_slot])
+        cache_manager.small_page_buffers.free_state_cache([small_slot])
         req.hybrid_len_to_big_page_id = {}
         req.tail_small_page_buffer_id = None
         req.cur_kv_len = req.hold_kv_len = 0
@@ -278,31 +280,31 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         _alloc_req_kv_mem=allocate,
-        model=SimpleNamespace(mem_manager=mem, req_manager=requests, cache_coordinator=coordinator),
+        model=SimpleNamespace(mem_manager=mem, req_manager=requests, request_cache_manager=cache_manager),
     )
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 384)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     events = []
-    load = coordinator.load_cpu_cache_to_gpu
-    restore = coordinator.restore_state
+    load = cache_manager.load_cpu_cache_to_gpu
+    restore = cache_manager.restore_state
 
     def track_load(**kwargs):
         events.append(("copy", kwargs["req"].req_idx))
         assert load(**kwargs) is None
 
     def track_restore(req_idx, pool, slot, restored_len=None):
-        assert slot == coordinator.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID
+        assert slot == cache_manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID
         events.append(("restore", req_idx))
         restore(req_idx, pool, slot, restored_len)
 
-    monkeypatch.setattr(coordinator, "load_cpu_cache_to_gpu", track_load)
-    monkeypatch.setattr(coordinator, "restore_state", track_restore)
+    monkeypatch.setattr(cache_manager, "load_cpu_cache_to_gpu", track_load)
+    monkeypatch.setattr(cache_manager, "restore_state", track_restore)
     module.load_cpu_cache_to_reqs(reqs)
     assert events == [("copy", 0), ("restore", 0), ("copy", 1), ("restore", 1)]
     for index, req in enumerate(reqs):
-        state = coordinator.linear_state_manager
+        state = cache_manager.linear_state_manager
         torch.testing.assert_close(state.conv_state.buffer[:, req.req_idx].cpu(), expected[index][0])
         torch.testing.assert_close(state.ssm_state.buffer[:, req.req_idx].cpu(), expected[index][1])
         assert req.cur_kv_len == req.hold_kv_len == 192
@@ -313,14 +315,14 @@ def test_ipc_export_keeps_checkpoints_pinned_and_state_separate(linear_cache):
     from multiprocessing.reduction import ForkingPickler
     from lightllm.common.kv_transfer_resources import KVTransferResources, KVTransferView
 
-    mem, requests, coordinator, _ = linear_cache
-    pools = (coordinator.big_page_buffers, coordinator.small_page_buffers)
+    mem, requests, cache_manager, _ = linear_cache
+    pools = (cache_manager.big_page_buffers, cache_manager.small_page_buffers)
     tensors = [tensor for pool in pools for tensor in (pool.conv_state_cache.buffer, pool.ssm_state_cache.buffer)]
     pointers = [tensor.data_ptr() for tensor in tensors]
     assert all(tensor.is_pinned() for tensor in tensors)
     mem.unrelated_resource = lambda: None
     resources = KVTransferResources(
-        KVTransferView.from_mem_manager(mem), requests.req_to_token_indexs, coordinator.create_state_transfer()
+        KVTransferView.from_mem_manager(mem), requests.req_to_token_indexs, cache_manager.create_state_transfer()
     )
     assert len(ForkingPickler.dumps(resources)) > 0
     assert all(tensor.is_pinned() for tensor in tensors)
@@ -333,5 +335,5 @@ def test_ipc_export_keeps_checkpoints_pinned_and_state_separate(linear_cache):
     assert resources.req_to_token_indexes.data_ptr() == requests.req_to_token_indexs.data_ptr()
     assert (
         resources.state_transfer.req_to_ssm_state.buffer.data_ptr()
-        == coordinator.linear_state_manager.ssm_state.buffer.data_ptr()
+        == cache_manager.linear_state_manager.ssm_state.buffer.data_ptr()
     )

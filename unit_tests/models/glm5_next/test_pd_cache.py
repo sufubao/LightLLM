@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager, MemoryManager
-from lightllm.common.cache_coordinator import HybridCacheCoordinator
+from lightllm.common.request_cache_manager import HybridRequestCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.indexer_state import IndexerStateManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
@@ -61,15 +61,15 @@ def make_mems(monkeypatch, request):
         for _ in range(tp):
             mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0))
             mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
-            coordinator = HybridCacheCoordinator(
+            cache_manager = HybridRequestCacheManager(
                 LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step)
             )
-            coordinator.bind_mem_manager(mem)
+            cache_manager.bind_mem_manager(mem)
             assert not hasattr(mem, "req_to_conv_state")
             assert not hasattr(mem, "req_to_ssm_state")
             assert not hasattr(mem, "req_to_indexer_tail")
             assert not hasattr(mem, "big_page_buffers")
-            states.append(coordinator.create_state_transfer())
+            states.append(cache_manager.create_state_transfer())
             mems.append(mem)
         transfer = KVPageTransfer(KVTransferView.from_mem_manager(mems[0], include_page_layout=True))
         transfer.alloc_paged_kv_move_buffer(1, 2048)

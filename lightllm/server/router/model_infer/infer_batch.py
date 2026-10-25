@@ -9,7 +9,7 @@ from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.cache_coordinator import CacheCoordinator
+from lightllm.common.request_cache_manager import RequestCacheManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -40,7 +40,7 @@ logger = init_logger(__name__)
 class InferenceContext:
     backend: Optional["ModeBackend"] = None
     req_manager: ReqManager = None  # gpu 请求管理
-    cache_coordinator: Optional[CacheCoordinator] = None
+    request_cache_manager: Optional[RequestCacheManager] = None
     radix_cache: Union[HybridAttPagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
     requests_mapping: Dict[int, "InferReq"] = None
@@ -61,16 +61,16 @@ class InferenceContext:
         radix_cache: Union[HybridAttPagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
-        cache_coordinator: CacheCoordinator,
+        request_cache_manager: RequestCacheManager,
         cache_placement_controller: Optional[CachePlacementController] = None,
     ):
         self.args = get_env_start_args()
         self.backend: ModeBackend = backend
         self.req_manager = req_manager
-        self.cache_coordinator = cache_coordinator
-        if cache_coordinator.mem_manager is not req_manager.mem_manager:
-            raise ValueError("Request manager and coordinator must share the memory manager")
-        cache_coordinator.validate_radix_cache(radix_cache)
+        self.request_cache_manager = request_cache_manager
+        if request_cache_manager.mem_manager is not req_manager.mem_manager:
+            raise ValueError("Request manager and request cache manager must share the memory manager")
+        request_cache_manager.validate_radix_cache(radix_cache)
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager
         self.radix_cache = radix_cache
         self.shm_req_manager = shm_req_manager
@@ -81,7 +81,7 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.is_hybrid_att_model = self.cache_coordinator.has_state_cache
+        self.is_hybrid_att_model = self.request_cache_manager.has_state_cache
         self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
@@ -160,7 +160,7 @@ class InferenceContext:
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         free_token_index.extend(
-            self.cache_coordinator.release_request_cache(
+            self.request_cache_manager.release_request_cache(
                 req,
                 self.req_manager,
                 self.radix_cache,
@@ -288,7 +288,7 @@ class InferenceContext:
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
     def save_cache_state(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
-        self.cache_coordinator.save_state_cache(b_req_idx, reqs, self.radix_cache, self.args)
+        self.request_cache_manager.save_state_cache(b_req_idx, reqs, self.radix_cache, self.args)
 
 
 g_infer_context = InferenceContext()
@@ -461,7 +461,9 @@ class InferReq:
         return
 
     def _match_radix_cache(self):
-        g_infer_context.cache_coordinator.restore_prefix(self, g_infer_context.req_manager, g_infer_context.radix_cache)
+        g_infer_context.request_cache_manager.restore_prefix(
+            self, g_infer_context.req_manager, g_infer_context.radix_cache
+        )
 
     def is_master_req(self):
         """

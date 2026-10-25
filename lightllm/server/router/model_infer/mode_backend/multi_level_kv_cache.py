@@ -40,6 +40,7 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
+        self.backend.model.request_cache_manager.bind_cpu_cache_client(self.cpu_cache_client)
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -62,7 +63,7 @@ class MultiLevelKvCacheModule(object):
         return False
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
-        idle_token_num = g_infer_context.get_can_alloc_token_num()
+        idle_token_num = g_infer_context.request_cache_manager.get_available_token_num()
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
@@ -88,7 +89,7 @@ class MultiLevelKvCacheModule(object):
                 cache_len = clamp_mm_cache_len(match_tokens, req.mm_input_spans)
                 if cache_len == match_tokens:
                     valid_page_num = self.backend.model.request_cache_manager.get_cpu_cache_match_page_num(
-                        page_list[:matched_page_num], page_len_list[:matched_page_num], self.cpu_cache_client
+                        page_list[:matched_page_num], page_len_list[:matched_page_num]
                     )
                     if valid_page_num == matched_page_num:
                         break
@@ -119,7 +120,7 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= matched_page_num
                     need_pages = page_list[ready_page_num:matched_page_num]
 
-                    mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
+                    mem_indexes = self.backend.model.request_cache_manager.alloc_req_kv(req, need_token_num)
                     assert mem_indexes is not None
 
                     if self.need_sync_compute_stream():
@@ -152,7 +153,6 @@ class MultiLevelKvCacheModule(object):
                     self.backend.model.request_cache_manager.load_cpu_cache_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
-                        cpu_cache_client=self.cpu_cache_client,
                         req=req,
                         page_indexes_cpu=need_pages,
                     )
@@ -249,7 +249,7 @@ class MultiLevelKvCacheModule(object):
                     req=req, move_block_size=move_block_size, page_len_list=page_len_list
                 )
 
-                cacheable_len = self.backend.model.request_cache_manager.get_cacheable_prefix_len(req, self.args)
+                cacheable_len = self.backend.model.request_cache_manager.get_cacheable_prefix_len(req)
                 move_block_size = min(move_block_size, bisect.bisect_right(page_len_list, cacheable_len))
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -300,8 +300,6 @@ class MultiLevelKvCacheModule(object):
                 mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,
-                radix_cache=self.backend.radix_cache,
-                cpu_cache_client=self.cpu_cache_client,
                 req=req,
                 page_indexes_cpu=page_list,
                 page_readies_cpu=ready_list,

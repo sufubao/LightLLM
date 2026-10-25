@@ -48,11 +48,13 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
         patch.object(xgr.TokenizerInfo, "from_huggingface", return_value=tokenizer_info) as build_tokenizer_info,
         patch.object(xgr, "GrammarCompiler", side_effect=AssertionError("Inference must not compile")),
     ):
+        table = torch.empty((1, 1), dtype=torch.int32)
+        cache_manager = HybridRequestCacheManager(args)
+        cache_manager.bind_context(table, None)
         context.register(
             backend=SimpleNamespace(dp_rank_in_node=0),
-            req_manager=SimpleNamespace(req_sampling_params_manager=None, mem_manager=None),
-            request_cache_manager=HybridRequestCacheManager(),
-            radix_cache=None,
+            req_manager=SimpleNamespace(req_sampling_params_manager=None, req_to_token_indexs=table),
+            request_cache_manager=cache_manager,
             shm_req_manager=None,
             vocab_size=257,
         )
@@ -171,7 +173,7 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
         lambda: SimpleNamespace(diverse_mode=False, mtp_step=0, disable_chunked_mm_input=False),
     )
     context = infer_batch.InferenceContext(
-        request_cache_manager=RequestCacheManager(),
+        request_cache_manager=RequestCacheManager(SimpleNamespace()),
         req_manager=SimpleNamespace(
             alloc=count().__next__,
             req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None),
@@ -254,7 +256,9 @@ def test_constraint_state_lifetime_follows_request_cleanup(compiler):
     context.infer_req_ids = [1]
     context.args = SimpleNamespace(diverse_mode=False)
     context.backend = SimpleNamespace(is_master_in_dp=False)
-    context.free_a_req_mem = lambda *args: None
+    context.request_cache_manager = SimpleNamespace(
+        release_request_caches=lambda reqs: None, log_cache_stats=lambda: None
+    )
 
     context._filter([1], modify_shm_finish_state=False)
     assert context.requests_mapping == {} and context.infer_req_ids == []

@@ -69,6 +69,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         if self.args.mtp_step > 0:
             assert self.args.enable_prefill_decode_mixed is False
         self.request_cache_manager = HybridRequestCacheManager(
+            self.args,
             linear_state_manager=LinearStateManager(self.max_req_num, self.linear_config, self.args),
             indexer_state_manager=IndexerStateManager(self.max_req_num, self.linear_config, self.args.mtp_step),
         )

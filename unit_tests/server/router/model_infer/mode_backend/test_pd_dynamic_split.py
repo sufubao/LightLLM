@@ -52,7 +52,9 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
     backend.prefill_queue_strategy = SimpleNamespace(reorder=MagicMock(side_effect=lambda reqs, **kwargs: reqs))
 
     infer_context = base_backend.g_infer_context
-    monkeypatch.setattr(infer_context, "get_can_alloc_token_num", MagicMock(return_value=0))
+    monkeypatch.setattr(
+        infer_context, "request_cache_manager", SimpleNamespace(get_available_token_num=MagicMock(return_value=0))
+    )
     monkeypatch.setattr(
         infer_context,
         "cache_placement_controller",

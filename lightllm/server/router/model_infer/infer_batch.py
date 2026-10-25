@@ -1,6 +1,5 @@
 import enum
 import torch
-import torch.distributed as dist
 import numpy as np
 import collections
 import pickle
@@ -12,15 +11,13 @@ from lightllm.common.req_manager import ReqManager
 from lightllm.common.request_cache_manager import RequestCacheManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
+from lightllm.server.router.dynamic_prompt.radix_cache import TreeNode
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
-    HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
@@ -41,7 +38,6 @@ class InferenceContext:
     backend: Optional["ModeBackend"] = None
     req_manager: ReqManager = None  # gpu 请求管理
     request_cache_manager: Optional[RequestCacheManager] = None
-    radix_cache: Union[HybridAttPagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
     requests_mapping: Dict[int, "InferReq"] = None
     infer_req_ids = None
@@ -58,21 +54,18 @@ class InferenceContext:
         self,
         backend: "ModeBackend",
         req_manager: ReqManager,
-        radix_cache: Union[HybridAttPagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
         request_cache_manager: RequestCacheManager,
         cache_placement_controller: Optional[CachePlacementController] = None,
     ):
-        self.args = get_env_start_args()
+        self.args = request_cache_manager.args
         self.backend: ModeBackend = backend
         self.req_manager = req_manager
         self.request_cache_manager = request_cache_manager
-        if request_cache_manager.mem_manager is not req_manager.mem_manager:
-            raise ValueError("Request manager and request cache manager must share the memory manager")
-        request_cache_manager.validate_radix_cache(radix_cache)
+        if request_cache_manager.req_to_token_indexs is not req_manager.req_to_token_indexs:
+            raise ValueError("Request manager and cache manager must share the request index table")
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager
-        self.radix_cache = radix_cache
         self.shm_req_manager = shm_req_manager
         self.cache_placement_controller = cache_placement_controller
 
@@ -158,77 +151,30 @@ class InferenceContext:
 
         return req_objs
 
-    def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
-        free_token_index.extend(
-            self.request_cache_manager.release_request_cache(
-                req,
-                self.req_manager,
-                self.radix_cache,
-                self.args,
-                publish_cache=self.radix_cache is not None and CacheTier.GPU in req.cache_tiers,
-            )
-        )
-        req.cur_kv_len = req.hold_kv_len = 0
-        req.shm_req.shm_cur_kv_len = 0
-
-    def _save_promptcache_kvbuffer(self):
-        """
-        save prompt cache kv buffer
-        这个接口是用于保存非量化的缓存prompt cache资源，是定制场景使用的接口，当前代码中不会有调用。
-        其保存的 kv 会配合量化推理模式, 加载到量化推理的prompt cache中, 提升量化推理的精度。
-        like paper:
-        https://arxiv.org/abs/2403.01241
-        """
-        prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
-        print(f"prompt_cache_token_id : {prompt_cache_token_id}")
-        index = range(len(prompt_cache_token_id))
-        prompt_cache_kv_buffer = self.radix_cache.mem_manager.get_index_kv_buffer(index)
-        torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
-
     @torch.no_grad()
     def _filter(self, finished_request_ids: List[int], modify_shm_finish_state: bool = True):
-        if len(finished_request_ids) == 0:
+        if not finished_request_ids:
             return
-
         should_modify_shm = modify_shm_finish_state and self.backend.is_master_in_dp
-
-        free_req_index = []
-        free_token_index = []
-        for request_id in finished_request_ids:
-            req: InferReq = self.requests_mapping.pop(request_id)
+        reqs = [self.requests_mapping[req_id] for req_id in finished_request_ids]
+        for req in reqs:
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
-
             if should_modify_shm:
                 req.final_token_metadata.dump()
-
-            self.free_a_req_mem(free_token_index, req)
-
-            free_req_index.append(req.req_idx)
-            # logger.info(f"infer release req id {req.shm_req.request_id}")
+        self.request_cache_manager.release_request_caches(reqs)
+        self.req_manager.free([req.req_idx for req in reqs])
+        for req_id, req in zip(finished_request_ids, reqs):
+            self.requests_mapping.pop(req_id)
             if should_modify_shm:
                 # 释放前兜底：已正常 finished 则 no-op；否则补 finish token 并标 ABORTED。
                 req.mark_shm_aborted_finished()
                 req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
-
-        if free_token_index:
-            free_token_index = custom_cat(free_token_index)
-        self.req_manager.free(free_req_index, free_token_index)
-
-        finished_req_ids_set = set(finished_request_ids)
-        self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
-
-        if self.radix_cache is not None and len(self.infer_req_ids) == 0:
-            logger.debug(
-                f"free a batch state:\n"
-                f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
-                f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
-                f"mem manager can alloc token num {self.req_manager.mem_manager.allocator.can_use_mem_size}\n"
-                f"mem manager total size {self.req_manager.mem_manager.allocator.size}\n"
-            )
-
-        return
+        finished = set(finished_request_ids)
+        self.infer_req_ids = [req_id for req_id in self.infer_req_ids if req_id not in finished]
+        if not self.infer_req_ids:
+            self.request_cache_manager.log_cache_stats()
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):
         if finished_reqs:
@@ -238,29 +184,24 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
-            free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self.free_a_req_mem(free_token_index, req)
+            self.request_cache_manager.release_request_caches(pause_reqs)
+            for req in pause_reqs:
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True
                 if is_master_in_dp:
                     req.shm_req.is_paused = True
                     logger.debug(f"infer paused req id {req.req_id}")
-
-            if len(free_token_index) != 0:
-                free_token_index = custom_cat(free_token_index)
-                self.req_manager.free_token(free_token_index)
         return self
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
-            can_alloc_token_num = self.get_can_alloc_token_num()
+            can_alloc_token_num = self.request_cache_manager.get_available_token_num()
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
@@ -269,7 +210,7 @@ class InferenceContext:
                 if alloc_token_num > can_alloc_token_num:
                     break
 
-                req._match_radix_cache()
+                self.request_cache_manager.restore_prefix(req)
 
                 assert req.paused is True
                 req.paused = False
@@ -278,17 +219,6 @@ class InferenceContext:
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= alloc_token_num
         return
-
-    def get_can_alloc_token_num(self):
-        radix_cache_unref_token_num = 0
-        if self.radix_cache is not None:
-            radix_cache_unref_token_num = (
-                self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
-            )
-        return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
-
-    def save_cache_state(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
-        self.request_cache_manager.save_state_cache(b_req_idx, reqs, self.radix_cache, self.args)
 
 
 g_infer_context = InferenceContext()
@@ -419,7 +349,7 @@ class InferReq:
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:
-            self._match_radix_cache()
+            g_infer_context.request_cache_manager.restore_prefix(self)
         return
 
     def _init_all_state(self):
@@ -459,11 +389,6 @@ class InferReq:
             self.hybrid_len_to_big_page_id = SortedDict()
 
         return
-
-    def _match_radix_cache(self):
-        g_infer_context.request_cache_manager.restore_prefix(
-            self, g_infer_context.req_manager, g_infer_context.radix_cache
-        )
 
     def is_master_req(self):
         """

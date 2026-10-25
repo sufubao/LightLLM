@@ -62,7 +62,7 @@ def make_mems(monkeypatch, request):
             mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0))
             mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
             cache_manager = HybridRequestCacheManager(
-                LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step)
+                args, LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step)
             )
             cache_manager.bind_mem_manager(mem)
             assert not hasattr(mem, "req_to_conv_state")

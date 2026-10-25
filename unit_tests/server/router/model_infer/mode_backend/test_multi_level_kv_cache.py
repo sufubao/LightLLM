@@ -49,34 +49,40 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
     free_token_indexes = []
 
-    free_token_indexes.extend(
-        RequestCacheManager().release_request_cache(req, context.req_manager, context.radix_cache, None, False)
-    )
+    cache_manager = RequestCacheManager(SimpleNamespace())
+    cache_manager.args = None
+    cache_manager.req_to_token_indexs = context.req_manager.req_to_token_indexs
+    cache_manager.radix_cache = context.radix_cache
+    req.cache_tiers = (CacheTier.GPU,) if False else ()
+    free_token_indexes.extend(cache_manager._release_request_cache(req))
 
     assert free_token_indexes[0].tolist() == [12, 13, 14, 15, 16]
     assert released_refs == [shared_node]
     assert req.shared_kv_node is None
 
 
-def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
-    context = InferenceContext()
-    context.radix_cache = object()
-    context.is_hybrid_att_model = False
-    inserted_reqs = []
-    context.req_manager = None
-    context.args = None
-    context.request_cache_manager = SimpleNamespace(
-        release_request_cache=lambda req, *args, **kwargs: inserted_reqs.append(req) or []
-    )
+def test_legacy_cache_tiers_still_insert_gpu_radix_cache(monkeypatch):
+    from lightllm.common import request_cache_manager
+
+    monkeypatch.setattr(request_cache_manager, "custom_cat", torch.cat)
+    inserted, freed = [], []
+    cache_manager = RequestCacheManager(SimpleNamespace(page_size=1))
+    cache_manager.mem_manager = SimpleNamespace(free=lambda indexes: freed.extend(indexes.tolist()))
+    cache_manager.req_to_token_indexs = torch.arange(5)[None, :]
+    cache_manager.radix_cache = SimpleNamespace(insert=lambda key, value: (inserted.append(key.tolist()) or 0, None))
     req = SimpleNamespace(
+        req_idx=0,
         cache_tiers=(CacheTier.GPU, CacheTier.CPU, CacheTier.DISK),
         cur_kv_len=3,
+        hold_kv_len=5,
+        shared_kv_node=None,
+        get_input_token_ids=lambda: list(range(5)),
         shm_req=SimpleNamespace(shm_cur_kv_len=3),
     )
-
-    context.free_a_req_mem([], req)
-
-    assert inserted_reqs == [req]
+    cache_manager.release_request_caches([req])
+    assert inserted == [[0, 1, 2]]
+    assert freed == [3, 4]
+    assert req.cur_kv_len == req.hold_kv_len == 0
 
 
 def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
@@ -139,7 +145,7 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
 
 
 @pytest.mark.parametrize("with_radix", [False, True])
-def test_non_gpu_linear_cache_tiers_release_pending_state_pages(with_radix):
+def test_non_gpu_linear_cache_tiers_release_pending_state_pages(monkeypatch, with_radix):
     freed_small_pages = []
     freed_big_pages = []
     context = InferenceContext()
@@ -161,7 +167,7 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages(with_radix):
     )
     free_token_indexes = []
 
-    cache_manager = HybridRequestCacheManager()
+    cache_manager = HybridRequestCacheManager(SimpleNamespace())
     cache_manager.bind_mem_manager(context.radix_cache)
     cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
     cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
@@ -169,7 +175,14 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages(with_radix):
     context.args = None
     if not with_radix:
         context.radix_cache = None
-    context.free_a_req_mem(free_token_indexes, req)
+    from lightllm.common import request_cache_manager
+
+    monkeypatch.setattr(request_cache_manager, "custom_cat", torch.cat)
+    cache_manager.args = context.args
+    cache_manager.radix_cache = context.radix_cache
+    cache_manager.req_to_token_indexs = context.req_manager.req_to_token_indexs
+    cache_manager.mem_manager = SimpleNamespace(free=lambda indexes: free_token_indexes.append(indexes))
+    cache_manager.release_request_caches([req])
 
     assert free_token_indexes[0].tolist() == [10, 11, 12]
     assert freed_small_pages == [7]
@@ -204,7 +217,11 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
     operator = SimpleNamespace(
         load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist()),
     )
-    cache_manager = RequestCacheManager() if checkpoint_len == "full" else HybridRequestCacheManager()
+    cache_manager = (
+        RequestCacheManager(SimpleNamespace())
+        if checkpoint_len == "full"
+        else HybridRequestCacheManager(SimpleNamespace())
+    )
     cache_manager.cpu_cache_transfer = SimpleNamespace(get_checkpoint_lens=lambda *args: [checkpoint_len])
     cache_manager.load_cpu_cache_to_gpu = operator.load_cpu_cache_to_gpu
     backend = SimpleNamespace(
@@ -215,8 +232,9 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
             request_cache_manager=cache_manager,
             req_manager=SimpleNamespace(req_to_token_indexs=table),
         ),
-        _alloc_req_kv_mem=alloc_req_kv_mem,
     )
+    cache_manager.alloc_req_kv = alloc_req_kv_mem
+    cache_manager.get_available_token_num = lambda: 200
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=132)
     module.backend = backend
@@ -227,6 +245,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
         req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
         get_can_alloc_token_num=lambda: 200,
     )
+    context.request_cache_manager = cache_manager
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=4,

@@ -206,7 +206,11 @@ def test_verify_mtp_state_provider(monkeypatch, has_state):
 
     commit_args = {}
     state = SimpleNamespace(commit_accepted_state=lambda **kwargs: commit_args.update(kwargs))
-    cache_manager = HybridRequestCacheManager(state_manager=state) if has_state else RequestCacheManager()
+    cache_manager = (
+        HybridRequestCacheManager(SimpleNamespace(), state_manager=state)
+        if has_state
+        else RequestCacheManager(SimpleNamespace())
+    )
     backend = SimpleNamespace(
         max_draft_step=1,
         model=SimpleNamespace(

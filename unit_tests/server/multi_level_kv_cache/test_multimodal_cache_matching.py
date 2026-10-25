@@ -76,7 +76,6 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
     module.need_sync_compute_stream = lambda: False
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),
             mem_manager=SimpleNamespace(
@@ -88,9 +87,12 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
             ),
         ),
     )
-    module.backend.model.request_cache_manager = RequestCacheManager()
+    module.backend.model.request_cache_manager = RequestCacheManager(module.args)
     module.backend.model.request_cache_manager.bind_mem_manager(module.backend.model.mem_manager)
-    monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 1024)
+    module.backend.model.request_cache_manager.bind_cpu_cache_client(client)
+    module.backend.model.request_cache_manager.alloc_req_kv = allocate
+    module.backend.model.request_cache_manager.get_available_token_num = lambda: 1024
+    monkeypatch.setattr(common.g_infer_context, "request_cache_manager", module.backend.model.request_cache_manager)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))

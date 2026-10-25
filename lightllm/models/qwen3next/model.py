@@ -87,7 +87,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             assert self.args.enable_prefill_decode_mixed is False
         self.linear_config = LinearAttCacheConfig.from_model_config(self.config, self.args)
         state = LinearStateManager(self.max_req_num, self.linear_config, self.args)
-        self.request_cache_manager = HybridRequestCacheManager(linear_state_manager=state)
+        self.request_cache_manager = HybridRequestCacheManager(self.args, linear_state_manager=state)
 
     def _init_att_backend1(self):
         # MTP draft models only keep full-attention layers and reuse the main

@@ -121,7 +121,7 @@ class TpPartBaseModel:
                 self._init_request_cache_manager()
             self._init_mem_manager()
 
-        self.req_manager.bind_mem_manager(self.mem_manager)
+        self.req_manager.init_hold_request_indexs(self.mem_manager.HOLD_TOKEN_MEMINDEXES)
         self.request_cache_manager.bind_mem_manager(self.mem_manager)
         self._check_mem_size()
         self._init_infer_layer()
@@ -237,7 +237,7 @@ class TpPartBaseModel:
         return
 
     def _init_request_cache_manager(self):
-        self.request_cache_manager = RequestCacheManager()
+        self.request_cache_manager = RequestCacheManager(self.args)
 
     def _init_req_manager(self):
         create_max_seq_len = 0
@@ -247,7 +247,7 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
+        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, self.args.page_size)
         return
 
     def _init_infer_layer(self, start_layer_index=0):

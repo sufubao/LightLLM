@@ -73,12 +73,16 @@ class DPKVSharedMoudle:
             target_kv_len = req.cur_kv_len + trans_size
             alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
 
-            if is_current_dp_handle and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
+            if (
+                is_current_dp_handle
+                and trans_size > 0
+                and alloc_token_num <= g_infer_context.request_cache_manager.get_available_token_num()
+            ):
                 assert req.hold_kv_len == req.cur_kv_len
-                mem_indexes = self.backend._alloc_req_kv_mem(req, alloc_token_num)
+                mem_indexes = self.backend.model.request_cache_manager.alloc_req_kv(req, alloc_token_num)
                 assert mem_indexes is not None
                 # mem_indexes 只描述需要复制的逻辑 KV；页尾预留槽位已经由
-                # _alloc_req_kv_mem 写入请求表，但不参与本次跨 DP 传输。
+                # alloc_req_kv 写入请求表，但不参与本次跨 DP 传输。
                 mem_indexes = mem_indexes[:trans_size]
                 max_kv_len_dp_rank = self.shared_req_infos.arr[req_index, :, self._KV_LEN_INDEX].argmax()
                 max_kv_len_req_idx = int(self.shared_req_infos.arr[req_index, max_kv_len_dp_rank, self._REQ_IDX_INDEX])

@@ -1,3 +1,4 @@
+from lightllm.server.multi_level_kv_cache import CacheTier
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -34,7 +35,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     state.conv_state = SimpleNamespace(buffer=torch.full((2, 4, 1, 4), -10.0, dtype=torch.float64))
     state.ssm_state = SimpleNamespace(buffer=torch.full((2, 12, 1, 1), -20.0, dtype=torch.float64))
     indexer = SimpleNamespace(state=SimpleNamespace(buffer=torch.full((2, 4, 2, 1), -30.0, dtype=torch.float64)))
-    cache_manager = HybridRequestCacheManager(state, indexer)
+    cache_manager = HybridRequestCacheManager(args, state, indexer)
     cache_manager.big_page_buffers = _CheckpointPool(4)
     cache_manager.small_page_buffers = _CheckpointPool(2)
     tables = [torch.arange(96, dtype=torch.int32).reshape(4, 24) for _ in range(6)]
@@ -128,13 +129,14 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
         kv_views=views,
         peer_states=peers,
         logger=Mock(),
-        _alloc_req_kv_mem=allocate,
     )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = backend
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [12, 2], [8, 1]], [[8, 2], [4, 1], [16, 3]]]))
-    monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", SimpleNamespace(get_can_alloc_token_num=lambda: 128))
+    cache_manager.alloc_req_kv = allocate
+    cache_manager.get_available_token_num = lambda: 128
+    monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", SimpleNamespace(request_cache_manager=cache_manager))
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
     tasks = module.build_shared_kv_trans_tasks(requests, req_dp_ranks=[0, 0])
     assert [task.max_kv_len_mem_manager_index for task in tasks] == source_ranks
@@ -193,10 +195,13 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
         req.tail_small_page_buffer_id = small_slot
         cache_manager.big_page_buffers.checkpoint_lens[big_slot] = restored_len + 4
         cache_manager.small_page_buffers.checkpoint_lens[small_slot] = req.hybrid_cache_len
-        assert cache_manager.get_cacheable_prefix_len(req, args) == local_len
-        released = cache_manager.release_request_cache(
-            req, SimpleNamespace(req_to_token_indexs=tables[1]), radix, args, True
-        )
+        cache_manager.args = args
+        assert cache_manager.get_cacheable_prefix_len(req) == local_len
+        cache_manager.args = args
+        cache_manager.req_to_token_indexs = SimpleNamespace(req_to_token_indexs=tables[1]).req_to_token_indexs
+        cache_manager.radix_cache = radix
+        req.cache_tiers = (CacheTier.GPU,) if True else ()
+        released = cache_manager._release_request_cache(req)
         freed.extend(torch.cat(released).tolist())
         assert torch.cat(released).tolist() == allocated[req.req_idx][local_len:]
         assert not req.hybrid_len_to_big_page_id

@@ -61,22 +61,19 @@ def linear_cache(monkeypatch, tmp_path, request):
     monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.get_num_key_value_heads", lambda _: 1)
     mem = MemoryManager(384, torch.bfloat16, 1, 8, 1)
     mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
-    requests = ReqManager(2, 512, mem)
-    cache_manager = HybridRequestCacheManager(LinearStateManager(2, config, args))
+    requests = ReqManager(2, 512, args.page_size)
+    cache_manager = HybridRequestCacheManager(args, LinearStateManager(2, config, args))
     cache_manager.bind_mem_manager(mem)
     cache_manager.create_small_page_cache_manager(2)
-    monkeypatch.setattr(g_infer_context, "request_cache_manager", None)
+    cache_manager.radix_cache = SimpleNamespace(
+        get_big_page_ids_by_node=lambda node: [],
+        free_one_small_page_buffer=lambda: None,
+        small_page_buffers=cache_manager.small_page_buffers,
+    )
+    cache_manager.req_to_token_indexs = requests.req_to_token_indexs
+    monkeypatch.setattr(g_infer_context, "request_cache_manager", cache_manager)
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(g_infer_context, "req_manager", requests)
-    monkeypatch.setattr(
-        g_infer_context,
-        "radix_cache",
-        SimpleNamespace(
-            get_big_page_ids_by_node=lambda node: [],
-            free_one_small_page_buffer=lambda: None,
-            small_page_buffers=cache_manager.small_page_buffers,
-        ),
-    )
     yield mem, requests, cache_manager, config
     get_env_start_args.cache_clear()
     get_unique_server_name.cache_clear()
@@ -118,6 +115,7 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     client = cpu_cache_factory(
         CpuKVCacheMeta(3, 1, 1, 1, config.get_cpu_cache_big_page_bytes(), torch.uint8, 0, torch.uint8),
     )
+    cache_manager.bind_cpu_cache_client(client)
     pages, _ = client.allocate_pages([11, 22, 33], disk_offload_enable=False)
     indexes = torch.arange(token_num, dtype=torch.int32, device="cuda")
     page_ids = torch.arange(3, dtype=torch.int32, device="cuda")
@@ -139,9 +137,7 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
         ),
     )
 
-    cache_manager.offload_gpu_kv_to_cpu_cache(
-        indexes, page_ids, torch.zeros_like(page_ids), client, req, g_infer_context.radix_cache
-    )
+    cache_manager.offload_gpu_kv_to_cpu_cache(indexes, page_ids, torch.zeros_like(page_ids), req)
     torch.cuda.synchronize()
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.cpu_cache_client = client
@@ -165,12 +161,12 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(mem_manager=mem, req_manager=requests, request_cache_manager=cache_manager),
     )
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
-    monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 384)
+    monkeypatch.setattr(cache_manager, "alloc_req_kv", allocate)
+    monkeypatch.setattr(cache_manager, "get_available_token_num", lambda: 384)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     module.load_cpu_cache_to_reqs([req])
 
@@ -233,6 +229,7 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
         for state in states:
             state.fill_(index + 1)
         expected.append([state.clone() for state in states])
+        cache_manager.bind_cpu_cache_client(client)
         pages, _ = client.allocate_pages([100 + index * 2, 101 + index * 2], disk_offload_enable=False)
         req = SimpleNamespace(
             req_idx=index,
@@ -254,9 +251,7 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
         indexes = torch.arange(index * 192, (index + 1) * 192, dtype=torch.int32, device="cuda")
         mem.kv_buffer[:, index * 192 : (index + 1) * 192].fill_(index + 1)
         page_ids = torch.tensor(pages, dtype=torch.int32, device="cuda")
-        cache_manager.offload_gpu_kv_to_cpu_cache(
-            indexes, page_ids, torch.zeros_like(page_ids), client, req, g_infer_context.radix_cache
-        )
+        cache_manager.offload_gpu_kv_to_cpu_cache(indexes, page_ids, torch.zeros_like(page_ids), req)
         torch.cuda.synchronize()
         client.update_pages_status_to_ready(pages, deref=False)
         cache_manager.big_page_buffers.free_state_cache([big_slot])
@@ -279,12 +274,12 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(mem_manager=mem, req_manager=requests, request_cache_manager=cache_manager),
     )
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
-    monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 384)
+    monkeypatch.setattr(cache_manager, "alloc_req_kv", allocate)
+    monkeypatch.setattr(cache_manager, "get_available_token_num", lambda: 384)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     events = []
     load = cache_manager.load_cpu_cache_to_gpu

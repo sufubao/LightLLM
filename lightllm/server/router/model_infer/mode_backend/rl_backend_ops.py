@@ -73,7 +73,9 @@ class RlBackendOps:
         for tag in memory_tags:
             self.backend.model.torch_memory_saver.resume(tag=tag)
         if MemoryTag.KV_CACHE in memory_tags:
-            self.backend.model.req_manager.init_hold_request_indexs()
+            self.backend.model.req_manager.init_hold_request_indexs(
+                self.backend.model.mem_manager.HOLD_TOKEN_MEMINDEXES
+            )
 
     def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
         try:

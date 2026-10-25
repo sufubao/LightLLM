@@ -42,7 +42,10 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
     backend.is_master_in_dp = False
-    backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
+    backend.model.request_cache_manager = SimpleNamespace()
+    backend.model.request_cache_manager.alloc_req_kv = lambda req, size: _reserve_into_table(
+        table, req, alloc_sizes, next_index, size
+    )
 
     def create_task(**kwargs):
         tasks.append(
@@ -123,15 +126,19 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         node_nccl_group=None,
         req_to_token_indexes_by_rank=[source_table] * 2,
     )
-    backend._alloc_req_kv_mem = lambda cur_req, size: _reserve_into_table(table, cur_req, alloc_sizes, next_index, size)
+    backend.model.request_cache_manager = SimpleNamespace()
+    backend.model.request_cache_manager.alloc_req_kv = lambda cur_req, size: _reserve_into_table(
+        table, cur_req, alloc_sizes, next_index, size
+    )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = backend
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
     context = SimpleNamespace(
         req_manager=SimpleNamespace(req_to_token_indexs=table),
-        get_can_alloc_token_num=lambda: 100,
+        request_cache_manager=backend.model.request_cache_manager,
     )
+    backend.model.request_cache_manager.get_available_token_num = lambda: 100
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
 

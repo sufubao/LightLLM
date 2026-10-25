@@ -1,7 +1,13 @@
 import torch
+import torch.distributed as dist
 import triton
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.multi_level_kv_cache import CacheTier
+from lightllm.utils.custom_kernel_utis import custom_cat
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
+
+
+logger = init_logger(__name__)
 
 
 class RequestCacheManager:
@@ -10,8 +16,93 @@ class RequestCacheManager:
     linear_state_manager = None
     indexer_state_manager = None
 
-    def __init__(self):
+    def __init__(self, args):
+        self.args = args
         self.mem_manager = None
+        self.req_to_token_indexs = None
+        self.radix_cache = None
+        self.cpu_cache_client = None
+
+    def bind_context(self, req_to_token_indexs, radix_cache):
+        if self.req_to_token_indexs is not None:
+            if self.req_to_token_indexs is not req_to_token_indexs or self.radix_cache is not radix_cache:
+                raise ValueError("RequestCacheManager is already bound to a different request context")
+            return
+        self.validate_radix_cache(radix_cache)
+        self.req_to_token_indexs = req_to_token_indexs
+        self.radix_cache = radix_cache
+
+    def bind_cpu_cache_client(self, cpu_cache_client):
+        if self.cpu_cache_client is not None and self.cpu_cache_client is not cpu_cache_client:
+            raise ValueError("RequestCacheManager is already bound to a different CPU cache client")
+        self.cpu_cache_client = cpu_cache_client
+
+    def get_available_token_num(self):
+        cache_tokens = 0
+        if self.radix_cache is not None:
+            cache_tokens = self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
+        return self.mem_manager.allocator.can_use_mem_size + cache_tokens
+
+    def alloc_req_kv(self, req, alloc_token_num, non_blocking=False):
+        if alloc_token_num == 0:
+            return None
+        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
+        if self.radix_cache is not None:
+            self.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
+        old_end = req.hold_kv_len
+        new_end = old_end + alloc_token_num
+        indexes = self.mem_manager.alloc(alloc_token_num)
+        # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
+        self.req_to_token_indexs[req.req_idx, old_end:new_end].copy_(indexes, non_blocking=non_blocking)
+        req.hold_kv_len = new_end
+        return indexes
+
+    def release_request_caches(self, reqs):
+        free_indexes = []
+        for req in reqs:
+            free_indexes.extend(self._release_request_cache(req))
+            req.cur_kv_len = req.hold_kv_len = 0
+            req.shm_req.shm_cur_kv_len = 0
+        if free_indexes:
+            self.mem_manager.free(custom_cat(free_indexes))
+
+    def preload_prompt_cache_kv_buffer(self, prompt_cache_kv_buffer_path, token_ids):
+        page_size = self.args.page_size
+        intact_kv_len = len(token_ids) // page_size * page_size
+        if intact_kv_len == 0:
+            return
+
+        prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
+        prompt_cache_kv_buffer = {name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()}
+        intact_kv_index = self.mem_manager.alloc(intact_kv_len)
+        self.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
+        intact_token_ids = torch.tensor(token_ids[:intact_kv_len], dtype=torch.int64, device="cpu")
+        self.radix_cache.insert(intact_token_ids, intact_kv_index)
+        self.radix_cache.match_prefix(intact_token_ids, update_refs=True)
+
+    def _save_promptcache_kvbuffer(self):
+        """
+        save prompt cache kv buffer
+        这个接口是用于保存非量化的缓存prompt cache资源，是定制场景使用的接口，当前代码中不会有调用。
+        其保存的 kv 会配合量化推理模式, 加载到量化推理的prompt cache中, 提升量化推理的精度。
+        like paper:
+        https://arxiv.org/abs/2403.01241
+        """
+        prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
+        print(f"prompt_cache_token_id : {prompt_cache_token_id}")
+        index = range(len(prompt_cache_token_id))
+        prompt_cache_kv_buffer = self.mem_manager.get_index_kv_buffer(index)
+        torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
+
+    def log_cache_stats(self):
+        if self.radix_cache is not None:
+            logger.debug(
+                f"free a batch state:\n"
+                f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
+                f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
+                f"mem manager can alloc token num {self.mem_manager.allocator.can_use_mem_size}\n"
+                f"mem manager total size {self.mem_manager.allocator.size}\n"
+            )
 
     def bind_mem_manager(self, mem_manager):
         if self.mem_manager is not None and self.mem_manager is not mem_manager:
@@ -25,7 +116,8 @@ class RequestCacheManager:
     def create_state_transfer(self):
         return None
 
-    def restore_prefix(self, req, req_manager, radix_cache):
+    def restore_prefix(self, req):
+        radix_cache = self.radix_cache
         enabled = not req.sampling_param.disable_prompt_cache and radix_cache is not None
         if enabled and req.get_cur_total_len() > 1 and req.cur_kv_len == 0:
             tokens = req.shm_req.shm_prompt_ids.arr[: req.get_cur_total_len()]
@@ -33,21 +125,21 @@ class RequestCacheManager:
             node, _, indexes = radix_cache.match_prefix(key, update_refs=True, mm_input_spans=req.mm_input_spans)
             if node is not None:
                 length = node.node_prefix_total_len
-                req_manager.req_to_token_indexs[req.req_idx, :length] = indexes
+                self.req_to_token_indexs[req.req_idx, :length] = indexes
                 req.shared_kv_node = node
                 req.cur_kv_len = req.hold_kv_len = int(length)
-                assert req.hold_kv_len % req.args.page_size == 0
+                assert req.hold_kv_len % self.args.page_size == 0
                 req.shm_req.prompt_cache_len = req.cur_kv_len
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
-    def save_state_cache(self, b_req_idx, reqs, radix_cache, args):
+    def save_state_cache(self, b_req_idx, reqs):
         """Snapshot after forward, before advancing req.cur_kv_len from the chunk start."""
         return
 
-    def get_cacheable_prefix_len(self, req, args):
+    def get_cacheable_prefix_len(self, req):
         return req.cur_kv_len
 
-    def release_request_cache(self, req, req_manager, radix_cache, args, publish_cache) -> list[torch.Tensor]:
+    def _release_request_cache(self, req) -> list[torch.Tensor]:
         """Publish reusable cache and release unpublished checkpoints and held radix refs.
 
         Returns borrowed request-index slices for the caller to batch-free. The caller
@@ -55,7 +147,9 @@ class RequestCacheManager:
         row. Call only after pending CPU offload reads have completed. Published KV and
         checkpoints belong to radix; returned KV indexes still need allocator release.
         """
-        indexes = req_manager.req_to_token_indexs[req.req_idx]
+        radix_cache, args = self.radix_cache, self.args
+        publish_cache = radix_cache is not None and CacheTier.GPU in req.cache_tiers
+        indexes = self.req_to_token_indexs[req.req_idx]
         shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         if publish_cache and radix_cache is not None:
             cache_len = req.cur_kv_len // args.page_size * args.page_size
@@ -73,37 +167,35 @@ class RequestCacheManager:
     def restore_peer_state(self, req_idx, restored_len, peer_state, peer_req_idx):
         return
 
-    def get_cpu_cache_match_page_num(self, page_indexes, page_lens, cpu_cache_client):
+    def get_cpu_cache_match_page_num(self, page_indexes, page_lens):
         return len(page_indexes)
 
-    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req, page_indexes_cpu=None) -> None:
+    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, req, page_indexes_cpu=None) -> None:
         """Enqueue KV and any live request-state restoration on the current stream."""
-        self.mem_manager.operator.load_cpu_cache_to_gpu(mem_indexes, page_indexes, cpu_cache_client, req)
+        self.mem_manager.operator.load_cpu_cache_to_gpu(mem_indexes, page_indexes, self.cpu_cache_client, req)
 
     def offload_gpu_kv_to_cpu_cache(
         self,
         mem_indexes,
         page_indexes,
         page_readies,
-        cpu_cache_client,
         req,
-        radix_cache=None,
         page_indexes_cpu=None,
         page_readies_cpu=None,
     ):
         return self.mem_manager.operator.offload_gpu_kv_to_cpu_cache(
-            mem_indexes, page_indexes, page_readies, cpu_cache_client, req
+            mem_indexes, page_indexes, page_readies, self.cpu_cache_client, req
         )
 
 
 class HybridRequestCacheManager(RequestCacheManager):
     """Coordinate KV prefix reuse and hybrid attention state checkpoints."""
 
-    def __init__(self, linear_state_manager=None, indexer_state_manager=None, *, state_manager=None):
+    def __init__(self, args, linear_state_manager=None, indexer_state_manager=None, *, state_manager=None):
+        super().__init__(args)
         self.state_manager = state_manager if state_manager is not None else linear_state_manager
         self.linear_state_manager = linear_state_manager
         self.indexer_state_manager = indexer_state_manager
-        self.mem_manager = None
         self.small_page_buffers = None
         self.big_page_buffers = None
 
@@ -117,7 +209,7 @@ class HybridRequestCacheManager(RequestCacheManager):
         if self.mem_manager is not None:
             raise ValueError("HybridRequestCacheManager is already bound to a different memory manager")
         if self.has_state_cache:
-            args = get_env_start_args()
+            args = self.args
             big_page_tokens = args.linear_att_page_block_num * args.linear_att_hash_page_size
             # The last two slots are reserved for CPU-cache tail staging, never allocated to requests.
             self.big_page_buffers = self.state_manager.create_checkpoint_pool(
@@ -187,16 +279,17 @@ class HybridRequestCacheManager(RequestCacheManager):
         token_indexes[:restored_len] = cached_indexes[:restored_len]
         self.restore_state(req_idx, checkpoint_pool, checkpoint_slot, restored_len)
 
-    def restore_prefix(self, req, req_manager, radix_cache):
+    def restore_prefix(self, req):
+        radix_cache = self.radix_cache
         enable_prompt_cache = (not req.sampling_param.disable_prompt_cache) and radix_cache is not None
         block_hashs = req.shm_req.hybrid_token_hash_list.get_all()
-        hash_page_size = req.args.linear_att_hash_page_size
+        hash_page_size = self.args.linear_att_hash_page_size
         match_tokens = max(0, min(len(block_hashs) * hash_page_size, req.get_cur_total_len() - 1))
         match_tokens = (match_tokens // hash_page_size) * hash_page_size
         block_hashs = block_hashs[: match_tokens // hash_page_size]
         assert len(block_hashs) == req.shm_req.hybrid_token_hash_list.size
-        big_page_token_num = hash_page_size * req.args.linear_att_page_block_num
-        big_page_is_disable = big_page_token_num > req.args.max_req_total_len
+        big_page_token_num = hash_page_size * self.args.linear_att_page_block_num
+        big_page_is_disable = big_page_token_num > self.args.max_req_total_len
         restored_kv_len = req.cur_kv_len
         retained_node = req.shared_kv_node
         if enable_prompt_cache and match_tokens > 1 and block_hashs and req.cur_kv_len == 0:
@@ -207,7 +300,7 @@ class HybridRequestCacheManager(RequestCacheManager):
             )
             if share_node is not None:
                 assert req.tail_small_page_buffer_id is None
-                token_indexes = req_manager.req_to_token_indexs[req.req_idx]
+                token_indexes = self.req_to_token_indexs[req.req_idx]
                 if not share_node.is_big_page_node() and not big_page_is_disable:
                     matched_len = share_node.node_prefix_total_len
                     big_page_len = (matched_len // big_page_token_num) * big_page_token_num
@@ -218,7 +311,7 @@ class HybridRequestCacheManager(RequestCacheManager):
                         - radix_cache.get_refed_tokens_num()
                     )
                     if available_tokens > need_tokens:
-                        assert need_tokens % req.args.page_size == 0
+                        assert need_tokens % self.args.page_size == 0
                         radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
                         tail_mems = self.mem_manager.alloc(need_size=need_tokens)
                         token_indexes[:big_page_len] = value_tensor[:big_page_len]
@@ -252,12 +345,13 @@ class HybridRequestCacheManager(RequestCacheManager):
         req.cur_kv_len = int(restored_kv_len)
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         req.hold_kv_len = req.cur_kv_len
-        assert req.hold_kv_len % req.args.page_size == 0
+        assert req.hold_kv_len % self.args.page_size == 0
         if req.cur_kv_len == 0:
             self.reset(req.req_idx)
 
-    def save_state_cache(self, b_req_idx, reqs, radix_cache, args):
+    def save_state_cache(self, b_req_idx, reqs):
         """Snapshot after forward, before advancing req.cur_kv_len from the chunk start."""
+        radix_cache, args = self.radix_cache, self.args
         if radix_cache is None:
             return
         # Request-state snapshot at a big-page boundary.
@@ -308,8 +402,9 @@ class HybridRequestCacheManager(RequestCacheManager):
                         )
         return
 
-    def get_cacheable_prefix_len(self, req, args):
+    def get_cacheable_prefix_len(self, req):
         """Peer runtime restores permit continuation, but do not supply historical checkpoints."""
+        args = self.args
         page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         end = min(req.cur_kv_len, req.hybrid_cache_len)
@@ -336,7 +431,7 @@ class HybridRequestCacheManager(RequestCacheManager):
             cacheable_len = end
         return cacheable_len
 
-    def release_request_cache(self, req, req_manager, radix_cache, args, publish_cache) -> list[torch.Tensor]:
+    def _release_request_cache(self, req) -> list[torch.Tensor]:
         """Publish reusable cache and release unpublished checkpoints and held radix refs.
 
         Returns borrowed request-index slices for the caller to batch-free. The caller
@@ -344,7 +439,9 @@ class HybridRequestCacheManager(RequestCacheManager):
         row. Call only after pending CPU offload reads have completed. Published KV and
         checkpoints belong to radix; returned KV indexes still need allocator release.
         """
-        token_indexes = req_manager.req_to_token_indexs[req.req_idx]
+        radix_cache, args = self.radix_cache, self.args
+        publish_cache = radix_cache is not None and CacheTier.GPU in req.cache_tiers
+        token_indexes = self.req_to_token_indexs[req.req_idx]
         shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         publish_len = None
         if publish_cache and radix_cache is not None:
@@ -362,7 +459,7 @@ class HybridRequestCacheManager(RequestCacheManager):
                 assert shared_len <= req.cur_kv_len
 
         if publish_len is not None:
-            publish_len = min(publish_len, self.get_cacheable_prefix_len(req, args))
+            publish_len = min(publish_len, self.get_cacheable_prefix_len(req))
             if publish_len <= shared_len:
                 publish_len = None
 
@@ -407,16 +504,17 @@ class HybridRequestCacheManager(RequestCacheManager):
             req.shared_kv_node = None
         return free_indexes
 
-    def get_cpu_cache_match_page_num(self, page_indexes, page_lens, cpu_cache_client):
-        lengths = self.cpu_cache_transfer.get_checkpoint_lens(page_indexes, cpu_cache_client)
+    def get_cpu_cache_match_page_num(self, page_indexes, page_lens):
+        lengths = self.cpu_cache_transfer.get_checkpoint_lens(page_indexes, self.cpu_cache_client)
         for index in range(len(lengths) - 1, -1, -1):
             if lengths[index] == page_lens[index]:
                 return index + 1
         return 0
 
-    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req, page_indexes_cpu=None) -> None:
+    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, req, page_indexes_cpu=None) -> None:
         """Enqueue KV and any live request-state restoration on the current stream."""
-        args = get_env_start_args()
+        cpu_cache_client = self.cpu_cache_client
+        args = self.args
         page_size = args.cpu_cache_token_page_size
         assert page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
@@ -447,13 +545,12 @@ class HybridRequestCacheManager(RequestCacheManager):
         mem_indexes,
         page_indexes,
         page_readies,
-        cpu_cache_client,
         req,
-        radix_cache=None,
         page_indexes_cpu=None,
         page_readies_cpu=None,
     ):
-        page_size = get_env_start_args().cpu_cache_token_page_size
+        cpu_cache_client, radix_cache = self.cpu_cache_client, self.radix_cache
+        page_size = self.args.cpu_cache_token_page_size
         end = len(mem_indexes) // page_size * page_size
         slots = [] if radix_cache is None else radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
         slots = slots[: end // page_size]

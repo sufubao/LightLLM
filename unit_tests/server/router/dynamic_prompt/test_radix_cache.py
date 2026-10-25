@@ -1,3 +1,4 @@
+from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.common.request_cache_manager import HybridRequestCacheManager
 from types import SimpleNamespace
 
@@ -721,13 +722,15 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
         hybrid_token_hash_list=SimpleNamespace(get_all=lambda: block_hashs),
     )
     released = []
-    cache_manager = HybridRequestCacheManager()
+    cache_manager = HybridRequestCacheManager(SimpleNamespace())
     cache_manager.bind_mem_manager(tree.mem_manager)
     cache_manager.small_page_buffers = tree.small_page_buffers
     cache_manager.big_page_buffers = tree.big_page_buffers
-    released.extend(
-        cache_manager.release_request_cache(req, context.req_manager, tree, context.args, publish_cache=True)
-    )
+    cache_manager.args = context.args
+    cache_manager.req_to_token_indexs = context.req_manager.req_to_token_indexs
+    cache_manager.radix_cache = tree
+    req.cache_tiers = (CacheTier.GPU,) if True else ()
+    released.extend(cache_manager._release_request_cache(req))
     assert torch.cat(released).tolist() == list(range(100 + retained, 100 + max(24, computed)))
     assert not req.hybrid_len_to_big_page_id
     assert req.tail_small_page_buffer_id is None
@@ -758,7 +761,7 @@ def test_cache_manager_releases_each_checkpoint_once(hybrid_tree, publish_cache,
         tree.insert(torch.arange(12), torch.arange(100, 112), [1, 2, 3], [None, None, 7], SortedDict())
     node, _, _ = tree.match_prefix(torch.arange(8), block_hashs=[1, 2], update_refs=True)
     assert tree.get_refed_tokens_num() == 8
-    cache_manager = HybridRequestCacheManager()
+    cache_manager = HybridRequestCacheManager(SimpleNamespace())
     cache_manager.bind_mem_manager(tree.mem_manager)
     cache_manager.small_page_buffers = tree.small_page_buffers
     cache_manager.big_page_buffers = tree.big_page_buffers
@@ -775,7 +778,11 @@ def test_cache_manager_releases_each_checkpoint_once(hybrid_tree, publish_cache,
     )
     requests = SimpleNamespace(req_to_token_indexs=torch.arange(100, 116).view(1, -1))
     args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
-    released = cache_manager.release_request_cache(req, requests, tree, args, publish_cache)
+    cache_manager.args = args
+    cache_manager.req_to_token_indexs = requests.req_to_token_indexs
+    cache_manager.radix_cache = tree
+    req.cache_tiers = (CacheTier.GPU,) if publish_cache else ()
+    released = cache_manager._release_request_cache(req)
     assert sorted(torch.cat(released).tolist()) == list(range(108 if duplicate or not publish_cache else 112, 116))
     assert freed_big == [6]
     assert freed_small == ([8] if duplicate or not publish_cache else [])

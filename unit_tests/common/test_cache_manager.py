@@ -405,7 +405,7 @@ def test_dp_restore_copies_linear_state_and_indexer_tail():
     state = LinearStateManager.__new__(LinearStateManager)
     state.linear_config = SimpleNamespace(get_conv_state_shape=lambda: (4, 3))
     state.mtp_step = 2
-    state._req_to_mtp_state_index = torch.full((2,), 2, dtype=torch.int32)
+    state.mtp_state_index = torch.full((2,), 2, dtype=torch.int32)
     state.conv_state = SimpleNamespace(buffer=torch.zeros(1, 2, 4, 5))
     state.ssm_state = SimpleNamespace(buffer=torch.zeros(1, 6, 4, 4))
     indexer = SimpleNamespace(state=SimpleNamespace(buffer=torch.zeros(1, 2, 6, 4)))
@@ -421,7 +421,7 @@ def test_dp_restore_copies_linear_state_and_indexer_tail():
     torch.testing.assert_close(state.ssm_state.buffer[:, 0], peer.req_to_ssm_state.buffer[:, 3])
     torch.testing.assert_close(indexer.state.buffer[:, 0], peer.req_to_indexer_tail.buffer[:, 1])
     assert not state.conv_state.buffer[:, 0, ..., 3:].any()
-    assert state._req_to_mtp_state_index.tolist() == [0, 2]
+    assert state.mtp_state_index.tolist() == [0, 2]
 
 
 def test_checkpoint_lengths(monkeypatch):

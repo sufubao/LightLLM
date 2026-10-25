@@ -202,11 +202,8 @@ def test_mode_proposals_own_their_schedule_metadata():
 
 @pytest.mark.parametrize("has_state", [False, True])
 def test_verify_mtp_state_provider(monkeypatch, has_state):
-    from lightllm.common.req_manager import ReqManager
-
     commit_args = {}
-    requests = ReqManager.__new__(ReqManager)
-    requests.req_to_mtp_state_index = torch.zeros(3, dtype=torch.int32) if has_state else None
+    requests = SimpleNamespace()
     requests.req_sampling_params_manager = SimpleNamespace(req_to_next_token_ids=None)
     requests.cache_manager = SimpleNamespace(
         state_manager=SimpleNamespace(commit_accepted_state=lambda **kwargs: commit_args.update(kwargs))
@@ -227,7 +224,6 @@ def test_verify_mtp_state_provider(monkeypatch, has_state):
 
     assert lengths is accept_lengths and accepted is accepted_index
     if has_state:
-        assert commit_args["req_to_mtp_state_index"] is requests.req_to_mtp_state_index
         assert commit_args["b_req_idx"] is req_idx
         assert commit_args["b_req_mtp_start_loc"] is start_loc
         assert commit_args["b_mtp_index"] is mtp_index

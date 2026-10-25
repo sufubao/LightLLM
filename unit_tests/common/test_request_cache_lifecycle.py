@@ -122,15 +122,15 @@ def test_draft_shares_request_cache_and_mtp_cursor(monkeypatch, module_name, cla
     monkeypatch.setattr(req_sampling_params, "ReqSamplingParamsManager", lambda size: object())
     state = LinearStateManager.__new__(LinearStateManager)
     state.mtp_step = 2
-    state._req_to_mtp_state_index = None
+    state.mtp_state_index = torch.zeros(3, dtype=torch.int32)
     state.conv_state = SimpleNamespace(buffer=torch.ones(1, 3, 1, 4))
     state.ssm_state = SimpleNamespace(buffer=torch.ones(1, 9, 1, 1))
     cache = HybridCacheManager(SimpleNamespace(page_size=1, mtp_step=2), 2, 8, state, device="cpu")
     requests = ReqManager(2, cache)
-    cursor = requests.req_to_mtp_state_index
+    cursor = state.mtp_state_index
     assert cursor.shape == (3,) and not cursor.any()
     assert not hasattr(cache, "req_to_mtp_state_index")
-    assert not hasattr(state, "mtp_state_index")
+    assert not hasattr(requests, "req_to_mtp_state_index")
     cursor.fill_(2)
 
     model_class = getattr(importlib.import_module(f"lightllm.models.{module_name}.model"), class_name)
@@ -139,11 +139,11 @@ def test_draft_shares_request_cache_and_mtp_cursor(monkeypatch, module_name, cla
     draft._init_req_manager()
     assert draft.req_manager is requests
     assert draft.req_manager.cache_manager.req_to_token_indexs is cache.req_to_token_indexs
-    assert draft.req_manager.req_to_mtp_state_index is cursor
+    assert draft.req_manager.cache_manager.linear_state_manager.mtp_state_index is cursor
     state.restore(0, torch.zeros(1, 1, 2), torch.zeros(1, 1, 1))
     assert cursor.tolist() == [0, 2, 2]
     cache.reset(1)
     assert cursor.tolist() == [0, 0, 2]
     requests.reset_slots()
-    assert requests.req_to_mtp_state_index is cursor
+    assert state.mtp_state_index is cursor
     assert requests.cache_manager.req_to_token_indexs is cache.req_to_token_indexs

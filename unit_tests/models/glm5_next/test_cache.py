@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
-from lightllm.common.req_manager import ReqManager
 from lightllm.common.cache_manager import HybridCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.indexer_state import IndexerStateManager
@@ -83,7 +82,6 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     req = HybridCacheManager(
         args, 3, 512, LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step)
     )
-    requests = ReqManager(3, req)
     req.bind_mem_manager(mem)
     att_kv = mem.get_att_input_params(3)
     assert att_kv.shape == (17, 1, 512)
@@ -118,20 +116,20 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     req.indexer_state_manager.state.buffer.normal_()
     unchanged = req.indexer_state_manager.state.buffer[:, [0, 1, 3]].clone()
     if mtp_step:
-        requests.req_to_mtp_state_index.fill_(mtp_step)
+        req.linear_state_manager.mtp_state_index.fill_(mtp_step)
         tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")
-        requests.commit_accepted_state(
+        req.state_manager.commit_accepted_state(
             b_req_mtp_start_loc=tensor([0, 2]),
             b_req_idx=tensor([0, 0, 1, 1, 1]),
             b_mtp_index=tensor([0, 1, 0, 1, 2]),
             accepted_index=tensor([1, 0, 1, 1, 0]),
             verify_width=mtp_step + 1,
         )
-        assert requests.req_to_mtp_state_index.tolist() == [0, 1, mtp_step, mtp_step]
+        assert req.linear_state_manager.mtp_state_index.tolist() == [0, 1, mtp_step, mtp_step]
     dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
     req.restore_state(dest_req.req_idx, cache, slot, restored_len=4)
     if mtp_step:
-        assert requests.req_to_mtp_state_index.tolist() == [0, 1, 0, mtp_step]
+        assert req.linear_state_manager.mtp_state_index.tolist() == [0, 1, 0, mtp_step]
     torch.cuda.synchronize()
     assert torch.equal(req.linear_state_manager.conv_state.buffer[:, 2, ..., :3], conv)
     assert torch.equal(req.linear_state_manager.ssm_state.buffer[:, 2 * (mtp_step + 1)], ssm)

@@ -31,13 +31,15 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    backend.model.req_manager.commit_accepted_state(
-        b_req_mtp_start_loc=b_req_mtp_start_loc,
-        b_req_idx=b_req_idx,
-        b_mtp_index=b_mtp_index,
-        accepted_index=accepted_index,
-        verify_width=backend.max_draft_step + 1,
-    )
+    state_manager = backend.model.req_manager.cache_manager.state_manager
+    if state_manager is not None:
+        state_manager.commit_accepted_state(
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            accepted_index=accepted_index,
+            verify_width=backend.max_draft_step + 1,
+        )
     return accept_lengths, accepted_index
 
 

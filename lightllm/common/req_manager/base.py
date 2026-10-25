@@ -1,7 +1,5 @@
 from typing import List
 
-import torch
-
 from lightllm.utils.log_utils import init_logger
 
 
@@ -56,13 +54,6 @@ class ReqManager:
         assert cache_manager.req_to_token_indexs.shape[0] == max_request_num + 1
         self.req_list = _ReqLinkedList(max_request_num)
         self.cache_manager = cache_manager
-        self.req_to_mtp_state_index = (
-            torch.zeros((max_request_num + 1,), dtype=torch.int32, device=cache_manager.req_to_token_indexs.device)
-            if cache_manager.args.mtp_step > 0 and cache_manager.state_manager is not None
-            else None
-        )
-        if cache_manager.linear_state_manager is not None:
-            cache_manager.linear_state_manager.bind_mtp_state_index(self.req_to_mtp_state_index)
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
@@ -88,15 +79,3 @@ class ReqManager:
 
     def reset_slots(self):
         self.req_list = _ReqLinkedList(self.max_request_num)
-
-    def commit_accepted_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
-        if self.cache_manager.state_manager is None:
-            return
-        self.cache_manager.state_manager.commit_accepted_state(
-            req_to_mtp_state_index=self.req_to_mtp_state_index,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            b_req_idx=b_req_idx,
-            b_mtp_index=b_mtp_index,
-            accepted_index=accepted_index,
-            verify_width=verify_width,
-        )

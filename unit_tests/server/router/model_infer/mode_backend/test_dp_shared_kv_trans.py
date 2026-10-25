@@ -31,7 +31,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     state = LinearStateManager.__new__(LinearStateManager)
     state.linear_config = SimpleNamespace(get_conv_state_shape=lambda: (1, 2))
     state.mtp_step = 2
-    state._req_to_mtp_state_index = torch.full((4,), 2, dtype=torch.int32)
+    state.mtp_state_index = torch.full((4,), 2, dtype=torch.int32)
     state.conv_state = SimpleNamespace(buffer=torch.full((2, 4, 1, 4), -10.0, dtype=torch.float64))
     state.ssm_state = SimpleNamespace(buffer=torch.full((2, 12, 1, 1), -20.0, dtype=torch.float64))
     indexer = SimpleNamespace(state=SimpleNamespace(buffer=torch.full((2, 4, 2, 1), -30.0, dtype=torch.float64)))
@@ -166,7 +166,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
         module.kv_trans(tasks)
 
     assert len(copies) == 1
-    assert state._req_to_mtp_state_index.tolist() == [0, 2, 0, 2]
+    assert state.mtp_state_index.tolist() == [0, 2, 0, 2]
     radix = SimpleNamespace(insert=Mock(), dec_node_ref_counter=Mock())
     held_nodes = [req.shared_kv_node for req in requests]
     freed = []

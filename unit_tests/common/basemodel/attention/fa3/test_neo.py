@@ -81,7 +81,7 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b1_cu_q_seq_len = indices([0, 2, 3]).long()
     infer_state.b1_cu_kv_seq_len = indices([0, 2 * page_size, 4 * page_size - 1]).long()
     infer_state.b_image_token_end = image_ends
-    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
+    infer_state.req_manager = SimpleNamespace(cache_manager=SimpleNamespace(req_to_token_indexs=req_to_token_indexs))
     backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
     state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
     state.init_state()

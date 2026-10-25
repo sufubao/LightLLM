@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
-from lightllm.common.request_cache_manager import HybridRequestCacheManager
+from lightllm.common.cache_manager import HybridCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.state_cache_manager.base import StateCacheManager
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -31,11 +31,11 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     state = LinearStateManager.__new__(LinearStateManager)
     state.linear_config = SimpleNamespace(get_conv_state_shape=lambda: (1, 2))
     state.mtp_step = 2
-    state.mtp_state_index = torch.full((4,), 2, dtype=torch.int32)
+    state._req_to_mtp_state_index = torch.full((4,), 2, dtype=torch.int32)
     state.conv_state = SimpleNamespace(buffer=torch.full((2, 4, 1, 4), -10.0, dtype=torch.float64))
     state.ssm_state = SimpleNamespace(buffer=torch.full((2, 12, 1, 1), -20.0, dtype=torch.float64))
     indexer = SimpleNamespace(state=SimpleNamespace(buffer=torch.full((2, 4, 2, 1), -30.0, dtype=torch.float64)))
-    cache_manager = HybridRequestCacheManager(args, state, indexer)
+    cache_manager = HybridCacheManager(args, 2, 16, state, indexer, device="cpu")
     cache_manager.big_page_buffers = _CheckpointPool(4)
     cache_manager.small_page_buffers = _CheckpointPool(2)
     tables = [torch.arange(96, dtype=torch.int32).reshape(4, 24) for _ in range(6)]
@@ -118,7 +118,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     backend = SimpleNamespace(
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=SimpleNamespace(copy_kv_from_other_dp_ranks=copy_kv)),
-            request_cache_manager=cache_manager,
+            req_manager=SimpleNamespace(cache_manager=cache_manager),
         ),
         dp_world_size=2,
         dp_size_in_node=3,
@@ -136,7 +136,9 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [12, 2], [8, 1]], [[8, 2], [4, 1], [16, 3]]]))
     cache_manager.alloc_req_kv = allocate
     cache_manager.get_available_token_num = lambda: 128
-    monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", SimpleNamespace(request_cache_manager=cache_manager))
+    monkeypatch.setattr(
+        dp_shared_kv_trans, "g_infer_context", SimpleNamespace(req_manager=SimpleNamespace(cache_manager=cache_manager))
+    )
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
     tasks = module.build_shared_kv_trans_tasks(requests, req_dp_ranks=[0, 0])
     assert [task.max_kv_len_mem_manager_index for task in tasks] == source_ranks
@@ -164,7 +166,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
         module.kv_trans(tasks)
 
     assert len(copies) == 1
-    assert state.mtp_state_index.tolist() == [0, 2, 0, 2]
+    assert state._req_to_mtp_state_index.tolist() == [0, 2, 0, 2]
     radix = SimpleNamespace(insert=Mock(), dec_node_ref_counter=Mock())
     held_nodes = [req.shared_kv_node for req in requests]
     freed = []
@@ -198,7 +200,7 @@ def test_dp_fetch_cpu_transport_restores_and_releases_complete_request_state(mon
         cache_manager.args = args
         assert cache_manager.get_cacheable_prefix_len(req) == local_len
         cache_manager.args = args
-        cache_manager.req_to_token_indexs = SimpleNamespace(req_to_token_indexs=tables[1]).req_to_token_indexs
+        cache_manager.req_to_token_indexs = tables[1]
         cache_manager.radix_cache = radix
         req.cache_tiers = (CacheTier.GPU,) if True else ()
         released = cache_manager._release_request_cache(req)

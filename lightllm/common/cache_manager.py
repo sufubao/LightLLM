@@ -10,31 +10,53 @@ from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 logger = init_logger(__name__)
 
 
-class RequestCacheManager:
+class CacheManager:
     has_state_cache = False
     state_manager = None
     linear_state_manager = None
     indexer_state_manager = None
 
-    def __init__(self, args):
+    def __init__(self, args, max_request_num, max_sequence_length, *, device="cuda"):
         self.args = args
         self.mem_manager = None
-        self.req_to_token_indexs = None
+        # 这里对最大请求数量的管理在默认上多申请了一个，主要是 index 为 max_request_num 代表
+        # 的这个请求管理 id， 主要是为了兼容 DP 运行模式下，让各个 DP 能 padding 到 DP 中最大
+        # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
+        # 这样让 DP 的实现更为简化一些。
+        page_size = args.page_size
+        max_sequence_length = triton.cdiv(max_sequence_length, page_size) * page_size
+        self.req_to_token_indexs = torch.zeros(
+            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device=device
+        )
         self.radix_cache = None
         self.cpu_cache_client = None
 
-    def bind_context(self, req_to_token_indexs, radix_cache):
-        if self.req_to_token_indexs is not None:
-            if self.req_to_token_indexs is not req_to_token_indexs or self.radix_cache is not radix_cache:
-                raise ValueError("RequestCacheManager is already bound to a different request context")
-            return
+    def init_hold_request_indexs(self, hold_token_indexes):
+        # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
+        # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
+        # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
+        hold_row = self.req_to_token_indexs[-1]
+        hold_page = torch.tensor(hold_token_indexes, dtype=hold_row.dtype, device=hold_row.device)
+        assert hold_page.numel() == self.args.page_size
+        hold_row.view(-1, self.args.page_size).copy_(hold_page)
+
+    def bind_radix_cache(self, radix_cache):
+        if self.radix_cache is not None and self.radix_cache is not radix_cache:
+            raise ValueError("CacheManager is already bound to a different radix cache")
         self.validate_radix_cache(radix_cache)
-        self.req_to_token_indexs = req_to_token_indexs
         self.radix_cache = radix_cache
+
+    def flush_cache(self):
+        if self.radix_cache is not None:
+            self.radix_cache.flush_cache()
+
+    def merge_unreferenced_nodes(self):
+        if self.radix_cache is not None:
+            self.radix_cache.merge_unreferenced_nodes()
 
     def bind_cpu_cache_client(self, cpu_cache_client):
         if self.cpu_cache_client is not None and self.cpu_cache_client is not cpu_cache_client:
-            raise ValueError("RequestCacheManager is already bound to a different CPU cache client")
+            raise ValueError("CacheManager is already bound to a different CPU cache client")
         self.cpu_cache_client = cpu_cache_client
 
     def get_available_token_num(self):
@@ -106,7 +128,7 @@ class RequestCacheManager:
 
     def bind_mem_manager(self, mem_manager):
         if self.mem_manager is not None and self.mem_manager is not mem_manager:
-            raise ValueError("RequestCacheManager is already bound to a different memory manager")
+            raise ValueError("CacheManager is already bound to a different memory manager")
         self.mem_manager = mem_manager
 
     def validate_radix_cache(self, radix_cache):
@@ -164,6 +186,41 @@ class RequestCacheManager:
             req.shared_kv_node = None
         return free_indexes
 
+    def publish_request_prefix(self, master_req):
+        key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
+        key = torch.tensor(key, dtype=torch.int64, device="cpu")
+        value = self.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
+        prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
+        old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
+        assert old_prefix_len <= master_req.cur_kv_len
+        self.mem_manager.free(self.req_to_token_indexs[master_req.req_idx][old_prefix_len:prefix_len])
+
+        # 将原有共享节点替换为新共享节点，新共享节点对应的长度为当前的cur_kv_len
+        self.radix_cache.dec_node_ref_counter(master_req.shared_kv_node)
+        self.radix_cache.add_node_ref_counter(new_shared_kv_node)
+        master_req.shared_kv_node = new_shared_kv_node
+        assert (
+            new_shared_kv_node.node_prefix_total_len == master_req.cur_kv_len
+        ), f"shared len: {new_shared_kv_node.node_prefix_total_len} cur_kv_len {master_req.cur_kv_len}"
+
+        share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
+        assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
+        self.req_to_token_indexs[master_req.req_idx][0 : master_req.cur_kv_len] = value
+        return
+
+    def share_request_prefix(self, master_req, slave_req):
+        self.radix_cache.dec_node_ref_counter(slave_req.shared_kv_node)
+        self.radix_cache.add_node_ref_counter(master_req.shared_kv_node)
+
+        kv_len = master_req.cur_kv_len
+
+        self.req_to_token_indexs[slave_req.req_idx][0:kv_len] = self.req_to_token_indexs[master_req.req_idx][0:kv_len]
+        # torch.cuda.current_stream().synchronize()
+        slave_req.shared_kv_node = master_req.shared_kv_node
+        slave_req.cur_kv_len = kv_len
+        # slave 在 prefill 阶段没有独立分配 KV，共享完成后需要同步其已持有的 KV 长度。
+        slave_req.hold_kv_len = kv_len
+
     def restore_peer_state(self, req_idx, restored_len, peer_state, peer_req_idx):
         return
 
@@ -188,11 +245,21 @@ class RequestCacheManager:
         )
 
 
-class HybridRequestCacheManager(RequestCacheManager):
+class HybridCacheManager(CacheManager):
     """Coordinate KV prefix reuse and hybrid attention state checkpoints."""
 
-    def __init__(self, args, linear_state_manager=None, indexer_state_manager=None, *, state_manager=None):
-        super().__init__(args)
+    def __init__(
+        self,
+        args,
+        max_request_num,
+        max_sequence_length,
+        linear_state_manager=None,
+        indexer_state_manager=None,
+        *,
+        state_manager=None,
+        device="cuda",
+    ):
+        super().__init__(args, max_request_num, max_sequence_length, device=device)
         self.state_manager = state_manager if state_manager is not None else linear_state_manager
         self.linear_state_manager = linear_state_manager
         self.indexer_state_manager = indexer_state_manager
@@ -207,7 +274,7 @@ class HybridRequestCacheManager(RequestCacheManager):
         if self.mem_manager is mem_manager:
             return
         if self.mem_manager is not None:
-            raise ValueError("HybridRequestCacheManager is already bound to a different memory manager")
+            raise ValueError("HybridCacheManager is already bound to a different memory manager")
         if self.has_state_cache:
             args = self.args
             big_page_tokens = args.linear_att_page_block_num * args.linear_att_hash_page_size

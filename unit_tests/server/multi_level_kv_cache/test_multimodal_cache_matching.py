@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.request_cache_manager import RequestCacheManager
+from lightllm.common.cache_manager import CacheManager
 from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
 from lightllm.utils.kv_cache_utils import CpuKVCacheMeta
 
@@ -77,7 +77,9 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),
+            req_manager=SimpleNamespace(
+                cache_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1))
+            ),
             mem_manager=SimpleNamespace(
                 operator=SimpleNamespace(
                     load_cpu_cache_to_gpu=lambda mem_indexes, page_indexes, cpu_cache_client, req: copied_pages.extend(
@@ -87,12 +89,16 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
             ),
         ),
     )
-    module.backend.model.request_cache_manager = RequestCacheManager(module.args)
-    module.backend.model.request_cache_manager.bind_mem_manager(module.backend.model.mem_manager)
-    module.backend.model.request_cache_manager.bind_cpu_cache_client(client)
-    module.backend.model.request_cache_manager.alloc_req_kv = allocate
-    module.backend.model.request_cache_manager.get_available_token_num = lambda: 1024
-    monkeypatch.setattr(common.g_infer_context, "request_cache_manager", module.backend.model.request_cache_manager)
+    module.backend.model.req_manager.cache_manager = CacheManager(module.args, 2, 16, device="cpu")
+    module.backend.model.req_manager.cache_manager.bind_mem_manager(module.backend.model.mem_manager)
+    module.backend.model.req_manager.cache_manager.bind_cpu_cache_client(client)
+    module.backend.model.req_manager.cache_manager.alloc_req_kv = allocate
+    module.backend.model.req_manager.cache_manager.get_available_token_num = lambda: 1024
+    monkeypatch.setattr(
+        common.g_infer_context,
+        "req_manager",
+        SimpleNamespace(cache_manager=module.backend.model.req_manager.cache_manager),
+    )
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))

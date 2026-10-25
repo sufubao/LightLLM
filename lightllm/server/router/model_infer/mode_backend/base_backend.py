@@ -152,10 +152,10 @@ class ModeBackend:
                 f"--enable_dp_prompt_cache_fetch is not supported by {type(self.model.mem_manager).__name__}"
             )
         set_random_seed(2147483647)
-        self.is_hybrid_att_model = self.model.request_cache_manager.has_state_cache
+        self.is_hybrid_att_model = self.model.req_manager.cache_manager.has_state_cache
 
         if self.is_hybrid_att_model:
-            self.small_page_buffers = self.model.request_cache_manager.create_small_page_cache_manager(
+            self.small_page_buffers = self.model.req_manager.cache_manager.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size,
             )
         else:
@@ -172,7 +172,7 @@ class ModeBackend:
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
                     small_page_buffers=self.small_page_buffers,
-                    big_page_buffers=self.model.request_cache_manager.big_page_buffers,
+                    big_page_buffers=self.model.req_manager.cache_manager.big_page_buffers,
                 )
             else:
                 self.radix_cache = RadixCache(
@@ -182,7 +182,7 @@ class ModeBackend:
                     page_size=self.args.page_size,
                 )
 
-        self.model.request_cache_manager.bind_context(self.model.req_manager.req_to_token_indexs, self.radix_cache)
+        self.model.req_manager.cache_manager.bind_radix_cache(self.radix_cache)
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
@@ -201,7 +201,6 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
             cache_placement_controller=cache_placement_controller,
-            request_cache_manager=self.model.request_cache_manager,
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
@@ -228,8 +227,8 @@ class ModeBackend:
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
             self.kv_transfer_resources = KVTransferResources(
                 self.model.mem_manager.get_transfer_view(include_page_layout=self.is_pd_mode),
-                self.model.req_manager.req_to_token_indexs,
-                self.model.request_cache_manager.create_state_transfer(),
+                self.model.req_manager.cache_manager.req_to_token_indexs,
+                self.model.req_manager.cache_manager.create_state_transfer(),
             )
             self.kv_transfer_resources.write_to_shm()
             dist.barrier(group=self.node_nccl_group)
@@ -619,7 +618,7 @@ class ModeBackend:
             and self.radix_cache is not None
         ):
             start = time.time()
-            self.radix_cache.merge_unreferenced_nodes()
+            self.model.req_manager.cache_manager.merge_unreferenced_nodes()
             self.logger.info(
                 f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s in rank {self.global_rank}"
             )
@@ -706,7 +705,7 @@ class ModeBackend:
         wait_pause_count = 0
         prefill_tokens = 0
 
-        can_alloc_token_num = g_infer_context.request_cache_manager.get_available_token_num()
+        can_alloc_token_num = g_infer_context.req_manager.cache_manager.get_available_token_num()
 
         for req_obj in ready_reqs:
             if req_obj.filter_mark:
@@ -738,7 +737,7 @@ class ModeBackend:
                 if alloc_token_num > 0 and self.args.page_size < 8:
                     alloc_token_num += 8 // self.args.page_size * self.args.page_size
                 if alloc_token_num <= can_alloc_token_num:
-                    self.model.request_cache_manager.alloc_req_kv(req_obj, alloc_token_num, non_blocking=True)
+                    self.model.req_manager.cache_manager.alloc_req_kv(req_obj, alloc_token_num, non_blocking=True)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
                 else:
@@ -775,7 +774,7 @@ class ModeBackend:
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
                 if alloc_token_num <= can_alloc_token_num:
-                    self.model.request_cache_manager.alloc_req_kv(req_obj, alloc_token_num, non_blocking=True)
+                    self.model.req_manager.cache_manager.alloc_req_kv(req_obj, alloc_token_num, non_blocking=True)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
@@ -1001,7 +1000,7 @@ class ModeBackend:
         prompt_cache_kv_buffer_path = os.path.join(
             self.weight_dir, model_cfg["prompt_cache_kv_buffer"][f"rank_{cur_rank}"]
         )
-        self.model.request_cache_manager.preload_prompt_cache_kv_buffer(
+        self.model.req_manager.cache_manager.preload_prompt_cache_kv_buffer(
             prompt_cache_kv_buffer_path, model_cfg["prompt_cache_token_ids"]
         )
 

@@ -227,7 +227,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         ) = build_dynamic_mtp_linear_att_state_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.infer_state.linear_state_manager.mtp_state_index,
+            req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
@@ -249,7 +249,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = self.infer_state.linear_state_manager.mtp_state_index[self.b_conv_buffer_idx] + 1
+        self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):

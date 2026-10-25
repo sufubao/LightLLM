@@ -10,7 +10,7 @@ from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
-from lightllm.common.request_cache_manager import HybridRequestCacheManager
+from lightllm.common.cache_manager import HybridCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.indexer_state import IndexerStateManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
@@ -61,15 +61,17 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
-    def _init_request_cache_manager(self):
+    def _create_cache_manager(self, max_sequence_length):
         self.linear_config = Glm5NextCacheConfig.from_model_config(self.config, self.args)
         assert (
             self.args.linear_att_hash_page_size % self.linear_config.index_kpool == 0
         ), "GLM K-pool requires cache pages aligned to index_kpool"
         if self.args.mtp_step > 0:
             assert self.args.enable_prefill_decode_mixed is False
-        self.request_cache_manager = HybridRequestCacheManager(
+        return HybridCacheManager(
             self.args,
+            self.max_req_num,
+            max_sequence_length,
             linear_state_manager=LinearStateManager(self.max_req_num, self.linear_config, self.args),
             indexer_state_manager=IndexerStateManager(self.max_req_num, self.linear_config, self.args.mtp_step),
         )

@@ -8,7 +8,6 @@ from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.request_cache_manager import RequestCacheManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import TreeNode
@@ -37,7 +36,6 @@ logger = init_logger(__name__)
 class InferenceContext:
     backend: Optional["ModeBackend"] = None
     req_manager: ReqManager = None  # gpu 请求管理
-    request_cache_manager: Optional[RequestCacheManager] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
     requests_mapping: Dict[int, "InferReq"] = None
     infer_req_ids = None
@@ -56,15 +54,11 @@ class InferenceContext:
         req_manager: ReqManager,
         shm_req_manager: ShmReqManager,
         vocab_size: int,
-        request_cache_manager: RequestCacheManager,
         cache_placement_controller: Optional[CachePlacementController] = None,
     ):
-        self.args = request_cache_manager.args
+        self.args = req_manager.cache_manager.args
         self.backend: ModeBackend = backend
         self.req_manager = req_manager
-        self.request_cache_manager = request_cache_manager
-        if request_cache_manager.req_to_token_indexs is not req_manager.req_to_token_indexs:
-            raise ValueError("Request manager and cache manager must share the request index table")
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager
         self.shm_req_manager = shm_req_manager
         self.cache_placement_controller = cache_placement_controller
@@ -74,7 +68,7 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.is_hybrid_att_model = self.request_cache_manager.has_state_cache
+        self.is_hybrid_att_model = self.req_manager.cache_manager.has_state_cache
         self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
@@ -118,7 +112,7 @@ class InferenceContext:
             assert r_id not in self.requests_mapping.keys()
             r_obj = InferReq(
                 req_id=r_id,
-                req_idx=self.req_manager.alloc(),
+                req_idx=self.req_manager.alloc_slot(),
                 shm_index=r_index,
                 dp_rank_in_node=dp_rank_in_node,
                 multimodal_params=multimodal_params,
@@ -162,8 +156,7 @@ class InferenceContext:
                 req.clear_master_slave_state()
             if should_modify_shm:
                 req.final_token_metadata.dump()
-        self.request_cache_manager.release_request_caches(reqs)
-        self.req_manager.free([req.req_idx for req in reqs])
+        self.req_manager.release_requests(reqs)
         for req_id, req in zip(finished_request_ids, reqs):
             self.requests_mapping.pop(req_id)
             if should_modify_shm:
@@ -174,7 +167,7 @@ class InferenceContext:
         finished = set(finished_request_ids)
         self.infer_req_ids = [req_id for req_id in self.infer_req_ids if req_id not in finished]
         if not self.infer_req_ids:
-            self.request_cache_manager.log_cache_stats()
+            self.req_manager.cache_manager.log_cache_stats()
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):
         if finished_reqs:
@@ -188,7 +181,7 @@ class InferenceContext:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-            self.request_cache_manager.release_request_caches(pause_reqs)
+            self.req_manager.cache_manager.release_request_caches(pause_reqs)
             for req in pause_reqs:
                 assert req.wait_pause is True
                 req.wait_pause = False
@@ -201,7 +194,7 @@ class InferenceContext:
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
-            can_alloc_token_num = self.request_cache_manager.get_available_token_num()
+            can_alloc_token_num = self.req_manager.cache_manager.get_available_token_num()
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
@@ -210,7 +203,7 @@ class InferenceContext:
                 if alloc_token_num > can_alloc_token_num:
                     break
 
-                self.request_cache_manager.restore_prefix(req)
+                self.req_manager.cache_manager.restore_prefix(req)
 
                 assert req.paused is True
                 req.paused = False
@@ -349,7 +342,7 @@ class InferReq:
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:
-            g_infer_context.request_cache_manager.restore_prefix(self)
+            g_infer_context.req_manager.cache_manager.restore_prefix(self)
         return
 
     def _init_all_state(self):

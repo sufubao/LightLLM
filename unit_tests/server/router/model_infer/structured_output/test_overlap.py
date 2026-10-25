@@ -68,7 +68,9 @@ def test_overlap_handoff_completes_postprocessing_before_sampling(
     )
     monkeypatch.setattr(impl.g_infer_context, "get_overlap_stream", lambda: None)
     monkeypatch.setattr(
-        impl.g_infer_context, "request_cache_manager", SimpleNamespace(save_state_cache=lambda **kwargs: None)
+        impl.g_infer_context,
+        "req_manager",
+        SimpleNamespace(cache_manager=SimpleNamespace(save_state_cache=lambda **kwargs: None)),
     )
     monkeypatch.setattr(impl.g_infer_context, "is_hybrid_att_model", False)
     second_forward = Event()

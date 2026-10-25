@@ -40,10 +40,12 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     tasks = []
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
-    backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
+    backend.model = SimpleNamespace(
+        req_manager=SimpleNamespace(cache_manager=SimpleNamespace(req_to_token_indexs=table))
+    )
     backend.is_master_in_dp = False
-    backend.model.request_cache_manager = SimpleNamespace()
-    backend.model.request_cache_manager.alloc_req_kv = lambda req, size: _reserve_into_table(
+    backend.model.req_manager = SimpleNamespace(cache_manager=SimpleNamespace())
+    backend.model.req_manager.cache_manager.alloc_req_kv = lambda req, size: _reserve_into_table(
         table, req, alloc_sizes, next_index, size
     )
 
@@ -126,8 +128,8 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         node_nccl_group=None,
         req_to_token_indexes_by_rank=[source_table] * 2,
     )
-    backend.model.request_cache_manager = SimpleNamespace()
-    backend.model.request_cache_manager.alloc_req_kv = lambda cur_req, size: _reserve_into_table(
+    backend.model.req_manager = SimpleNamespace(cache_manager=SimpleNamespace())
+    backend.model.req_manager.cache_manager.alloc_req_kv = lambda cur_req, size: _reserve_into_table(
         table, cur_req, alloc_sizes, next_index, size
     )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
@@ -135,10 +137,9 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=table),
-        request_cache_manager=backend.model.request_cache_manager,
+        req_manager=SimpleNamespace(cache_manager=backend.model.req_manager.cache_manager),
     )
-    backend.model.request_cache_manager.get_available_token_num = lambda: 100
+    backend.model.req_manager.cache_manager.get_available_token_num = lambda: 100
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
 

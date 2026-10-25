@@ -7,7 +7,7 @@ import torch
 
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.request_cache_manager import HybridRequestCacheManager
+from lightllm.common.cache_manager import HybridCacheManager
 from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -61,8 +61,8 @@ def linear_cache(monkeypatch, tmp_path, request):
     monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.get_num_key_value_heads", lambda _: 1)
     mem = MemoryManager(384, torch.bfloat16, 1, 8, 1)
     mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
-    requests = ReqManager(2, 512, args.page_size)
-    cache_manager = HybridRequestCacheManager(args, LinearStateManager(2, config, args))
+    cache_manager = HybridCacheManager(args, 2, 512, LinearStateManager(2, config, args))
+    requests = ReqManager(2, cache_manager)
     cache_manager.bind_mem_manager(mem)
     cache_manager.create_small_page_cache_manager(2)
     cache_manager.radix_cache = SimpleNamespace(
@@ -70,8 +70,6 @@ def linear_cache(monkeypatch, tmp_path, request):
         free_one_small_page_buffer=lambda: None,
         small_page_buffers=cache_manager.small_page_buffers,
     )
-    cache_manager.req_to_token_indexs = requests.req_to_token_indexs
-    monkeypatch.setattr(g_infer_context, "request_cache_manager", cache_manager)
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(g_infer_context, "req_manager", requests)
     yield mem, requests, cache_manager, config
@@ -154,14 +152,17 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
 
     def allocate(req, count):
         allocated = mem.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
+        requests.cache_manager.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
         req.hold_kv_len = count
         return allocated
 
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        model=SimpleNamespace(mem_manager=mem, req_manager=requests, request_cache_manager=cache_manager),
+        model=SimpleNamespace(
+            mem_manager=mem,
+            req_manager=requests,
+        ),
     )
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
@@ -265,7 +266,7 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
 
     def allocate(req, count):
         allocated = mem.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
+        requests.cache_manager.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
         req.hold_kv_len = count
         return allocated
 
@@ -274,7 +275,10 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        model=SimpleNamespace(mem_manager=mem, req_manager=requests, request_cache_manager=cache_manager),
+        model=SimpleNamespace(
+            mem_manager=mem,
+            req_manager=requests,
+        ),
     )
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
@@ -317,7 +321,9 @@ def test_ipc_export_keeps_checkpoints_pinned_and_state_separate(linear_cache):
     assert all(tensor.is_pinned() for tensor in tensors)
     mem.unrelated_resource = lambda: None
     resources = KVTransferResources(
-        KVTransferView.from_mem_manager(mem), requests.req_to_token_indexs, cache_manager.create_state_transfer()
+        KVTransferView.from_mem_manager(mem),
+        requests.cache_manager.req_to_token_indexs,
+        cache_manager.create_state_transfer(),
     )
     assert len(ForkingPickler.dumps(resources)) > 0
     assert all(tensor.is_pinned() for tensor in tensors)
@@ -327,7 +333,7 @@ def test_ipc_export_keeps_checkpoints_pinned_and_state_separate(linear_cache):
     assert not hasattr(resources.kv, "operator")
     assert not hasattr(resources.kv, "req_to_token_indexs")
     assert not hasattr(resources.kv, "req_to_conv_state")
-    assert resources.req_to_token_indexes.data_ptr() == requests.req_to_token_indexs.data_ptr()
+    assert resources.req_to_token_indexes.data_ptr() == requests.cache_manager.req_to_token_indexs.data_ptr()
     assert (
         resources.state_transfer.req_to_ssm_state.buffer.data_ptr()
         == cache_manager.linear_state_manager.ssm_state.buffer.data_ptr()

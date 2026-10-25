@@ -202,22 +202,18 @@ def test_mode_proposals_own_their_schedule_metadata():
 
 @pytest.mark.parametrize("has_state", [False, True])
 def test_verify_mtp_state_provider(monkeypatch, has_state):
-    from lightllm.common.request_cache_manager import RequestCacheManager, HybridRequestCacheManager
+    from lightllm.common.req_manager import ReqManager
 
     commit_args = {}
-    state = SimpleNamespace(commit_accepted_state=lambda **kwargs: commit_args.update(kwargs))
-    cache_manager = (
-        HybridRequestCacheManager(SimpleNamespace(), state_manager=state)
+    requests = ReqManager.__new__(ReqManager)
+    requests.req_to_mtp_state_index = torch.zeros(3, dtype=torch.int32) if has_state else None
+    requests.req_sampling_params_manager = SimpleNamespace(req_to_next_token_ids=None)
+    requests.cache_manager = SimpleNamespace(
+        state_manager=SimpleNamespace(commit_accepted_state=lambda **kwargs: commit_args.update(kwargs))
         if has_state
-        else RequestCacheManager(SimpleNamespace())
+        else None
     )
-    backend = SimpleNamespace(
-        max_draft_step=1,
-        model=SimpleNamespace(
-            request_cache_manager=cache_manager,
-            req_manager=SimpleNamespace(req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=None)),
-        ),
-    )
+    backend = SimpleNamespace(max_draft_step=1, model=SimpleNamespace(req_manager=requests))
     accept_lengths = torch.tensor([2, 1], dtype=torch.int32)
     accepted_index = torch.tensor([True, True, True, False])
     monkeypatch.setattr(mtp_utils, "mtp_verify", lambda **kwargs: (accept_lengths, accepted_index))
@@ -231,6 +227,7 @@ def test_verify_mtp_state_provider(monkeypatch, has_state):
 
     assert lengths is accept_lengths and accepted is accepted_index
     if has_state:
+        assert commit_args["req_to_mtp_state_index"] is requests.req_to_mtp_state_index
         assert commit_args["b_req_idx"] is req_idx
         assert commit_args["b_req_mtp_start_loc"] is start_loc
         assert commit_args["b_mtp_index"] is mtp_index

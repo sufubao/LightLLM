@@ -76,10 +76,10 @@ class DPKVSharedMoudle:
             if (
                 is_current_dp_handle
                 and trans_size > 0
-                and alloc_token_num <= g_infer_context.request_cache_manager.get_available_token_num()
+                and alloc_token_num <= g_infer_context.req_manager.cache_manager.get_available_token_num()
             ):
                 assert req.hold_kv_len == req.cur_kv_len
-                mem_indexes = self.backend.model.request_cache_manager.alloc_req_kv(req, alloc_token_num)
+                mem_indexes = self.backend.model.req_manager.cache_manager.alloc_req_kv(req, alloc_token_num)
                 assert mem_indexes is not None
                 # mem_indexes 只描述需要复制的逻辑 KV；页尾预留槽位已经由
                 # alloc_req_kv 写入请求表，但不参与本次跨 DP 传输。
@@ -130,7 +130,7 @@ class DPKVSharedMoudle:
 
         for trans_task in trans_tasks:
             restored_len = trans_task.req.cur_kv_len + len(trans_task.mem_indexes)
-            self.backend.model.request_cache_manager.restore_peer_state(
+            self.backend.model.req_manager.cache_manager.restore_peer_state(
                 trans_task.req.req_idx,
                 restored_len,
                 self.backend.peer_states[trans_task.max_kv_len_mem_manager_index],

@@ -192,7 +192,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
         split_qkv=lambda x: x.split(hidden, -1),
     )
     manager = SimpleNamespace(
-        mtp_state_index=accepted_offsets, HOLD_REQUEST_ID=3, get_layer_buffers=lambda layer: (conv, ssm)
+        req_to_mtp_state_index=accepted_offsets, HOLD_REQUEST_ID=3, get_layer_buffers=lambda layer: (conv, ssm)
     )
     infer = InferStateInfo()
     infer.batch_size = tokens

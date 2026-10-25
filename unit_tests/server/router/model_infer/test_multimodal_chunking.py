@@ -1,4 +1,4 @@
-from lightllm.common.request_cache_manager import RequestCacheManager
+from lightllm.common.cache_manager import CacheManager
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +12,7 @@ def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
+        page_size=1,
         chunked_prefill_size=256,
         batch_max_tokens=1024,
         disable_chunked_prefill=False,
@@ -57,6 +58,7 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
+        page_size=1,
         chunked_prefill_size=256,
         batch_max_tokens=2048,
         linear_att_hash_page_size=64,
@@ -73,7 +75,7 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     big_snapshots, small_snapshots = [], []
     page_ends = list(range(64 * big_page_num, req.hybrid_cache_len + 1, 64 * big_page_num))
     slots = iter(range(len(page_ends)))
-    context = InferenceContext()
+    context = InferenceContext(req_manager=SimpleNamespace())
     context.args = req.args
     context.is_hybrid_att_model = True
     context.radix_cache = SimpleNamespace(
@@ -83,22 +85,25 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
         small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7, checkpoint_lens=[None] * 8),
         free_one_small_page_buffer=lambda: None,
     )
-    from lightllm.common.request_cache_manager import HybridRequestCacheManager
+    from lightllm.common.cache_manager import HybridCacheManager
 
-    context.request_cache_manager = HybridRequestCacheManager(
+    context.req_manager.cache_manager = HybridCacheManager(
         req.args,
+        2,
+        16,
         state_manager=SimpleNamespace(
             capture_intermediate_checkpoints=False,
             save_checkpoints=lambda req_idx, reqs, slots, pool, lengths: big_snapshots.extend(lengths),
             save_state=lambda req_idx, slot, pool, length: small_snapshots.append(length),
         ),
+        device="cpu",
     )
-    context.request_cache_manager.radix_cache = context.radix_cache
-    context.request_cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
-    context.request_cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
+    context.req_manager.cache_manager.radix_cache = context.radix_cache
+    context.req_manager.cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
+    context.req_manager.cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
 
     while req.cur_kv_len < req.get_cur_total_len():
-        context.request_cache_manager.save_state_cache(torch.tensor([0]), [req])
+        context.req_manager.cache_manager.save_state_cache(torch.tensor([0]), [req])
         req.cur_kv_len = req.get_chuncked_input_token_len()
 
     assert big_snapshots == expected_big
@@ -138,7 +143,9 @@ def test_full_attention_gpu_restore_stays_outside_image(
     monkeypatch.setattr(
         g_infer_context,
         "req_manager",
-        SimpleNamespace(req_to_token_indexs=torch.empty((1, len(query)), dtype=torch.int64)),
+        SimpleNamespace(
+            cache_manager=SimpleNamespace(req_to_token_indexs=torch.empty((1, len(query)), dtype=torch.int64))
+        ),
     )
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(page_size=page_size)
@@ -147,10 +154,10 @@ def test_full_attention_gpu_restore_stays_outside_image(
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
-    cache_manager = RequestCacheManager(req.args)
+    cache_manager = CacheManager(req.args, 2, 16, device="cpu")
     cache_manager.radix_cache = radix_cache
-    cache_manager.req_to_token_indexs = g_infer_context.req_manager.req_to_token_indexs
-    monkeypatch.setattr(g_infer_context, "request_cache_manager", cache_manager)
+    cache_manager.req_to_token_indexs = g_infer_context.req_manager.cache_manager.req_to_token_indexs
+    monkeypatch.setattr(g_infer_context, "req_manager", SimpleNamespace(cache_manager=cache_manager))
     cache_manager.restore_prefix(req)
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
@@ -285,7 +292,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(cache_manager=SimpleNamespace(req_to_token_indexs=table)),
             mem_manager=SimpleNamespace(
                 operator=SimpleNamespace(
                     load_cpu_cache_to_gpu=lambda **kwargs: loaded.append(req.cur_kv_len),
@@ -294,13 +301,18 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             ),
         ),
     )
-    module.backend.model.request_cache_manager = module.backend.model.mem_manager.operator
+    module.backend.model.req_manager.cache_manager = module.backend.model.mem_manager.operator
+    module.backend.model.req_manager.cache_manager.req_to_token_indexs = table
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
-    module.backend.model.request_cache_manager.alloc_req_kv = allocate
-    module.backend.model.request_cache_manager.get_available_token_num = lambda: 8192
-    monkeypatch.setattr(common.g_infer_context, "request_cache_manager", module.backend.model.request_cache_manager)
+    module.backend.model.req_manager.cache_manager.alloc_req_kv = allocate
+    module.backend.model.req_manager.cache_manager.get_available_token_num = lambda: 8192
+    monkeypatch.setattr(
+        common.g_infer_context,
+        "req_manager",
+        SimpleNamespace(cache_manager=module.backend.model.req_manager.cache_manager),
+    )
     monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", hybrid)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)

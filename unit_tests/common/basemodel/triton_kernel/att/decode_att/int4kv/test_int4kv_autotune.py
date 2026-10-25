@@ -140,7 +140,9 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.max_kv_seq_len = 8193
     infer_state.b_req_idx = inputs["B_req_idx"]
     infer_state.b_seq_len = inputs["B_Seqlen"]
-    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
+    infer_state.req_manager = SimpleNamespace(
+        cache_manager=SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
+    )
     state = Int4kvTritonDecodeAttState(
         backend=SimpleNamespace(),
         _infer_state_weak_ref=weakref.ref(infer_state),

@@ -50,19 +50,19 @@ class _ReqLinkedList:
 
 
 class ReqManager:
-    def __init__(self, max_request_num, max_sequence_length, page_size):
+    def __init__(self, max_request_num, cache_manager):
         from .req_sampling_params import ReqSamplingParamsManager
 
-        # 这里对最大请求数量的管理在默认上多申请了一个，主要是 index 为 max_request_num 代表
-        # 的这个请求管理 id， 主要是为了兼容 DP 运行模式下，让各个 DP 能 padding 到 DP 中最大
-        # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
-        # 这样让 DP 的实现更为简化一些。
+        assert cache_manager.req_to_token_indexs.shape[0] == max_request_num + 1
         self.req_list = _ReqLinkedList(max_request_num)
-        self.page_size = page_size
-        max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
-        self.req_to_token_indexs = torch.zeros(
-            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
+        self.cache_manager = cache_manager
+        self.req_to_mtp_state_index = (
+            torch.zeros((max_request_num + 1,), dtype=torch.int32, device=cache_manager.req_to_token_indexs.device)
+            if cache_manager.args.mtp_step > 0 and cache_manager.state_manager is not None
+            else None
         )
+        if cache_manager.linear_state_manager is not None:
+            cache_manager.linear_state_manager.bind_mtp_state_index(self.req_to_mtp_state_index)
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
@@ -71,36 +71,32 @@ class ReqManager:
         assert (
             self.req_list.is_all_free()
         ), "hold request indexes can only be initialized when all requests are released"
+        self.cache_manager.init_hold_request_indexs(hold_token_indexes)
 
-        # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
-        # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
-        # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
-        hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
-        hold_page = torch.tensor(
-            hold_token_indexes,
-            dtype=hold_row.dtype,
-            device=hold_row.device,
-        )
-        assert hold_page.numel() == self.page_size
-        hold_row.view(-1, self.page_size).copy_(hold_page)
-        return
-
-    def alloc(self):
+    def alloc_slot(self):
         return self.req_list.alloc()
 
-    def free(self, free_req_indexes: List[int]):
-        for req_index in free_req_indexes:
+    def release_requests(self, reqs):
+        self.cache_manager.release_request_caches(reqs)
+        self._release_slots([req.req_idx for req in reqs])
+
+    def _release_slots(self, req_indexes: List[int]):
+        for req_index in req_indexes:
             self.req_list.free(req_index)
-
         if self.req_list.is_all_free():
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
 
-    def free_req(self, free_req_index: int):
-        self.req_list.free(free_req_index)
-        if self.req_list.is_all_free():
-            logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
-        return
-
-    def free_all(self):
+    def reset_slots(self):
         self.req_list = _ReqLinkedList(self.max_request_num)
-        return
+
+    def commit_accepted_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
+        if self.cache_manager.state_manager is None:
+            return
+        self.cache_manager.state_manager.commit_accepted_state(
+            req_to_mtp_state_index=self.req_to_mtp_state_index,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            accepted_index=accepted_index,
+            verify_width=verify_width,
+        )

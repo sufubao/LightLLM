@@ -1,4 +1,4 @@
-from lightllm.common.request_cache_manager import HybridRequestCacheManager, RequestCacheManager
+from lightllm.common.cache_manager import HybridCacheManager, CacheManager
 from types import SimpleNamespace
 from collections import deque
 
@@ -43,15 +43,17 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     released_refs = []
     context = InferenceContext()
     context.is_hybrid_att_model = False
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
+    context.req_manager = SimpleNamespace(
+        cache_manager=SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
+    )
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
     req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
     free_token_indexes = []
 
-    cache_manager = RequestCacheManager(SimpleNamespace())
+    cache_manager = CacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
     cache_manager.args = None
-    cache_manager.req_to_token_indexs = context.req_manager.req_to_token_indexs
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
     cache_manager.radix_cache = context.radix_cache
     req.cache_tiers = (CacheTier.GPU,) if False else ()
     free_token_indexes.extend(cache_manager._release_request_cache(req))
@@ -62,11 +64,11 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
 
 
 def test_legacy_cache_tiers_still_insert_gpu_radix_cache(monkeypatch):
-    from lightllm.common import request_cache_manager
+    from lightllm.common import cache_manager as cache_module
 
-    monkeypatch.setattr(request_cache_manager, "custom_cat", torch.cat)
+    monkeypatch.setattr(cache_module, "custom_cat", torch.cat)
     inserted, freed = [], []
-    cache_manager = RequestCacheManager(SimpleNamespace(page_size=1))
+    cache_manager = CacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
     cache_manager.mem_manager = SimpleNamespace(free=lambda indexes: freed.extend(indexes.tolist()))
     cache_manager.req_to_token_indexs = torch.arange(5)[None, :]
     cache_manager.radix_cache = SimpleNamespace(insert=lambda key, value: (inserted.append(key.tolist()) or 0, None))
@@ -150,7 +152,9 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages(monkeypatch, wit
     freed_big_pages = []
     context = InferenceContext()
     context.is_hybrid_att_model = True
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
+    context.req_manager = SimpleNamespace(
+        cache_manager=SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
+    )
     context.radix_cache = SimpleNamespace(
         small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
         big_page_buffers=SimpleNamespace(free_state_cache=freed_big_pages.extend),
@@ -167,20 +171,21 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages(monkeypatch, wit
     )
     free_token_indexes = []
 
-    cache_manager = HybridRequestCacheManager(SimpleNamespace())
+    cache_manager = HybridCacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
     cache_manager.bind_mem_manager(context.radix_cache)
     cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
     cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
-    context.request_cache_manager = cache_manager
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
+    context.req_manager.cache_manager = cache_manager
     context.args = None
     if not with_radix:
         context.radix_cache = None
-    from lightllm.common import request_cache_manager
+    from lightllm.common import cache_manager as cache_module
 
-    monkeypatch.setattr(request_cache_manager, "custom_cat", torch.cat)
+    monkeypatch.setattr(cache_module, "custom_cat", torch.cat)
     cache_manager.args = context.args
     cache_manager.radix_cache = context.radix_cache
-    cache_manager.req_to_token_indexs = context.req_manager.req_to_token_indexs
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
     cache_manager.mem_manager = SimpleNamespace(free=lambda indexes: free_token_indexes.append(indexes))
     cache_manager.release_request_caches([req])
 
@@ -218,19 +223,19 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
         load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist()),
     )
     cache_manager = (
-        RequestCacheManager(SimpleNamespace())
+        CacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
         if checkpoint_len == "full"
-        else HybridRequestCacheManager(SimpleNamespace())
+        else HybridCacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
     )
     cache_manager.cpu_cache_transfer = SimpleNamespace(get_checkpoint_lens=lambda *args: [checkpoint_len])
     cache_manager.load_cpu_cache_to_gpu = operator.load_cpu_cache_to_gpu
+    cache_manager.req_to_token_indexs = table
     backend = SimpleNamespace(
         is_master_in_dp=False,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),
-            request_cache_manager=cache_manager,
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(cache_manager=cache_manager),
         ),
     )
     cache_manager.alloc_req_kv = alloc_req_kv_mem
@@ -242,10 +247,13 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
     module.need_sync_compute_stream = lambda: False
     module.cpu_cache_client = SimpleNamespace()
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
+        req_manager=SimpleNamespace(
+            cache_manager=SimpleNamespace(req_to_token_indexs=table), mem_manager=SimpleNamespace(alloc=alloc)
+        ),
         get_can_alloc_token_num=lambda: 200,
     )
-    context.request_cache_manager = cache_manager
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
+    context.req_manager.cache_manager = cache_manager
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=4,

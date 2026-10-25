@@ -40,7 +40,7 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
-        self.backend.model.request_cache_manager.bind_cpu_cache_client(self.cpu_cache_client)
+        self.backend.model.req_manager.cache_manager.bind_cpu_cache_client(self.cpu_cache_client)
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -63,7 +63,7 @@ class MultiLevelKvCacheModule(object):
         return False
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
-        idle_token_num = g_infer_context.request_cache_manager.get_available_token_num()
+        idle_token_num = g_infer_context.req_manager.cache_manager.get_available_token_num()
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
@@ -88,7 +88,7 @@ class MultiLevelKvCacheModule(object):
                 match_tokens = page_len_list[matched_page_num - 1]
                 cache_len = clamp_mm_cache_len(match_tokens, req.mm_input_spans)
                 if cache_len == match_tokens:
-                    valid_page_num = self.backend.model.request_cache_manager.get_cpu_cache_match_page_num(
+                    valid_page_num = self.backend.model.req_manager.cache_manager.get_cpu_cache_match_page_num(
                         page_list[:matched_page_num], page_len_list[:matched_page_num]
                     )
                     if valid_page_num == matched_page_num:
@@ -120,7 +120,7 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= matched_page_num
                     need_pages = page_list[ready_page_num:matched_page_num]
 
-                    mem_indexes = self.backend.model.request_cache_manager.alloc_req_kv(req, need_token_num)
+                    mem_indexes = self.backend.model.req_manager.cache_manager.alloc_req_kv(req, need_token_num)
                     assert mem_indexes is not None
 
                     if self.need_sync_compute_stream():
@@ -141,7 +141,7 @@ class MultiLevelKvCacheModule(object):
                     _end = req.cur_kv_len
                     assert 0 <= _start <= _end, f"invalid pad range [{_start}, {_end}]"
                     mem_indexes_cuda = torch.cat(
-                        [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
+                        [req_manager.cache_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
                     )
 
                     assert len(mem_indexes_cuda) == match_tokens - page_len_start_list[ready_page_num]
@@ -150,7 +150,7 @@ class MultiLevelKvCacheModule(object):
                     idle_token_num -= need_token_num
                     req.cur_kv_len = req.cur_kv_len + need_token_num
 
-                    self.backend.model.request_cache_manager.load_cpu_cache_to_gpu(
+                    self.backend.model.req_manager.cache_manager.load_cpu_cache_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
                         req=req,
@@ -249,7 +249,7 @@ class MultiLevelKvCacheModule(object):
                     req=req, move_block_size=move_block_size, page_len_list=page_len_list
                 )
 
-                cacheable_len = self.backend.model.request_cache_manager.get_cacheable_prefix_len(req)
+                cacheable_len = self.backend.model.req_manager.cache_manager.get_cacheable_prefix_len(req)
                 move_block_size = min(move_block_size, bisect.bisect_right(page_len_list, cacheable_len))
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -294,9 +294,11 @@ class MultiLevelKvCacheModule(object):
 
             move_token_num = page_len_list[item_size - 1]
             assert req.cur_kv_len >= move_token_num
-            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
+            token_indexes = self.backend.model.req_manager.cache_manager.req_to_token_indexs[
+                req.req_idx, 0:move_token_num
+            ]
 
-            self.backend.model.request_cache_manager.offload_gpu_kv_to_cpu_cache(
+            self.backend.model.req_manager.cache_manager.offload_gpu_kv_to_cpu_cache(
                 mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,

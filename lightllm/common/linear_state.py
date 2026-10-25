@@ -9,9 +9,7 @@ class LinearStateManager:
     def __init__(self, max_request_num, linear_config, args):
         self.linear_config = linear_config
         self.mtp_step = args.mtp_step
-        self.mtp_state_index = (
-            torch.zeros((max_request_num + 1,), dtype=torch.int32, device="cuda") if self.mtp_step > 0 else None
-        )
+        self._req_to_mtp_state_index = None
         self.conv_state = LayerCache(
             size=max_request_num + 1,
             dtype=linear_config.conv_state_dtype,
@@ -27,12 +25,18 @@ class LinearStateManager:
             device="cuda",
         )
 
+    def bind_mtp_state_index(self, req_to_mtp_state_index):
+        if self._req_to_mtp_state_index is not None and self._req_to_mtp_state_index is not req_to_mtp_state_index:
+            raise ValueError("Linear state is already bound to a different request MTP index")
+        # Borrow ReqManager's cursor so restoring state also resets its accepted slot.
+        self._req_to_mtp_state_index = req_to_mtp_state_index
+
     def reset(self, req_idx):
         ssm_start = req_idx * (self.mtp_step + 1)
         self.conv_state.buffer[:, req_idx].zero_()
         self.ssm_state.buffer[:, ssm_start : ssm_start + self.mtp_step + 1].zero_()
-        if self.mtp_state_index is not None:
-            self.mtp_state_index[req_idx] = 0
+        if self._req_to_mtp_state_index is not None:
+            self._req_to_mtp_state_index[req_idx] = 0
 
     def get_layer_buffers(self, layer_idx_in_all):
         assert 0 <= layer_idx_in_all < self.linear_config.all_layer_num
@@ -61,14 +65,16 @@ class LinearStateManager:
     def restore(self, req_idx, conv_state, ssm_state):
         self.conv_state.buffer[:, req_idx, ..., : conv_state.shape[-1]] = conv_state
         self.ssm_state.buffer[:, req_idx * (self.mtp_step + 1)] = ssm_state
-        if self.mtp_state_index is not None:
-            self.mtp_state_index[req_idx] = 0
+        if self._req_to_mtp_state_index is not None:
+            self._req_to_mtp_state_index[req_idx] = 0
 
-    def commit_accepted_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
+    def commit_accepted_state(
+        self, req_to_mtp_state_index, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width
+    ):
         from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
 
         linear_att_mtp_state_index_update(
-            req_to_mtp_state_index=self.mtp_state_index,
+            req_to_mtp_state_index=req_to_mtp_state_index,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,

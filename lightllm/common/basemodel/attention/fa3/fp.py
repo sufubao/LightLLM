@@ -104,7 +104,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
         )
         page_table_copy(
             page_table=self.page_table,
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
             b_req_idx=self.infer_state.b_req_idx,
             page_size=self.backend.infer_page_size,
         )
@@ -262,7 +262,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
 
         page_table_copy(
             page_table=self.page_table[:, :actual_max_page_len],
-            req_to_token_indexs=model.req_manager.req_to_token_indexs,
+            req_to_token_indexs=model.req_manager.cache_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
             page_size=self.backend.infer_page_size,
         )

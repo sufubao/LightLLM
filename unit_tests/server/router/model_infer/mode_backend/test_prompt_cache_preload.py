@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.common.request_cache_manager import RequestCacheManager
+from lightllm.common.cache_manager import CacheManager
 
 
 def test_preload_prompt_cache_keeps_only_complete_kv_pages(monkeypatch):
@@ -33,10 +33,10 @@ def test_preload_prompt_cache_keeps_only_complete_kv_pages(monkeypatch):
     backend.weight_dir = "/model"
     backend.args = SimpleNamespace(page_size=4)
     backend.radix_cache = FakeRadixCache()
-    manager = RequestCacheManager(backend.args)
+    manager = CacheManager(backend.args, 2, 16, device="cpu")
     manager.bind_mem_manager(backend.radix_cache.mem_manager)
-    manager.bind_context(torch.empty((1, 8)), backend.radix_cache)
-    backend.model = SimpleNamespace(request_cache_manager=manager)
+    manager.bind_radix_cache(backend.radix_cache)
+    backend.model = SimpleNamespace(req_manager=SimpleNamespace(cache_manager=manager))
     kv_buffer = torch.arange(12).reshape(1, 6, 2)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch, "load", lambda *args, **kwargs: {"kv_buffer": kv_buffer})

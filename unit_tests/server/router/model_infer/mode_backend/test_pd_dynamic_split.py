@@ -53,7 +53,9 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
 
     infer_context = base_backend.g_infer_context
     monkeypatch.setattr(
-        infer_context, "request_cache_manager", SimpleNamespace(get_available_token_num=MagicMock(return_value=0))
+        infer_context,
+        "req_manager",
+        SimpleNamespace(cache_manager=SimpleNamespace(get_available_token_num=MagicMock(return_value=0))),
     )
     monkeypatch.setattr(
         infer_context,

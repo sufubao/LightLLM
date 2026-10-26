@@ -46,7 +46,7 @@ def token_decode_attention_flash_decoding(
         k_scale=cache_k_scale,
         v=cache_v,
         v_scale=cache_v_scale,
-        Req_to_tokens=infer_state.req_manager.cache_manager.req_to_token_indexs,
+        Req_to_tokens=infer_state.req_to_token_indexs,
         B_req_idx=infer_state.b_req_idx,
         B_seq_len=infer_state.b_seq_len,
         max_len_in_batch=max_len_in_batch,

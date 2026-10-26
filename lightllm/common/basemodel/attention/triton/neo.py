@@ -41,7 +41,7 @@ class NeoTritonPrefillAttState(TritonPrefillAttState):
             self.infer_state.b_seq_len,
             self.infer_state.b_ready_cache_len,
             self.infer_state.max_q_seq_len,
-            self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            self.infer_state.req_to_token_indexs,
             self.infer_state.b_image_token_end,
         )
         return out

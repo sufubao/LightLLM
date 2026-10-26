@@ -74,7 +74,7 @@ class Glm5NextNsaInfer:
     def _get_prefill_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
         keys = gather_pools(
             packed_buffer,
-            infer_state.req_manager.cache_manager.req_to_token_indexs,
+            infer_state.req_to_token_indexs,
             infer_state.b_req_idx,
             infer_state.b_seq_len,
             max_pools,
@@ -108,7 +108,7 @@ class Glm5NextNsaInfer:
         lengths = (att_state.lengths // 4).view(-1, 1)
         pages, block_table = gather_paged_pools(
             packed_buffer,
-            infer_state.req_manager.cache_manager.req_to_token_indexs,
+            infer_state.req_to_token_indexs,
             infer_state.b_req_idx,
             lengths,
             max_pools,

@@ -2,7 +2,6 @@ import torch
 import triton
 import collections
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
@@ -48,7 +47,8 @@ class InferStateInfo:
         self.is_draft_model: bool = False
 
         self.mem_manager: MemoryManager = None
-        self.req_manager: ReqManager = None
+        self.req_to_token_indexs: torch.Tensor = None
+        self.hold_req_id: int = None
         self.linear_state_manager = None
         self.indexer_state_manager = None
 
@@ -174,6 +174,7 @@ class InferStateInfo:
                 state.check_no_infer_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        assert self.req_to_token_indexs is new_infer_state.req_to_token_indexs
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
@@ -422,6 +423,7 @@ class InferStateInfo:
         return
 
     def copy_for_prefill_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        assert self.req_to_token_indexs is new_infer_state.req_to_token_indexs
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)

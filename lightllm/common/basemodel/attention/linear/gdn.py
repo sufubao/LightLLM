@@ -228,7 +228,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
             req_to_mtp_state_index=self.infer_state.linear_state_manager.mtp_state_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
+            hold_req_id=self.infer_state.hold_req_id,
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
 

@@ -444,7 +444,7 @@ def gqa_token_decode_attention_flash_decoding_vsm(
         q,
         k,
         v,
-        infer_state.req_manager.cache_manager.req_to_token_indexs,
+        infer_state.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         torch.empty(
@@ -505,7 +505,7 @@ def gqa_token_decode_attention_flash_decoding_vsm(
         q,
         k,
         v,
-        infer_state.req_manager.cache_manager.req_to_token_indexs,
+        infer_state.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         mid_o,

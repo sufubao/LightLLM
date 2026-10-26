@@ -57,7 +57,7 @@ class TritonPrefillAttState(BasePrefillAttState):
             self.infer_state.b_seq_len,
             self.infer_state.b_ready_cache_len,
             self.infer_state.max_q_seq_len,
-            self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            self.infer_state.req_to_token_indexs,
         )
         return out
 
@@ -87,7 +87,7 @@ class TritonPrefillAttState(BasePrefillAttState):
             self.infer_state.b_seq_len,
             self.infer_state.b_ready_cache_len,
             self.infer_state.max_q_seq_len,
-            self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            self.infer_state.req_to_token_indexs,
             sliding_window=sliding_window,
         )
         return out
@@ -105,7 +105,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         if draft_step > 0:
             self.b_mark_mtp_shared_group = build_mtp_shared_group_markers(
                 self.infer_state.b_req_idx,
-                hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+                hold_req_id=self.infer_state.hold_req_id,
             )
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
@@ -159,7 +159,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             v,
             out,
             att_control.tp_alibi,
-            self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            self.infer_state.req_to_token_indexs,
             self.infer_state.b_req_idx,
             self.infer_state.b_kv_start_loc,
             self.infer_state.b_seq_len,
@@ -239,7 +239,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             q=q,
             k=k,
             v=v,
-            Req_to_tokens=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            Req_to_tokens=self.infer_state.req_to_token_indexs,
             B_req_idx=self.infer_state.b_req_idx,
             b_seq_len=self.infer_state.b_seq_len,
             b_mark_shared_group=self.b_mark_mtp_shared_group,
@@ -291,7 +291,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             k=k,
             v=v,
             out=out,
-            req_to_tokens=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            req_to_tokens=self.infer_state.req_to_token_indexs,
             b_req_idx=self.infer_state.b_req_idx,
             b_seq_len=self.infer_state.b_seq_len,
         )
@@ -318,7 +318,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             q.view(calcu_shape1),
             k,
             att_m_tensor,
-            Req_to_tokens=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            Req_to_tokens=self.infer_state.req_to_token_indexs,
             B_req_idx=self.infer_state.b_req_idx,
             B_Start_Loc=self.infer_state.b_kv_start_loc,
             B_Seqlen=self.infer_state.b_seq_len,
@@ -334,7 +334,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             att_m_tensor,
             v,
             o_tensor.view(calcu_shape1),
-            req_to_tokens=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
+            req_to_tokens=self.infer_state.req_to_token_indexs,
             b_req_idx=self.infer_state.b_req_idx,
             b_start_loc=self.infer_state.b_kv_start_loc,
             b_seq_len=self.infer_state.b_seq_len,

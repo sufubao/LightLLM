@@ -66,7 +66,7 @@ def gqa_token_decode_attention_flash_decoding_fp8(
         kv_nope,
         kv_rope,
         kv_scale,
-        infer_state.req_manager.cache_manager.req_to_token_indexs,
+        infer_state.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         mid_o,
@@ -115,7 +115,7 @@ def gqa_token_decode_attention_flash_decoding_fp8(
         kv_nope,
         kv_rope,
         kv_scale,
-        infer_state.req_manager.cache_manager.req_to_token_indexs,
+        infer_state.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         mid_o,
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     infer_state.batch_size = Z
     infer_state.max_kv_seq_len = N_CTX
     infer_state.total_token_num = Z * N_CTX
-    infer_state.req_manager = SimpleNamespace(cache_manager=SimpleNamespace(req_to_token_indexs=req_to_token_indexs))
+    infer_state.req_to_token_indexs = req_to_token_indexs
     infer_state.b_req_idx = b_req_idx
     infer_state.b_seq_len = b_seq_len
 

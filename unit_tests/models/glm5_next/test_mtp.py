@@ -196,7 +196,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)
     infer.b_mtp_index = torch.tensor(offsets, device="cuda", dtype=torch.int32)
-    infer.req_manager = SimpleNamespace(HOLD_REQUEST_ID=3)
+    infer.hold_req_id = 3
     infer.linear_state_manager = manager
     weight = SimpleNamespace(
         get_merged_kda_conv_weight=lambda: conv_weight,

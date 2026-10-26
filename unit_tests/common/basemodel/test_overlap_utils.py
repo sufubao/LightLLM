@@ -207,3 +207,68 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     assert infer_batch_sizes == [2, 2]
     assert output0.logits.shape == (1, 1)
     assert output1.logits.shape == (0, 1)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_create_inferstate_borrows_cache_resources(monkeypatch, is_prefill):
+    from lightllm.common.cache_manager import HybridCacheManager
+
+    cache = HybridCacheManager(
+        SimpleNamespace(page_size=1),
+        24,
+        16,
+        linear_state_manager=object(),
+        indexer_state_manager=object(),
+        device="cpu",
+    )
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.req_manager = SimpleNamespace(cache_manager=cache, HOLD_REQUEST_ID=24)
+    model.mem_manager = object()
+    model.hidden_collector_prototype = SimpleNamespace(new_instance=lambda: None)
+    model.is_mtp_draft_model = False
+    model.return_all_prompt_logics = False
+    model.prefill_att_backend = SimpleNamespace(create_att_prefill_state=lambda **kwargs: None)
+    model.decode_att_backend = SimpleNamespace(create_att_decode_state=lambda **kwargs: None)
+    model.prefill_att_backend1 = model.decode_att_backend1 = None
+    model._select_mem_indexes = lambda _: None
+    monkeypatch.setattr(basemodel.dist_group_manager, "get_group", lambda _: None)
+    model_input = _make_prefill_input([10, 11], 20, False) if is_prefill else _make_decode_input()
+
+    state = model._create_inferstate(model_input)
+    draft = TpPartBaseModel.__new__(TpPartBaseModel)
+    draft.__dict__.update(model.__dict__)
+    draft.is_mtp_draft_model = True
+    draft_state = draft._create_inferstate(model_input)
+
+    for owner in (state, draft_state):
+        assert owner.req_to_token_indexs is cache.req_to_token_indexs
+        assert owner.hold_req_id == 24
+        assert owner.linear_state_manager is cache.linear_state_manager
+        assert owner.indexer_state_manager is cache.indexer_state_manager
+        assert not hasattr(owner, "req_manager")
+    cache.req_to_token_indexs[20, 0] = 37
+    assert state.req_to_token_indexs[20, 0] == draft_state.req_to_token_indexs[20, 0] == 37
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_graph_copy_keeps_shared_cache_and_copies_batch_inputs(is_prefill):
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    captured, runtime = InferStateInfo(), InferStateInfo()
+    table = torch.arange(32, dtype=torch.int32).reshape(4, 8)
+    captured.req_to_token_indexs = runtime.req_to_token_indexs = table
+    captured.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
+    runtime.b_req_idx = torch.tensor([2, 3], dtype=torch.int32)
+    captured.decode_att_state = SimpleNamespace(copy_for_decode_cuda_graph=lambda _: None)
+    copy_inputs = captured.copy_for_prefill_cuda_graph if is_prefill else captured.copy_for_cuda_graph
+
+    copy_inputs(runtime)
+
+    assert captured.req_to_token_indexs is table
+    assert runtime.req_to_token_indexs is table
+    assert captured.b_req_idx is not runtime.b_req_idx
+    torch.testing.assert_close(captured.b_req_idx, runtime.b_req_idx)
+    runtime.req_to_token_indexs = torch.zeros_like(table)
+    with pytest.raises(AssertionError):
+        copy_inputs(runtime)
+    torch.testing.assert_close(table, torch.arange(32, dtype=torch.int32).reshape(4, 8))

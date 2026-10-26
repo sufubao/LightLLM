@@ -137,13 +137,11 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     infer_state.max_kv_seq_len = 8193
     infer_state.b_req_idx = inputs["B_req_idx"]
     infer_state.b_seq_len = inputs["b_seq_len"]
-    infer_state.req_manager = SimpleNamespace(
-        cache_manager=SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
-    )
+    infer_state.hold_req_id = -1
+    infer_state.req_to_token_indexs = inputs["Req_to_tokens"]
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
-        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     monkeypatch.setattr(state_module, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
     state = state_module.TritonDecodeAttState(

@@ -124,9 +124,7 @@ def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
     infer_state.batch_size = 2
     infer_state.max_kv_seq_len = 4
     infer_state.input_ids = torch.empty(2, dtype=torch.int64)
-    infer_state.req_manager = SimpleNamespace(
-        cache_manager=SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4))
-    )
+    infer_state.req_to_token_indexs = torch.arange(8, dtype=torch.int32).reshape(2, 4)
     state = state_class(
         backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1, infer_page_size=1),
         _infer_state_weak_ref=weakref.ref(infer_state),
@@ -168,9 +166,9 @@ def test_triton_mtp_decode_state_builds_group_markers():
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
-        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     infer_state = InferStateInfo()
+    infer_state.hold_req_id = -1
     infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
     infer_state.max_kv_seq_len = 4
     state = TritonDecodeAttState(
@@ -186,8 +184,9 @@ def test_triton_mtp_decode_state_builds_group_markers():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
 def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
-    model = SimpleNamespace(req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1))
+    model = SimpleNamespace()
     infer_state = InferStateInfo()
+    infer_state.hold_req_id = -1
     infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
     infer_state.b_seq_len = torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda")
     infer_state.batch_size = 4

@@ -1,4 +1,3 @@
-from lightllm.common.kv_transfer_resources import KVTransferResources
 import os
 
 import numpy as np
@@ -8,6 +7,7 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.common.kv_transfer_resources import KVTransferResources
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
@@ -16,7 +16,6 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.req_manager import HybridAttentionReqManager
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
@@ -148,11 +147,15 @@ class ModeBackend:
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
+        if self.args.enable_dp_prompt_cache_fetch and not self.model.mem_manager.operator.supports_dp_cache_fetch:
+            raise ValueError(
+                f"--enable_dp_prompt_cache_fetch is not supported by {type(self.model.mem_manager).__name__}"
+            )
         set_random_seed(2147483647)
-        self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
+        self.is_hybrid_att_model = self.model.req_manager.cache_manager.has_state_cache
 
         if self.is_hybrid_att_model:
-            self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
+            self.small_page_buffers = self.model.req_manager.cache_manager.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size,
             )
         else:
@@ -169,6 +172,7 @@ class ModeBackend:
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
                     small_page_buffers=self.small_page_buffers,
+                    big_page_buffers=self.model.req_manager.cache_manager.big_page_buffers,
                 )
             else:
                 self.radix_cache = RadixCache(
@@ -177,6 +181,8 @@ class ModeBackend:
                     mem_manager=self.model.mem_manager,
                     page_size=self.args.page_size,
                 )
+
+        self.model.req_manager.cache_manager.bind_radix_cache(self.radix_cache)
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
@@ -192,7 +198,6 @@ class ModeBackend:
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
-            radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
             cache_placement_controller=cache_placement_controller,
@@ -220,13 +225,10 @@ class ModeBackend:
             )
 
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
-            # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
-            # 读取
-            state = self.model.req_manager.linear_state_manager
             self.kv_transfer_resources = KVTransferResources(
                 self.model.mem_manager.get_transfer_view(include_page_layout=self.is_pd_mode),
-                self.model.req_manager.req_to_token_indexs,
-                None if state is None else state.create_state_transfer(self.model.req_manager.indexer_state_manager),
+                self.model.req_manager.cache_manager.req_to_token_indexs,
+                self.model.req_manager.cache_manager.create_state_transfer(),
             )
             self.kv_transfer_resources.write_to_shm()
             dist.barrier(group=self.node_nccl_group)
@@ -294,7 +296,6 @@ class ModeBackend:
             self.kv_transfer_resources if rank == self.rank_in_node else KVTransferResources.loads_from_shm(rank)
             for rank in range(self.node_world_size)
         ]
-        self.mem_managers = resources
         self.kv_views = [resource.kv for resource in resources]
         self.peer_states = [resource.state_transfer for resource in resources]
         self.req_to_token_indexes_by_rank = [resource.req_to_token_indexes for resource in resources]
@@ -617,35 +618,13 @@ class ModeBackend:
             and self.radix_cache is not None
         ):
             start = time.time()
-            self.radix_cache.merge_unreferenced_nodes()
+            self.model.req_manager.cache_manager.merge_unreferenced_nodes()
             self.logger.info(
                 f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s in rank {self.global_rank}"
             )
         return
 
     # 一些可以复用的通用功能函数
-    def _alloc_req_kv_mem(
-        self,
-        req_obj: InferReq,
-        alloc_token_num: int,
-        no_blcoking_copy: bool = False,
-    ) -> Optional[torch.Tensor]:
-        if alloc_token_num == 0:
-            return None
-
-        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
-
-        old_hold_kv_len = req_obj.hold_kv_len
-        new_hold_kv_len = old_hold_kv_len + alloc_token_num
-        mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
-        # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
-        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
-            mem_indexes, non_blocking=no_blcoking_copy
-        )
-        req_obj.hold_kv_len = new_hold_kv_len
-        return mem_indexes
 
     @staticmethod
     def _is_decode_req(req: InferReq, no_decode: bool, strict_prefill: bool) -> bool:
@@ -726,10 +705,9 @@ class ModeBackend:
         wait_pause_count = 0
         prefill_tokens = 0
 
-        can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
+        can_alloc_token_num = g_infer_context.req_manager.cache_manager.get_available_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -759,7 +737,7 @@ class ModeBackend:
                 if alloc_token_num > 0 and self.args.page_size < 8:
                     alloc_token_num += 8 // self.args.page_size * self.args.page_size
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    self.model.req_manager.cache_manager.alloc_req_kv(req_obj, alloc_token_num, non_blocking=True)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
                 else:
@@ -796,7 +774,7 @@ class ModeBackend:
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    self.model.req_manager.cache_manager.alloc_req_kv(req_obj, alloc_token_num, non_blocking=True)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
@@ -1022,20 +1000,9 @@ class ModeBackend:
         prompt_cache_kv_buffer_path = os.path.join(
             self.weight_dir, model_cfg["prompt_cache_kv_buffer"][f"rank_{cur_rank}"]
         )
-        page_size = self.args.page_size
-        intact_kv_len = len(model_cfg["prompt_cache_token_ids"]) // page_size * page_size
-        if intact_kv_len == 0:
-            return
-
-        prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
-        prompt_cache_kv_buffer = {name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()}
-        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
-        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
-        intact_token_ids = torch.tensor(
-            model_cfg["prompt_cache_token_ids"][:intact_kv_len], dtype=torch.int64, device="cpu"
+        self.model.req_manager.cache_manager.preload_prompt_cache_kv_buffer(
+            prompt_cache_kv_buffer_path, model_cfg["prompt_cache_token_ids"]
         )
-        self.radix_cache.insert(intact_token_ids, intact_kv_index)
-        self.radix_cache.match_prefix(intact_token_ids, update_refs=True)
 
     def init_rank_infos(self):
         self.node_world_size = get_node_world_size()

@@ -55,7 +55,6 @@ def test_context_attention_fwd(batch, seqlen, q_heads, kv_heads, head_dim):
     infer_state.batch_size = Z
     infer_state.max_q_seq_len = N_CTX
     infer_state.total_token_num = Z * N_CTX
-    infer_state.req_manager = type("Object", (), {})()
     infer_state.req_to_token_indexs = req_to_token_indexs
     infer_state.b_req_idx = b_req_idx
     infer_state.b_seq_len = b_seq_len

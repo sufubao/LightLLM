@@ -40,6 +40,7 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
+        self.backend.model.req_manager.cache_manager.bind_cpu_cache_client(self.cpu_cache_client)
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -62,7 +63,7 @@ class MultiLevelKvCacheModule(object):
         return False
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
-        idle_token_num = g_infer_context.get_can_alloc_token_num()
+        idle_token_num = g_infer_context.req_manager.cache_manager.get_available_token_num()
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
@@ -87,8 +88,14 @@ class MultiLevelKvCacheModule(object):
                 match_tokens = page_len_list[matched_page_num - 1]
                 cache_len = clamp_mm_cache_len(match_tokens, req.mm_input_spans)
                 if cache_len == match_tokens:
-                    break
-                matched_page_num = bisect.bisect_right(page_len_list, cache_len, hi=matched_page_num)
+                    valid_page_num = self.backend.model.req_manager.cache_manager.get_cpu_cache_match_page_num(
+                        page_list[:matched_page_num], page_len_list[:matched_page_num]
+                    )
+                    if valid_page_num == matched_page_num:
+                        break
+                    matched_page_num = valid_page_num
+                else:
+                    matched_page_num = bisect.bisect_right(page_len_list, cache_len, hi=matched_page_num)
             match_tokens = page_len_list[matched_page_num - 1] if matched_page_num else 0
 
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
@@ -113,7 +120,7 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= matched_page_num
                     need_pages = page_list[ready_page_num:matched_page_num]
 
-                    mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
+                    mem_indexes = self.backend.model.req_manager.cache_manager.alloc_req_kv(req, need_token_num)
                     assert mem_indexes is not None
 
                     if self.need_sync_compute_stream():
@@ -121,7 +128,6 @@ class MultiLevelKvCacheModule(object):
                         torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
                         # g_infer_context.get_overlap_stream().synchronize()
 
-                    mem_manager = self.backend.model.mem_manager
                     req_manager = self.backend.model.req_manager
 
                     mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
@@ -135,7 +141,7 @@ class MultiLevelKvCacheModule(object):
                     _end = req.cur_kv_len
                     assert 0 <= _start <= _end, f"invalid pad range [{_start}, {_end}]"
                     mem_indexes_cuda = torch.cat(
-                        [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
+                        [req_manager.cache_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
                     )
 
                     assert len(mem_indexes_cuda) == match_tokens - page_len_start_list[ready_page_num]
@@ -144,11 +150,11 @@ class MultiLevelKvCacheModule(object):
                     idle_token_num -= need_token_num
                     req.cur_kv_len = req.cur_kv_len + need_token_num
 
-                    mem_manager.operator.load_cpu_cache_to_gpu(
+                    self.backend.model.req_manager.cache_manager.load_cpu_cache_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
-                        cpu_cache_client=self.cpu_cache_client,
                         req=req,
+                        page_indexes_cpu=need_pages,
                     )
 
                 torch.cuda.current_stream().synchronize()
@@ -228,13 +234,13 @@ class MultiLevelKvCacheModule(object):
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
         with torch.cuda.stream(cpu_kv_cache_stream):
+            cpu_kv_cache_stream.wait_stream(g_infer_context.get_overlap_stream())
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
             assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
@@ -243,6 +249,8 @@ class MultiLevelKvCacheModule(object):
                     req=req, move_block_size=move_block_size, page_len_list=page_len_list
                 )
 
+                cacheable_len = self.backend.model.req_manager.cache_manager.get_cacheable_prefix_len(req)
+                move_block_size = min(move_block_size, bisect.bisect_right(page_len_list, cacheable_len))
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
                     req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
@@ -286,16 +294,17 @@ class MultiLevelKvCacheModule(object):
 
             move_token_num = page_len_list[item_size - 1]
             assert req.cur_kv_len >= move_token_num
-            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
+            token_indexes = self.backend.model.req_manager.cache_manager.req_to_token_indexs[
+                req.req_idx, 0:move_token_num
+            ]
 
-            mem_manager = self.backend.model.mem_manager
-
-            mem_manager.operator.offload_gpu_kv_to_cpu_cache(
+            self.backend.model.req_manager.cache_manager.offload_gpu_kv_to_cpu_cache(
                 mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,
-                cpu_cache_client=self.cpu_cache_client,
                 req=req,
+                page_indexes_cpu=page_list,
+                page_readies_cpu=ready_list,
             )
 
             # 这个操作只是为了在offload 对应的cuda stream中，同步标记下对应的kv cache offload 操作已经完成，

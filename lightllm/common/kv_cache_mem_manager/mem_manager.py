@@ -1,34 +1,33 @@
-import math
 import os
 import re
-import torch
-import torch.distributed as dist
 import torch.multiprocessing as mp
-from typing import List, Tuple, Any, Union
-from lightllm.utils.log_utils import init_logger
-from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
-from .allocator import KvCacheAllocator
-from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.utils.dist_utils import (
     get_current_device_id,
     get_current_rank_in_node,
     get_node_world_size,
 )
-from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.shm_utils import get_service_shm_name
-from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
 from filelock import FileLock
+import math
+import torch
+import torch.distributed as dist
+from typing import List, Tuple, Any, Union
+from lightllm.utils.log_utils import init_logger
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from .allocator import KvCacheAllocator
+from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.config_utils import get_num_key_value_heads
 from .operator import BaseMemManagerOperator, NormalMemOperator
 
 logger = init_logger(__name__)
 
 
 class MemoryManager:
-
     operator_class = NormalMemOperator
     kv_layer_mapping = None
     kv_is_replicated = False
@@ -210,47 +209,6 @@ class MemoryManager:
                 tp_world_size=dp_world_size,
                 mode="read",
             )
-        # keep for debug
-        # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
-        # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
-
-    def _free_buffers(self):
-        self.kv_buffer = None
-
-    def alloc(self, need_size) -> torch.Tensor:
-        assert (
-            need_size % self.page_size == 0
-        ), f"KV cache allocation size {need_size} must be a multiple of page_size {self.page_size}"
-        return self.allocator.alloc(need_size)
-
-    def free(self, free_index: Union[torch.Tensor, List[int]]) -> None:
-        self.allocator.free(free_index)
-
-    def free_all(self):
-        self.allocator.free_all()
-
-    def resize_mem(self, new_size):
-        """
-        just for test code
-        """
-        size = new_size // self.page_size * self.page_size
-        dtype = self.dtype
-        head_num = self.head_num
-        head_dim = self.head_dim
-        layer_num = self.layer_num
-
-        self.size = size
-        self.allocator.resize(size)
-        self._free_buffers()
-        self._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        self.HOLD_TOKEN_MEMINDEXES = tuple(range(self.size, self.size + self.page_size))
-        return
-
-    def get_index_kv_buffer(self, index):
-        return {"kv_buffer": self.kv_buffer[:, index]}
-
-    def load_index_kv_buffer(self, index, load_tensor_dict):
-        self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
 
     def write_to_shm(self, req_manager):
         """
@@ -302,6 +260,44 @@ class MemoryManager:
             shm.buf[0:4] = (left_num - 1).to_bytes(4, byteorder="little")
             shm.close()
             return ForkingPickler.loads(obj_bytes)
+
+    def _free_buffers(self):
+        self.kv_buffer = None
+
+    def alloc(self, need_size) -> torch.Tensor:
+        assert (
+            need_size % self.page_size == 0
+        ), f"KV cache allocation size {need_size} must be a multiple of page_size {self.page_size}"
+        return self.allocator.alloc(need_size)
+
+    def free(self, free_index: Union[torch.Tensor, List[int]]) -> None:
+        self.allocator.free(free_index)
+
+    def free_all(self):
+        self.allocator.free_all()
+
+    def resize_mem(self, new_size):
+        """
+        just for test code
+        """
+        size = new_size // self.page_size * self.page_size
+        dtype = self.dtype
+        head_num = self.head_num
+        head_dim = self.head_dim
+        layer_num = self.layer_num
+
+        self.size = size
+        self.allocator.resize(size)
+        self._free_buffers()
+        self._init_buffers(size, dtype, head_num, head_dim, layer_num)
+        self.HOLD_TOKEN_MEMINDEXES = tuple(range(self.size, self.size + self.page_size))
+        return
+
+    def get_index_kv_buffer(self, index):
+        return {"kv_buffer": self.kv_buffer[:, index]}
+
+    def load_index_kv_buffer(self, index, load_tensor_dict):
+        self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
 
 
 class ReadOnlyStaticsMemoryManager:

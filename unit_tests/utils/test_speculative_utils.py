@@ -166,7 +166,6 @@ def test_triton_mtp_decode_state_builds_group_markers():
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
-        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     infer_state = InferStateInfo()
     infer_state.hold_req_id = -1
@@ -185,7 +184,7 @@ def test_triton_mtp_decode_state_builds_group_markers():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
 def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
-    model = SimpleNamespace(req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1))
+    model = SimpleNamespace()
     infer_state = InferStateInfo()
     infer_state.hold_req_id = -1
     infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")

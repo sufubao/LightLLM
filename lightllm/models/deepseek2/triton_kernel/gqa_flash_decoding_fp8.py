@@ -166,7 +166,7 @@ if __name__ == "__main__":
     import torch.nn.functional as F
     from .gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
     from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-    from lightllm.common.req_manager import ReqManager
+    from types import SimpleNamespace
 
     Z, H, N_CTX, D_HEAD, ROPE_HEAD = 1, 16, 1, 512, 64
     dtype = torch.bfloat16
@@ -194,7 +194,6 @@ if __name__ == "__main__":
     infer_state.batch_size = Z
     infer_state.max_kv_seq_len = N_CTX
     infer_state.total_token_num = Z * N_CTX
-    infer_state.req_manager = ReqManager(Z, N_CTX, None)
     infer_state.req_to_token_indexs = req_to_token_indexs
     infer_state.b_req_idx = b_req_idx
     infer_state.b_seq_len = b_seq_len

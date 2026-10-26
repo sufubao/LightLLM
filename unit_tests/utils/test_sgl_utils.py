@@ -102,7 +102,9 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     graph = SimpleNamespace(can_run=lambda **kwargs: True, graph_max_len_in_batch=32768)
     model = SimpleNamespace(
         graph=graph,
-        req_manager=SimpleNamespace(req_to_token_indexs=torch.zeros(2, 8192, dtype=torch.int32)),
+        req_manager=SimpleNamespace(
+            cache_manager=SimpleNamespace(req_to_token_indexs=torch.zeros(2, 8192, dtype=torch.int32))
+        ),
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
     )

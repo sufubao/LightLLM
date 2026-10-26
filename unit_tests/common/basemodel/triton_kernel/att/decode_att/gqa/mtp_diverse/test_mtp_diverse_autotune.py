@@ -142,7 +142,6 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
-        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     monkeypatch.setattr(state_module, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
     state = state_module.TritonDecodeAttState(

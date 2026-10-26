@@ -44,7 +44,6 @@ def test_decode_attentions(
     state = tmp_class()
     state.batch_size = q_shape[0]
     state.max_len_in_batch = test_seq_len
-    state.req_manager = tmp_class()
     state.req_to_token_indexs = torch.zeros(
         (state.batch_size, state.max_len_in_batch), dtype=torch.int32, device="cuda"
     )

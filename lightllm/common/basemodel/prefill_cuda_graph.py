@@ -227,7 +227,7 @@ class PrefillCudaGraph:
             del b_seq_len
 
             model.mem_manager.free_all()
-            model.req_manager.free_all()
+            model.req_manager.reset_slots()
             # release local tensors
             for var_name, var_value in list(locals().items()):
                 if isinstance(var_value, torch.Tensor):
@@ -290,7 +290,7 @@ class PrefillCudaGraph:
             _, _ = model.microbatch_overlap_prefill(prefill_batches[0], prefill_batches[1])
 
             model.mem_manager.free_all()
-            model.req_manager.free_all()
+            model.req_manager.reset_slots()
 
             del prefill_batches
 

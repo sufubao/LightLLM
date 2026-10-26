@@ -568,7 +568,7 @@ class StaticBenchmarkExecutor:
             req_id = int(req_id)
             max_target_len_by_req[req_id] = max(max_target_len_by_req.get(req_id, 0), int(target_len))
 
-        mem_manager = self.model.req_manager.mem_manager
+        mem_manager = self.model.mem_manager
         page_size = mem_manager.page_size
         for req_id, target_len in max_target_len_by_req.items():
             new_hold_kv_len = align_up(target_len, page_size)
@@ -578,7 +578,9 @@ class StaticBenchmarkExecutor:
 
             alloc_token_num = new_hold_kv_len - old_hold_kv_len
             mem_indexes = mem_manager.alloc(alloc_token_num)
-            self.model.req_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len].copy_(mem_indexes)
+            self.model.req_manager.cache_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len].copy_(
+                mem_indexes
+            )
             self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
@@ -723,14 +725,14 @@ class StaticBenchmarkExecutor:
         return (base_seq_len[:, None].to(torch.int32) + offsets[None, :]).reshape(-1)
 
     def _alloc_req_indexes(self, batch_size: int) -> torch.Tensor:
-        req_indexes = [self.model.req_manager.alloc() for _ in range(batch_size)]
+        req_indexes = [self.model.req_manager.alloc_slot() for _ in range(batch_size)]
         if any(index is None for index in req_indexes):
             raise RuntimeError(f"failed to allocate {batch_size} request indexes")
         return torch.tensor(req_indexes, dtype=torch.int32, device="cpu")
 
     def _reset_model_cache(self):
         self.model.mem_manager.free_all()
-        self.model.req_manager.free_all()
+        self.model.req_manager.reset_slots()
         self._hold_kv_len_by_req.clear()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()

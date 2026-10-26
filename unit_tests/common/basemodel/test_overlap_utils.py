@@ -183,7 +183,7 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model.tp_world_size_ = 2
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
     model.graph = None
-    model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
+    model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, cache_manager=SimpleNamespace(req_to_token_indexs=object()))
     model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(77,), page_size=1)
     infer_batch_sizes = []
 
@@ -207,6 +207,47 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     assert infer_batch_sizes == [2, 2]
     assert output0.logits.shape == (1, 1)
     assert output1.logits.shape == (0, 1)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_create_inferstate_borrows_cache_resources(monkeypatch, is_prefill):
+    from lightllm.common.cache_manager import HybridCacheManager
+
+    cache = HybridCacheManager(
+        SimpleNamespace(page_size=1),
+        24,
+        16,
+        linear_state_manager=object(),
+        indexer_state_manager=object(),
+        device="cpu",
+    )
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.req_manager = SimpleNamespace(cache_manager=cache, HOLD_REQUEST_ID=24)
+    model.mem_manager = object()
+    model.hidden_collector_prototype = SimpleNamespace(new_instance=lambda: None)
+    model.is_mtp_draft_model = False
+    model.return_all_prompt_logics = False
+    model.prefill_att_backend = SimpleNamespace(create_att_prefill_state=lambda **kwargs: None)
+    model.decode_att_backend = SimpleNamespace(create_att_decode_state=lambda **kwargs: None)
+    model.prefill_att_backend1 = model.decode_att_backend1 = None
+    model._select_mem_indexes = lambda _: None
+    monkeypatch.setattr(basemodel.dist_group_manager, "get_group", lambda _: None)
+    model_input = _make_prefill_input([10, 11], 20, False) if is_prefill else _make_decode_input()
+
+    state = model._create_inferstate(model_input)
+    draft = TpPartBaseModel.__new__(TpPartBaseModel)
+    draft.__dict__.update(model.__dict__)
+    draft.is_mtp_draft_model = True
+    draft_state = draft._create_inferstate(model_input)
+
+    for owner in (state, draft_state):
+        assert owner.req_to_token_indexs is cache.req_to_token_indexs
+        assert owner.hold_req_id == 24
+        assert owner.linear_state_manager is cache.linear_state_manager
+        assert owner.indexer_state_manager is cache.indexer_state_manager
+        assert not hasattr(owner, "req_manager")
+    cache.req_to_token_indexs[20, 0] = 37
+    assert state.req_to_token_indexs[20, 0] == draft_state.req_to_token_indexs[20, 0] == 37
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])

@@ -145,6 +145,114 @@ def test_memory_binding_rejects_another_pool():
     assert manager.mem_manager is mem
 
 
+@pytest.mark.parametrize("kv_type", ["None", "fp8kv_sph", "fp8kv_spt"])
+def test_qwen_runtime_and_cache_share_config(monkeypatch, kv_type):
+    from lightllm.models.qwen3next import model as qwen
+    from lightllm.common.state_cache_manager import linear_att
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args = StartArgs(tp=4, dp=1, data_type="bfloat16", llm_kv_type=kv_type)
+    monkeypatch.setattr(qwen, "get_env_start_args", lambda: args)
+    model = object.__new__(qwen.Qwen3NextTpPartModel)
+    model.args = args
+    model.config = dict(
+        n_layer=8,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        head_dim=16,
+        linear_num_key_heads=2,
+        linear_num_value_heads=8,
+        linear_key_head_dim=8,
+        linear_value_head_dim=16,
+        linear_conv_kernel_dim=4,
+        full_attention_interval=4,
+    )
+    model.max_req_num = 2
+    model.tp_world_size_ = 4
+    model.num_kv_heads = 1
+    model.data_type = torch.bfloat16
+    model.max_total_token_num = 32
+    model.mem_fraction = 0.9
+    events = []
+
+    def runtime(size, config, args):
+        events.append("runtime")
+        return SimpleNamespace(linear_config=config, conv_state=object(), ssm_state=object())
+
+    def memory(**kwargs):
+        events.append("memory")
+        assert events == ["runtime", "memory"]
+        return SimpleNamespace(
+            **kwargs, kv_buffer=object(), set_kv_layer_mapping=lambda mapping: events.append(mapping)
+        )
+
+    monkeypatch.setattr(linear_att, "get_added_mtp_kv_layer_num", lambda: 1)
+    monkeypatch.setattr(qwen, "LinearStateManager", runtime)
+    for name in (
+        "MemoryManager",
+        "FP8StaticPerHeadQuantMemManager",
+        "FP8StaticPerTensorQuantMemManager",
+    ):
+        monkeypatch.setattr(qwen, name, memory)
+    create_cache = qwen.HybridCacheManager
+    monkeypatch.setattr(qwen, "HybridCacheManager", lambda *args, **kwargs: create_cache(*args, **kwargs, device="cpu"))
+    model.req_manager = SimpleNamespace(cache_manager=model._create_cache_manager(16))
+    model._init_mem_manager()
+    pools = []
+
+    def checkpoint_pool(size, config, keep_num):
+        pools.append((size, config, keep_num))
+        return SimpleNamespace(size=size)
+
+    monkeypatch.setattr(
+        model.req_manager.cache_manager.state_manager,
+        "create_checkpoint_pool",
+        lambda size, keep_num=0: checkpoint_pool(size, model.linear_config, keep_num),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        model.req_manager.cache_manager.state_manager, "create_cpu_transfer", lambda *args: None, raising=False
+    )
+    model.req_manager.cache_manager.bind_mem_manager(model.mem_manager)
+    pool = model.req_manager.cache_manager.big_page_buffers
+    model.req_manager.cache_manager.bind_mem_manager(model.mem_manager)
+    assert model.req_manager.cache_manager.big_page_buffers is pool
+    assert len(pools) == 1
+    assert pools[0][1] is model.linear_config
+    assert pools[0][2] == 2
+    assert not hasattr(model.mem_manager, "big_page_buffers")
+    assert not hasattr(model.mem_manager, "req_to_conv_state")
+    config = model.linear_config
+    assert config is model.req_manager.cache_manager.linear_state_manager.linear_config
+    assert events[-1] == config.get_full_att_kv_layer_mapping()
+    assert config.num_linear_k_heads == 1
+    assert config.num_linear_v_heads == 2
+    assert config.full_att_dtype == (torch.bfloat16 if kv_type == "None" else torch.uint8)
+    assert config.get_full_att_kv_layer_index(8) == 2
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_context_uses_the_request_managers_cache(mismatch):
+    from lightllm.common.cache_manager import CacheManager
+    from lightllm.server.router.model_infer.infer_batch import InferenceContext
+
+    config = SimpleNamespace(page_size=1, output_constraint_mode="none")
+    mem = SimpleNamespace()
+    cache = CacheManager(config, 1, 4, device="cpu")
+    cache.bind_mem_manager(mem)
+    radix = SimpleNamespace(mem_manager=object() if mismatch else mem)
+    if mismatch:
+        with pytest.raises(ValueError, match="share the memory manager"):
+            cache.bind_radix_cache(radix)
+        return
+    cache.bind_radix_cache(radix)
+    requests = SimpleNamespace(cache_manager=cache, req_sampling_params_manager=None)
+    context = InferenceContext()
+    context.register(backend=SimpleNamespace(), req_manager=requests, shm_req_manager=None, vocab_size=1)
+    assert context.req_manager.cache_manager is cache
+    assert not hasattr(context, "cache_manager")
+
+
 @pytest.mark.parametrize("pool", ["big_page_buffers", "small_page_buffers"])
 def test_radix_cannot_use_a_different_checkpoint_pool(pool):
     cache_manager = HybridCacheManager(SimpleNamespace(page_size=1), 2, 16, SimpleNamespace(), device="cpu")

@@ -58,10 +58,12 @@ def test_model_selects_reserved_indexes_when_execution_starts():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = SimpleNamespace(page_size=4)
     model.req_manager = SimpleNamespace(
-        req_to_token_indexs=torch.tensor(
-            [[10, 11, 12, 13], [20, 21, 22, 23]],
-            dtype=torch.int32,
-            device="cuda",
+        cache_manager=SimpleNamespace(
+            req_to_token_indexs=torch.tensor(
+                [[10, 11, 12, 13], [20, 21, 22, 23]],
+                dtype=torch.int32,
+                device="cuda",
+            )
         )
     )
     model_input = SimpleNamespace(

@@ -56,7 +56,7 @@ class FP8PerTokenGroupQuantDeepseek3_2MemOperator(BaseMemManagerOperator):
         )
 
         mem_manager: FP8PerTokenGroupQuantDeepseek3_2MemoryManager = self.mem_manager
-        from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_kv_flashmla_fp8 import (
+        from lightllm.common.basemodel.triton_kernel.kv_copy.destindex_copy_kv_flashmla_fp8 import (
             destindex_copy_kv_flashmla_fp8,
         )
 

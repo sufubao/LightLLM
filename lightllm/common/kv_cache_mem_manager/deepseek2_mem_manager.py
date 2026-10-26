@@ -12,6 +12,7 @@ logger = init_logger(__name__)
 
 
 class Deepseek2MemoryManager(MemoryManager):
+    kv_is_replicated = True
 
     operator_class = Deepseek2MemOperator
 

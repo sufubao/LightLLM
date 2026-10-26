@@ -196,9 +196,13 @@ class TpPartBaseModel:
         [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
+    @classmethod
+    def get_mem_manager_class(cls):
+        return select_mem_manager_class()
+
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        self.mem_manager: MemoryManager = select_mem_manager_class()(
+        self.mem_manager: MemoryManager = self.get_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,

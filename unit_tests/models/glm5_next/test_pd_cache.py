@@ -32,9 +32,9 @@ def make_mems(monkeypatch, request):
     set_env_start_args(dataclasses.asdict(args))
 
     def check_shm_refs(mem, req):
-        assert mem.req_to_indexer_tail is req.req_to_indexer_tail
-        assert mem.req_to_conv_state is req.req_to_conv_state
-        assert mem.req_to_ssm_state is req.req_to_ssm_state
+        assert mem.req_to_indexer_tail is req.indexer_state_manager.state
+        assert mem.req_to_conv_state is req.linear_state_manager.conv_state
+        assert mem.req_to_ssm_state is req.linear_state_manager.ssm_state
         assert mem.big_page_buffers is None
 
     monkeypatch.setattr(MemoryManager, "write_to_shm", check_shm_refs)

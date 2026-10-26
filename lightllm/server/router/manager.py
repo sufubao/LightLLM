@@ -254,13 +254,16 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # slave routers mirror requests and must not duplicate the master summary.
             running = len(self.running_batch.reqs) if self.running_batch is not None else 0
             waiting = self.req_queue.get_wait_req_num()
+            if self.schedule_new_batch is not None:
+                waiting += len(self.schedule_new_batch.reqs)
             now = time.monotonic()
             active = bool(running or waiting) or self.engine_throughput.has_activity()
             if self.service_ready.get_value() and not seen_ready:
-                self.engine_throughput.resume(last_poll)
-                stats_logger.last_time = last_poll
+                if not resumed:
+                    self.engine_throughput.resume(last_poll)
+                    stats_logger.last_time = last_poll
                 seen_ready = True
-            if seen_ready and stats_logger.active is not True and active and not resumed:
+            if stats_logger.active is not True and active and not resumed:
                 self.engine_throughput.resume(last_poll)
                 stats_logger.last_time = last_poll
                 resumed = True

@@ -2,7 +2,8 @@ from typing import TYPE_CHECKING, List
 
 import torch
 
-from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheConfig, LinearAttCacheManager
+from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
+from lightllm.common.linear_state import LinearStateManager
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .hybrid_base import HybridAttentionReqManager
@@ -15,38 +16,16 @@ if TYPE_CHECKING:
 class ReqManagerForMamba(HybridAttentionReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
-        self.mtp_step = get_env_start_args().mtp_step
-        # 因为在mtp的推理中，需要标记每个请求对应的mtp index状态(conv state 和 ssm state)，在mtp对应序列中
-        # 的真实位置，所以需要需要一个标记来记录，不然算子无法找到真实的处理起点。
-        self.req_to_mtp_state_index = (
-            torch.zeros((max_request_num + 1,), dtype=torch.int32, device="cuda") if self.mtp_step > 0 else None
-        )
-        # 突然想到， 在linear att 开启mtp的模式中，现在的prefill linear att 算子默认是从0的位置读取信息进行操作
-        # 所以不能支持 prefill decode mixed 操作了，因为一个decode过的请求，重新用prefill 算子跑，会出现读错linear
-        # 状态位置的问题。导致bug, 在这里加个断言，以后可以支持上 TODO
+        args = get_env_start_args()
+        self.linear_state_manager = LinearStateManager(max_request_num, linear_config, args)
+        self.mtp_step = self.linear_state_manager.mtp_step
         if self.mtp_step > 0:
-            assert get_env_start_args().enable_prefill_decode_mixed is False
-
-        self.big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
+            assert args.enable_prefill_decode_mixed is False
+        self.big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         self.linear_config = linear_config
-
-        self.req_to_conv_state = LayerCache(
-            size=(max_request_num + 1),
-            dtype=self.linear_config.conv_state_dtype,
-            shape=self.linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step),
-            layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
-        )
-        self.req_to_ssm_state = LayerCache(
-            size=(max_request_num + 1) * (self.mtp_step + 1),
-            dtype=self.linear_config.ssm_state_dtype,
-            shape=self.linear_config.get_ssm_state_shape(),
-            layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
-        )
-        return
+        self.req_to_conv_state = self.linear_state_manager.conv_state
+        self.req_to_ssm_state = self.linear_state_manager.ssm_state
+        self.req_to_mtp_state_index = self.linear_state_manager.mtp_state_index
 
     def init_hybrid_attention_state(self, req: "InferReq"):
         conv_index = req.req_idx

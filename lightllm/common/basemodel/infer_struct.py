@@ -2,7 +2,6 @@ import torch
 import triton
 import collections
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
@@ -48,9 +47,10 @@ class InferStateInfo:
         self.is_draft_model: bool = False
 
         self.mem_manager: MemoryManager = None
-        self.req_manager: ReqManager = None
         self.req_to_token_indexs: torch.Tensor = None
         self.hold_req_id: int = None
+        self.linear_state_manager = None
+        self.indexer_state_manager = None
 
         self.mem_index: torch.Tensor = None
 

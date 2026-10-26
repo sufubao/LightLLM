@@ -1,4 +1,4 @@
-from lightllm.common.state_cache_manager import LayerCache
+from lightllm.common.indexer_state import IndexerStateManager
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .linear_att import ReqManagerForMamba
@@ -14,13 +14,8 @@ class Glm5NextReqManager(ReqManagerForMamba):
             get_env_start_args().linear_att_hash_page_size % linear_config.index_kpool == 0
         ), "GLM K-pool requires cache pages aligned to index_kpool"
         super().__init__(max_request_num, max_sequence_length, mem_manager, linear_config)
-        self.req_to_indexer_tail = LayerCache(
-            size=max_request_num + 1,
-            dtype=linear_config.full_att_dtype,
-            shape=(linear_config.index_kpool + self.mtp_step, 2 * linear_config.index_head_dim),
-            layer_num=linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            device="cuda",
-        )
+        self.indexer_state_manager = IndexerStateManager(max_request_num, linear_config, self.mtp_step)
+        self.req_to_indexer_tail = self.indexer_state_manager.state
 
     def get_indexer_tail_buffer(self, layer_index):
         return self.req_to_indexer_tail.buffer[self.linear_config.get_full_att_kv_layer_index(layer_index)]

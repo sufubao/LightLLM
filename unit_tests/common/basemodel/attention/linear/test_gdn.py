@@ -72,7 +72,7 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
     infer_state.b_req_idx = b_req_idx
     infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
     infer_state.hold_req_id = req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1
-    infer_state.req_manager = SimpleNamespace(req_to_mtp_state_index=req_to_mtp_state_index)
+    infer_state.linear_state_manager = SimpleNamespace(mtp_state_index=req_to_mtp_state_index)
     state = gdn.LinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,

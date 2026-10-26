@@ -52,6 +52,9 @@ class _ReqLinkedList:
 
 
 class ReqManager:
+    linear_state_manager = None
+    indexer_state_manager = None
+
     def __init__(self, max_request_num, max_sequence_length, mem_manager: MemoryManager):
         from .req_sampling_params import ReqSamplingParamsManager
 

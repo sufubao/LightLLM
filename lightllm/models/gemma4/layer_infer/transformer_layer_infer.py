@@ -238,7 +238,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.b_seq_len,
                 infer_state.b_ready_cache_len,
                 infer_state.max_q_seq_len,
-                infer_state.req_manager.req_to_token_indexs,
+                infer_state.req_to_token_indexs,
                 infer_state.b_image_token_end,
                 sliding_window=sw,
             )

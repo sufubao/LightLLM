@@ -166,7 +166,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             )
 
         repack_kv_index(
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.infer_state.req_to_token_indexs,
             b_req_idx=self.infer_state.b_req_idx,
             b_token_len=self.infer_state.b_seq_len,
             b_page_start_loc=self.kv_starts[:-1],

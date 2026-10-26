@@ -207,3 +207,27 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     assert infer_batch_sizes == [2, 2]
     assert output0.logits.shape == (1, 1)
     assert output1.logits.shape == (0, 1)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_graph_copy_keeps_shared_cache_and_copies_batch_inputs(is_prefill):
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    captured, runtime = InferStateInfo(), InferStateInfo()
+    table = torch.arange(32, dtype=torch.int32).reshape(4, 8)
+    captured.req_to_token_indexs = runtime.req_to_token_indexs = table
+    captured.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
+    runtime.b_req_idx = torch.tensor([2, 3], dtype=torch.int32)
+    captured.decode_att_state = SimpleNamespace(copy_for_decode_cuda_graph=lambda _: None)
+    copy_inputs = captured.copy_for_prefill_cuda_graph if is_prefill else captured.copy_for_cuda_graph
+
+    copy_inputs(runtime)
+
+    assert captured.req_to_token_indexs is table
+    assert runtime.req_to_token_indexs is table
+    assert captured.b_req_idx is not runtime.b_req_idx
+    torch.testing.assert_close(captured.b_req_idx, runtime.b_req_idx)
+    runtime.req_to_token_indexs = torch.zeros_like(table)
+    with pytest.raises(AssertionError):
+        copy_inputs(runtime)
+    torch.testing.assert_close(table, torch.arange(32, dtype=torch.int32).reshape(4, 8))

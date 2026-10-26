@@ -376,6 +376,8 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
+        infer_state.req_to_token_indexs = self.req_manager.req_to_token_indexs
+        infer_state.hold_req_id = self.req_manager.HOLD_REQUEST_ID
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index

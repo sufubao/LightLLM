@@ -106,14 +106,14 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def _init_dynamic_spec_verify_state(self, draft_step: int) -> torch.Tensor:
         b_mark_mtp_shared_group = build_mtp_shared_group_markers(
             self.infer_state.b_req_idx,
-            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+            hold_req_id=self.infer_state.hold_req_id,
         )
         b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len = build_dynamic_spec_fa3_decode_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_seq_len=self.infer_state.b_seq_len,
             b_mark_mtp_shared_group=b_mark_mtp_shared_group,
             att_batch_size=self.infer_state.batch_size,
-            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+            hold_req_id=self.infer_state.hold_req_id,
         )
         self._init_spec_decode_cu_seqlens(b_q_seq_len, b_kv_seq_len)
         self.decode_max_q_seq_len = draft_step + 1
@@ -174,7 +174,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
 
         page_table_copy(
             page_table=self.page_table[:, :actual_max_page_len],
-            req_to_token_indexs=model.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.infer_state.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
             page_size=self.backend.infer_page_size,
         )

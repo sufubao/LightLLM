@@ -219,7 +219,7 @@ class NsaInfer:
             I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
             b_seq_len=infer_state.b_seq_len,
             b_req_idx=infer_state.b_req_idx,
-            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            req_to_token_indexs=infer_state.req_to_token_indexs,
             out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
             max_kv_seq_len=infer_state.max_kv_seq_len,
             mtp_step=mtp_step,

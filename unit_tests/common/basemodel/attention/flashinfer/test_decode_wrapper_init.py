@@ -95,7 +95,7 @@ def test_decode_init_uses_explicit_graph_mode_for_wrapper_creation(decode_init, 
     infer_state.max_kv_seq_len = 5
     infer_state.b_req_idx = torch.tensor([2, 3], dtype=torch.int32)
     infer_state.microbatch_index = 0
-    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros((4, 64), dtype=torch.int32))
+    infer_state.req_to_token_indexs = torch.zeros((4, 64), dtype=torch.int32)
     if mode == "capture":
         infer_state.is_cuda_graph_capture = True
     elif mode == "replay":

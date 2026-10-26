@@ -41,14 +41,6 @@ class KVTransferResources:
     req_to_token_indexes: torch.Tensor
     state_transfer: Optional["LinearAttentionStateTransfer"] = None
 
-    @property
-    def kv_buffer(self):
-        return self.kv.kv_buffer
-
-    @property
-    def req_to_token_indexs(self):
-        return self.req_to_token_indexes
-
     def write_to_shm(self):
         if kv_trans_use_p2p():
             from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import reduce_tensor

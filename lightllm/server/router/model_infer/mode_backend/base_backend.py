@@ -1,3 +1,4 @@
+from lightllm.common.kv_transfer_resources import KVTransferResources
 import os
 
 import numpy as np
@@ -221,7 +222,13 @@ class ModeBackend:
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
             # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
             # 读取
-            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            state = self.model.req_manager.linear_state_manager
+            self.kv_transfer_resources = KVTransferResources(
+                self.model.mem_manager.get_transfer_view(include_page_layout=self.is_pd_mode),
+                self.model.req_manager.req_to_token_indexs,
+                None if state is None else state.create_state_transfer(self.model.req_manager.indexer_state_manager),
+            )
+            self.kv_transfer_resources.write_to_shm()
             dist.barrier(group=self.node_nccl_group)
 
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
@@ -274,7 +281,6 @@ class ModeBackend:
 
     def init_dp_kv_shared(self):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         torch.cuda.set_device(get_current_device_id())
 
@@ -284,13 +290,14 @@ class ModeBackend:
             backend=self,
         )
 
-        # Collect mem_managers from all ranks
-        self.mem_managers = []
-        for rank_idx in range(self.node_world_size):
-            if rank_idx != self.rank_in_node:
-                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
-            else:
-                self.mem_managers.append(self.model.mem_manager)
+        resources = [
+            self.kv_transfer_resources if rank == self.rank_in_node else KVTransferResources.loads_from_shm(rank)
+            for rank in range(self.node_world_size)
+        ]
+        self.mem_managers = resources
+        self.kv_views = [resource.kv for resource in resources]
+        self.peer_states = [resource.state_transfer for resource in resources]
+        self.req_to_token_indexes_by_rank = [resource.req_to_token_indexes for resource in resources]
         return
 
     def get_max_total_token_num(self):

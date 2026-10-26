@@ -165,3 +165,38 @@ def test_hybrid_mapping_excludes_linear_layers(layer_count, draft_layers):
             assert config.get_full_att_kv_layer_index(layer) == slot
             k, v = mem.get_att_input_params(layer)
             torch.testing.assert_close(torch.cat((k, v), dim=1), mem.kv_buffer[slot])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("global_heads,prefill_tp,decode_tp", [(4, 1, 2), (4, 2, 1), (1, 1, 4), (1, 4, 1)])
+def test_kv_transfer_view_roundtrip(global_heads, prefill_tp, decode_tp):
+    from lightllm.common.kv_transfer_resources import KVTransferView
+    from lightllm.common.kv_page_transfer import KVPageTransfer
+
+    expected = torch.randn((2, 3, 2, global_heads, 16), dtype=torch.bfloat16, device="cuda")
+
+    def views(tp, initialize):
+        result = []
+        for rank in range(tp):
+            local = max(1, global_heads // tp)
+            first = rank // max(1, tp // global_heads) * local
+            buffer = torch.zeros((2, 8, 2 * local, 16), dtype=torch.bfloat16, device="cuda")
+            if initialize:
+                buffer[:, [1, 3, 6]] = expected[:, :, :, first : first + local].reshape(2, 3, 2 * local, 16)
+            result.append(KVTransferView(buffer, (2, 2 * global_heads, 16), torch.bfloat16, False))
+        return result
+
+    sources, destinations = views(prefill_tp, True), views(decode_tp, False)
+    writer, reader = KVPageTransfer(sources[0]), KVPageTransfer(destinations[0])
+    writer.alloc_paged_kv_move_buffer(1, 8)
+    reader.alloc_paged_kv_move_buffer(1, 8)
+    writer.write_mem_to_page_kv_move_buffer([1, 3, 6], 0, 0, sources, prefill_tp)
+    reader.kv_move_buffer.copy_(writer.kv_move_buffer)
+    reader.read_page_kv_move_buffer_to_mem([0, 2, 5], 0, 0, destinations, decode_tp)
+    for rank, view in enumerate(destinations):
+        local = max(1, global_heads // decode_tp)
+        first = rank // max(1, decode_tp // global_heads) * local
+        assert torch.equal(
+            view.kv_buffer[:, [0, 2, 5]], expected[:, :, :, first : first + local].reshape(2, 3, 2 * local, 16)
+        )
+        assert not view.kv_buffer[:, [1, 3, 4, 6, 7]].any()

@@ -84,6 +84,11 @@ class MemoryManager:
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
+    def get_transfer_view(self, *, include_page_layout=False):
+        from lightllm.common.kv_transfer_resources import KVTransferView
+
+        return KVTransferView.from_mem_manager(self, include_page_layout=include_page_layout)
+
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         return (

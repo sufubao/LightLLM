@@ -16,6 +16,8 @@ class Glm5NextMemOperator(LinearAttMemOperator):
 
 
 class Glm5NextMemManager(Qwen3NextMemManager):
+    kv_is_replicated = True
+
     """One packed token buffer; KDA uses the standard big/small page pools."""
 
     operator_class = Glm5NextMemOperator

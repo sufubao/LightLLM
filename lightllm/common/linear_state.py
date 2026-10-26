@@ -78,6 +78,11 @@ class LinearStateManager:
 
     capture_intermediate_checkpoints = False
 
+    def create_state_transfer(self, indexer_state_manager=None):
+        from lightllm.common.linear_state_transfer import LinearAttentionStateTransfer
+
+        return LinearAttentionStateTransfer(self, indexer_state_manager)
+
     def save_state(self, req_idx, buffer_idx, state_cache_manager, checkpoint_len):
         self.copy_state_to(req_idx, *state_cache_manager.get_state_cache(buffer_idx))
 

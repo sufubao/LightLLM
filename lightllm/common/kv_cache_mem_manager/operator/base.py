@@ -8,6 +8,8 @@ if TYPE_CHECKING:
 
 # 定义一个抽象基类
 class BaseMemManagerOperator(ABC):
+    supports_dp_cache_fetch = False
+
     def __init__(self, mem_manager: "MemoryManager") -> None:
         super().__init__()
         self.mem_manager = mem_manager
@@ -17,7 +19,13 @@ class BaseMemManagerOperator(ABC):
         pass
 
     def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
-        raise NotImplementedError()
+        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
+
+        src_mem_index = src_mem_index.cuda(non_blocking=True)
+        dst_mem_index = dst_mem_index.cuda(non_blocking=True)
+        copy_kv_buffer_to_kv_buffer(src_mem_index, dst_mem_index, self.mem_manager.kv_buffer)
+        if hasattr(self.mem_manager, "scale_buffer"):
+            copy_kv_buffer_to_kv_buffer(src_mem_index, dst_mem_index, self.mem_manager.scale_buffer)
 
     # cpu cache 的相关操作接口
     def load_cpu_cache_to_gpu(

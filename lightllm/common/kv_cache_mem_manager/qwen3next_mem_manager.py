@@ -4,8 +4,8 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
-from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManager
-from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
+from .static_fp8_mem_manager import FP8StaticPerHeadQuantMemManager
+from .static_fp8_mem_manager import FP8StaticPerTensorQuantMemManager
 from .operator import (
     FP8StaticPerHeadQuantMemOperator,
     FP8StaticPerTensorQuantMemOperator,

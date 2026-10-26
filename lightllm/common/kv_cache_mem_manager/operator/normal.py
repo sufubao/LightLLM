@@ -13,7 +13,10 @@ logger = init_logger(__name__)
 
 
 class NormalMemOperator(BaseMemManagerOperator):
+    supports_dp_cache_fetch = True
+
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        layer_index = self.mem_manager.get_kv_layer_index(layer_index)
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager

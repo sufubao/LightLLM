@@ -78,6 +78,16 @@ class LinearStateManager:
 
     capture_intermediate_checkpoints = False
 
+    def create_checkpoint_pool(self, size, keep_num=0):
+        from lightllm.common.state_cache_manager import LinearAttCacheManager
+
+        return LinearAttCacheManager(size, self.linear_config, keep_num=keep_num)
+
+    def create_cpu_transfer(self, mem_manager, big_page_buffers):
+        from lightllm.common.hybrid_cache_transfer import HybridCpuCacheTransfer
+
+        return HybridCpuCacheTransfer(mem_manager.kv_buffer, self.linear_config, big_page_buffers)
+
     def create_state_transfer(self, indexer_state_manager=None):
         from lightllm.common.linear_state_transfer import LinearAttentionStateTransfer
 

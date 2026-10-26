@@ -105,7 +105,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 error_mem_len = req_obj.hold_kv_len - old_prefix_len
                 if error_mem_len > 0:
                     mem_indexes = (
-                        self.model.req_manager.req_to_token_indexs[
+                        self.model.req_manager.cache_manager.req_to_token_indexs[
                             req_obj.req_idx, old_prefix_len : req_obj.hold_kv_len
                         ]
                         .detach()
@@ -134,7 +134,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             assert req_obj.hold_kv_len == req_obj.cur_kv_len
             need_mem_size = req_obj._kv_cache_alloc_need(input_len)
 
-            mem_indexes = self._alloc_req_kv_mem(req_obj, need_mem_size)
+            mem_indexes = self.model.req_manager.cache_manager.alloc_req_kv(req_obj, need_mem_size)
             assert mem_indexes is not None
             # 传输只覆盖真实 KV；最后一个模型页面中尚未使用的部分继续留在
             # req_to_token_indexs 中，供后续 decode 直接切片使用。

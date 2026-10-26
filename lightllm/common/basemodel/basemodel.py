@@ -16,6 +16,7 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
+from lightllm.common.cache_manager import CacheManager
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
@@ -116,10 +117,8 @@ class TpPartBaseModel:
             self._init_req_manager()
             self._init_mem_manager()
 
-        # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
-        # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
-        # 因此 req_manager 创建时暂不传入 mem_manager，需要在两者初始化完成后再进行绑定。
-        self.req_manager.bind_mem_manager(self.mem_manager)
+        self.req_manager.init_hold_request_indexs(self.mem_manager.HOLD_TOKEN_MEMINDEXES)
+        self.req_manager.cache_manager.bind_mem_manager(self.mem_manager)
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -233,6 +232,9 @@ class TpPartBaseModel:
 
         return
 
+    def _create_cache_manager(self, max_sequence_length):
+        return CacheManager(self.args, self.max_req_num, max_sequence_length)
+
     def _init_req_manager(self):
         create_max_seq_len = 0
 
@@ -241,7 +243,7 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
+        self.req_manager = ReqManager(self.max_req_num, self._create_cache_manager(create_max_seq_len))
         return
 
     def _init_infer_layer(self, start_layer_index=0):
@@ -336,7 +338,7 @@ class TpPartBaseModel:
     def _select_mem_indexes(self, model_input: ModelInput):
         if model_input.is_prefill:
             return select_kv_index_from_req_prefill(
-                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                req_to_token_indexs=self.req_manager.cache_manager.req_to_token_indexs,
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,
                 b_ready_cache_len=model_input.b_ready_cache_len,
@@ -345,7 +347,7 @@ class TpPartBaseModel:
                 token_num=model_input.input_ids.shape[0],
             )
         return select_kv_index_from_req(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.req_manager.cache_manager.req_to_token_indexs,
             b_req_idx=model_input.b_req_idx,
             b_seq_len=model_input.b_seq_len,
         )
@@ -380,8 +382,9 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
-        infer_state.linear_state_manager = self.req_manager.linear_state_manager
-        infer_state.indexer_state_manager = self.req_manager.indexer_state_manager
+        infer_state.state_manager = self.req_manager.cache_manager.state_manager
+        infer_state.linear_state_manager = self.req_manager.cache_manager.linear_state_manager
+        infer_state.indexer_state_manager = self.req_manager.cache_manager.indexer_state_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -637,7 +640,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -993,11 +995,11 @@ class TpPartBaseModel:
         try:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
-            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+            b_req_idx = torch.tensor([self.req_manager.alloc_slot()], dtype=torch.int32, device="cuda")
             page_size = self.mem_manager.page_size
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
             mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
-            self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
+            self.req_manager.cache_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1029,7 +1031,7 @@ class TpPartBaseModel:
             del model_output
             torch.argmax(prob_out, dim=1, keepdim=True)
             prob_out = None
-            self.req_manager.free_all()
+            self.req_manager.reset_slots()
             self.mem_manager.free_all()
             logger.info(f"check max_len {self.batch_max_tokens} infer ok")
         except (RuntimeError, torch.OutOfMemoryError) as e:
@@ -1074,11 +1076,11 @@ class TpPartBaseModel:
                 dummy_input_ids = torch.randint(
                     0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
-                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                b_req_idx = torch.tensor([self.req_manager.alloc_slot()], dtype=torch.int32, device="cuda")
                 page_size = self.mem_manager.page_size
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
                 mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
-                self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
+                self.req_manager.cache_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1110,14 +1112,14 @@ class TpPartBaseModel:
                     model_input,
                 )
                 del model_output
-                self.req_manager.free_all()
+                self.req_manager.reset_slots()
                 self.mem_manager.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 logger.exception(str(e))
-                self.req_manager.free_all()
+                self.req_manager.reset_slots()
                 self.mem_manager.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()

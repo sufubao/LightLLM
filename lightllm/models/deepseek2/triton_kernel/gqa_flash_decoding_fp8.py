@@ -24,7 +24,7 @@ def gqa_token_decode_attention_flash_decoding_fp8(
     softmax_scale,
     out=None,
     alloc_tensor_func=torch.empty,
-    **run_config
+    **run_config,
 ):
     batch_size = infer_state.batch_size
     max_kv_seq_len = infer_state.max_kv_seq_len
@@ -66,14 +66,14 @@ def gqa_token_decode_attention_flash_decoding_fp8(
         kv_nope,
         kv_rope,
         kv_scale,
-        infer_state.req_manager.req_to_token_indexs,
+        infer_state.req_manager.cache_manager.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         mid_o,
         mid_o_logexpsum,
         softmax_scale,
         get_sm_count=True,
-        **run_config
+        **run_config,
     )
 
     if not hasattr(infer_state, "decode_att_block_seq"):
@@ -115,14 +115,14 @@ def gqa_token_decode_attention_flash_decoding_fp8(
         kv_nope,
         kv_rope,
         kv_scale,
-        infer_state.req_manager.req_to_token_indexs,
+        infer_state.req_manager.cache_manager.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         mid_o,
         mid_o_logexpsum,
         softmax_scale,
         get_sm_count=False,
-        **run_config
+        **run_config,
     )
 
     flash_decode_stage2(
@@ -132,7 +132,7 @@ def gqa_token_decode_attention_flash_decoding_fp8(
         mid_o_logexpsum,
         infer_state.b_seq_len,
         o_tensor.view(calcu_shape1),
-        **run_config
+        **run_config,
     )
     return o_tensor
 
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     import torch.nn.functional as F
     from .gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
     from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-    from lightllm.common.req_manager import ReqManager
+    from types import SimpleNamespace
 
     Z, H, N_CTX, D_HEAD, ROPE_HEAD = 1, 16, 1, 512, 64
     dtype = torch.bfloat16
@@ -194,8 +194,7 @@ if __name__ == "__main__":
     infer_state.batch_size = Z
     infer_state.max_kv_seq_len = N_CTX
     infer_state.total_token_num = Z * N_CTX
-    infer_state.req_manager = ReqManager(Z, N_CTX, None)
-    infer_state.req_manager.req_to_token_indexs = req_to_token_indexs
+    infer_state.req_manager = SimpleNamespace(cache_manager=SimpleNamespace(req_to_token_indexs=req_to_token_indexs))
     infer_state.b_req_idx = b_req_idx
     infer_state.b_seq_len = b_seq_len
 

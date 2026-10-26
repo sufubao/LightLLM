@@ -15,10 +15,9 @@ from lightllm.utils.envs_utils import (
     get_llm_data_type,
     get_added_mtp_kv_layer_num,
 )
-from lightllm.utils.llm_utils import get_llm_model_class
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_hybrid_att_model
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.utils.llm_utils import get_llm_model_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
     PPLINT8KVMemoryManager,

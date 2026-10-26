@@ -1,3 +1,4 @@
+from lightllm.common.cache_manager import CacheManager
 from types import SimpleNamespace
 
 import pytest
@@ -11,8 +12,10 @@ def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
+        page_size=1,
         chunked_prefill_size=256,
         batch_max_tokens=1024,
+        disable_chunked_prefill=False,
         linear_att_hash_page_size=64,
         linear_att_page_block_num=8,
     )
@@ -55,6 +58,7 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
+        page_size=1,
         chunked_prefill_size=256,
         batch_max_tokens=2048,
         linear_att_hash_page_size=64,
@@ -71,21 +75,35 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     big_snapshots, small_snapshots = [], []
     page_ends = list(range(64 * big_page_num, req.hybrid_cache_len + 1, 64 * big_page_num))
     slots = iter(range(len(page_ends)))
-    context = InferenceContext()
+    context = InferenceContext(req_manager=SimpleNamespace())
     context.args = req.args
     context.is_hybrid_att_model = True
     context.radix_cache = SimpleNamespace(
-        big_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: next(slots)),
-        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7),
+        big_page_buffers=SimpleNamespace(
+            alloc_one_state_cache=lambda: next(slots), checkpoint_lens=[None] * len(page_ends)
+        ),
+        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7, checkpoint_lens=[None] * 8),
         free_one_small_page_buffer=lambda: None,
     )
-    context.req_manager = SimpleNamespace(
-        save_big_page_states=lambda **kwargs: big_snapshots.append(req.get_chuncked_input_token_len()),
-        save_state=lambda **kwargs: small_snapshots.append(req.get_chuncked_input_token_len()),
+    from lightllm.common.cache_manager import HybridCacheManager
+
+    context.req_manager.cache_manager = HybridCacheManager(
+        req.args,
+        2,
+        16,
+        state_manager=SimpleNamespace(
+            capture_intermediate_checkpoints=False,
+            save_checkpoints=lambda req_idx, reqs, slots, pool, lengths: big_snapshots.extend(lengths),
+            save_state=lambda req_idx, slot, pool, length: small_snapshots.append(length),
+        ),
+        device="cpu",
     )
+    context.req_manager.cache_manager.radix_cache = context.radix_cache
+    context.req_manager.cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
+    context.req_manager.cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
 
     while req.cur_kv_len < req.get_cur_total_len():
-        context.save_hybrid_state_to_cache(torch.tensor([0]), [req])
+        context.req_manager.cache_manager.save_state_cache(torch.tensor([0]), [req])
         req.cur_kv_len = req.get_chuncked_input_token_len()
 
     assert big_snapshots == expected_big
@@ -93,6 +111,10 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     assert sorted(req.hybrid_len_to_big_page_id) == page_ends
     assert len(set(req.hybrid_len_to_big_page_id.values())) == len(page_ends)
     assert big_snapshots == [end for end in page_ends if not any(start < end < stop for start, stop in spans)]
+    assert context.radix_cache.big_page_buffers.checkpoint_lens == [
+        end if end in expected_big else None for end in page_ends
+    ]
+    assert context.radix_cache.small_page_buffers.checkpoint_lens[7] == (expected_small[0] if expected_small else None)
 
 
 @pytest.mark.parametrize(
@@ -118,11 +140,12 @@ def test_full_attention_gpu_restore_stays_outside_image(
     radix_cache.insert(torch.tensor(source))
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
-    monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
     monkeypatch.setattr(
         g_infer_context,
         "req_manager",
-        SimpleNamespace(req_to_token_indexs=torch.empty((1, len(query)), dtype=torch.int64)),
+        SimpleNamespace(
+            cache_manager=SimpleNamespace(req_to_token_indexs=torch.empty((1, len(query)), dtype=torch.int64))
+        ),
     )
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(page_size=page_size)
@@ -131,7 +154,11 @@ def test_full_attention_gpu_restore_stays_outside_image(
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
-    req._match_radix_cache()
+    cache_manager = CacheManager(req.args, 2, 16, device="cpu")
+    cache_manager.radix_cache = radix_cache
+    cache_manager.req_to_token_indexs = g_infer_context.req_manager.cache_manager.req_to_token_indexs
+    monkeypatch.setattr(g_infer_context, "req_manager", SimpleNamespace(cache_manager=cache_manager))
+    cache_manager.restore_prefix(req)
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
     assert radix_cache.get_refed_tokens_num() == gpu_end
@@ -188,6 +215,7 @@ def test_mm_chunking_keeps_the_original_state_cache_position(monkeypatch, disabl
         linear_att_page_block_num=8,
         disable_chunked_mm_input=disable_chunked_mm_input,
         batch_max_tokens=1024,
+        disable_chunked_prefill=False,
     )
     req.shm_index, req.vocab_size = 0, 100
     req.multimodal_params = SimpleNamespace(
@@ -263,20 +291,28 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     module.args = SimpleNamespace(page_size=256)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(cache_manager=SimpleNamespace(req_to_token_indexs=table)),
             mem_manager=SimpleNamespace(
                 operator=SimpleNamespace(
                     load_cpu_cache_to_gpu=lambda **kwargs: loaded.append(req.cur_kv_len),
+                    get_cpu_cache_match_page_num=lambda pages, *args: len(pages),
                 )
             ),
         ),
     )
+    module.backend.model.req_manager.cache_manager = module.backend.model.mem_manager.operator
+    module.backend.model.req_manager.cache_manager.req_to_token_indexs = table
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
-    monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
+    module.backend.model.req_manager.cache_manager.alloc_req_kv = allocate
+    module.backend.model.req_manager.cache_manager.get_available_token_num = lambda: 8192
+    monkeypatch.setattr(
+        common.g_infer_context,
+        "req_manager",
+        SimpleNamespace(cache_manager=module.backend.model.req_manager.cache_manager),
+    )
     monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", hybrid)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)

@@ -1,3 +1,4 @@
+from lightllm.common.cache_manager import HybridCacheManager, CacheManager
 from types import SimpleNamespace
 from collections import deque
 
@@ -42,34 +43,48 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     released_refs = []
     context = InferenceContext()
     context.is_hybrid_att_model = False
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
+    context.req_manager = SimpleNamespace(
+        cache_manager=SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
+    )
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
     req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
     free_token_indexes = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    cache_manager = CacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
+    cache_manager.args = None
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
+    cache_manager.radix_cache = context.radix_cache
+    req.cache_tiers = (CacheTier.GPU,) if False else ()
+    free_token_indexes.extend(cache_manager._release_request_cache(req))
 
     assert free_token_indexes[0].tolist() == [12, 13, 14, 15, 16]
     assert released_refs == [shared_node]
     assert req.shared_kv_node is None
 
 
-def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
-    context = InferenceContext()
-    context.radix_cache = object()
-    context.is_hybrid_att_model = False
-    inserted_reqs = []
-    context._full_att_free_req = lambda free_token_index, req: inserted_reqs.append(req)
+def test_legacy_cache_tiers_still_insert_gpu_radix_cache(monkeypatch):
+    from lightllm.common import cache_manager as cache_module
+
+    monkeypatch.setattr(cache_module, "custom_cat", torch.cat)
+    inserted, freed = [], []
+    cache_manager = CacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
+    cache_manager.mem_manager = SimpleNamespace(free=lambda indexes: freed.extend(indexes.tolist()))
+    cache_manager.req_to_token_indexs = torch.arange(5)[None, :]
+    cache_manager.radix_cache = SimpleNamespace(insert=lambda key, value: (inserted.append(key.tolist()) or 0, None))
     req = SimpleNamespace(
+        req_idx=0,
         cache_tiers=(CacheTier.GPU, CacheTier.CPU, CacheTier.DISK),
         cur_kv_len=3,
+        hold_kv_len=5,
+        shared_kv_node=None,
+        get_input_token_ids=lambda: list(range(5)),
         shm_req=SimpleNamespace(shm_cur_kv_len=3),
     )
-
-    context.free_a_req_mem([], req)
-
-    assert inserted_reqs == [req]
+    cache_manager.release_request_caches([req])
+    assert inserted == [[0, 1, 2]]
+    assert freed == [3, 4]
+    assert req.cur_kv_len == req.hold_kv_len == 0
 
 
 def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
@@ -131,12 +146,15 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     assert len(module.cpu_cache_handle_queue) == 2
 
 
-def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
+@pytest.mark.parametrize("with_radix", [False, True])
+def test_non_gpu_linear_cache_tiers_release_pending_state_pages(monkeypatch, with_radix):
     freed_small_pages = []
     freed_big_pages = []
     context = InferenceContext()
     context.is_hybrid_att_model = True
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
+    context.req_manager = SimpleNamespace(
+        cache_manager=SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
+    )
     context.radix_cache = SimpleNamespace(
         small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
         big_page_buffers=SimpleNamespace(free_state_cache=freed_big_pages.extend),
@@ -148,19 +166,39 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
         shared_kv_node=None,
         tail_small_page_buffer_id=7,
         hybrid_len_to_big_page_id={128: 8, 256: 9},
+        cache_tiers=(CacheTier.CPU,),
+        shm_req=SimpleNamespace(shm_cur_kv_len=3),
     )
     free_token_indexes = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    cache_manager = HybridCacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
+    cache_manager.bind_mem_manager(context.radix_cache)
+    cache_manager.small_page_buffers = context.radix_cache.small_page_buffers
+    cache_manager.big_page_buffers = context.radix_cache.big_page_buffers
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
+    context.req_manager.cache_manager = cache_manager
+    context.args = None
+    if not with_radix:
+        context.radix_cache = None
+    from lightllm.common import cache_manager as cache_module
+
+    monkeypatch.setattr(cache_module, "custom_cat", torch.cat)
+    cache_manager.args = context.args
+    cache_manager.radix_cache = context.radix_cache
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
+    cache_manager.mem_manager = SimpleNamespace(free=lambda indexes: free_token_indexes.append(indexes))
+    cache_manager.release_request_caches([req])
 
     assert free_token_indexes[0].tolist() == [10, 11, 12]
     assert freed_small_pages == [7]
     assert freed_big_pages == [8, 9]
     assert req.tail_small_page_buffer_id is None
     assert req.hybrid_len_to_big_page_id == {}
+    assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == 0
 
 
-def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
+@pytest.mark.parametrize("checkpoint_len", ["full", None, 128, 132])
+def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
     table = torch.full((1, 136), -1, dtype=torch.int32)
     table[0, :4] = torch.arange(4, dtype=torch.int32)
     next_index = 4
@@ -182,17 +220,26 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         return mem_indexes
 
     operator = SimpleNamespace(
-        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist())
+        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist()),
     )
+    cache_manager = (
+        CacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
+        if checkpoint_len == "full"
+        else HybridCacheManager(SimpleNamespace(page_size=1), 2, 16, device="cpu")
+    )
+    cache_manager.cpu_cache_transfer = SimpleNamespace(get_checkpoint_lens=lambda *args: [checkpoint_len])
+    cache_manager.load_cpu_cache_to_gpu = operator.load_cpu_cache_to_gpu
+    cache_manager.req_to_token_indexs = table
     backend = SimpleNamespace(
         is_master_in_dp=False,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(cache_manager=cache_manager),
         ),
-        _alloc_req_kv_mem=alloc_req_kv_mem,
     )
+    cache_manager.alloc_req_kv = alloc_req_kv_mem
+    cache_manager.get_available_token_num = lambda: 200
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=132)
     module.backend = backend
@@ -200,9 +247,13 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     module.need_sync_compute_stream = lambda: False
     module.cpu_cache_client = SimpleNamespace()
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
+        req_manager=SimpleNamespace(
+            cache_manager=SimpleNamespace(req_to_token_indexs=table), mem_manager=SimpleNamespace(alloc=alloc)
+        ),
         get_can_alloc_token_num=lambda: 200,
     )
+    cache_manager.req_to_token_indexs = context.req_manager.cache_manager.req_to_token_indexs
+    context.req_manager.cache_manager = cache_manager
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=4,
@@ -219,9 +270,14 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
 
     module.load_cpu_cache_to_reqs([req])
 
+    if checkpoint_len not in ("full", 132):
+        assert not alloc_sizes and not loaded_indexes
+        assert req.cur_kv_len == req.hold_kv_len == 4
+        return
     assert alloc_sizes == [128]
     assert req.cur_kv_len == 132
     assert req.hold_kv_len == 132

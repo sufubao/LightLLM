@@ -74,7 +74,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             device=device,
         )
         repack_kv_index(
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
             b_req_idx=self.infer_state.b_req_idx,
             b_token_len=self.infer_state.b_seq_len,
             b_page_start_loc=kv_starts[:-1],
@@ -180,7 +180,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
 
         self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
         repack_kv_index(
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
             b_req_idx=self.infer_state.b_req_idx,
             b_token_len=self.infer_state.b_seq_len,
             b_page_start_loc=self.kv_starts[:-1],

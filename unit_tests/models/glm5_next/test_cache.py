@@ -5,7 +5,9 @@ import pytest
 import torch
 
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
-from lightllm.common.req_manager import Glm5NextReqManager
+from lightllm.common.cache_manager import HybridCacheManager
+from lightllm.common.linear_state import LinearStateManager
+from lightllm.common.indexer_state import IndexerStateManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, set_unique_server_name
@@ -75,8 +77,12 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         draft_full_att_kv_layer_num=int(mtp_step > 0),
     )
     full_layers = config.get_full_att_kv_layer_num_with_draft_model()
-    mem = Glm5NextMemManager(16, torch.bfloat16, 1, 584, full_layers, config)
-    req = Glm5NextReqManager(3, 16, mem, config)
+    mem = Glm5NextMemManager(16, torch.bfloat16, 1, 584, full_layers)
+    mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
+    req = HybridCacheManager(
+        args, 3, 512, LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step)
+    )
+    req.bind_mem_manager(mem)
     att_kv = mem.get_att_input_params(3)
     assert att_kv.shape == (17, 1, 512)
     assert att_kv.stride(0) == 584
@@ -92,28 +98,38 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     if mtp_step:
         assert req.indexer_state_manager.get_layer_buffer(4).shape == (4, 4 + mtp_step, 256)
         assert mem.get_att_input_params(4).shape == att_kv.shape
-    cache = req.create_small_page_cache_manager(2) if small_page else mem.big_page_buffers
+    cache = req.create_small_page_cache_manager(2) if small_page else req.big_page_buffers
     slot = cache.alloc_one_state_cache()
     source_req = SimpleNamespace(req_idx=0)
-    req.init_hybrid_attention_state(source_req)
+    req.reset(source_req.req_idx)
     req.linear_state_manager.conv_state.buffer[:, 0].normal_()
     req.linear_state_manager.ssm_state.buffer[:, 0].normal_()
     conv = req.linear_state_manager.conv_state.buffer[:, 0, ..., :3].clone()
     ssm = req.linear_state_manager.ssm_state.buffer[:, 0].clone()
     if small_page:
-        req.save_state(0, slot, cache)
+        req.save_state(0, slot, cache, checkpoint_len=4)
     else:
-        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot])
+        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot], checkpoint_lens=[4])
     torch.cuda.synchronize()
     req.linear_state_manager.conv_state.buffer[:, 0].zero_()
     req.linear_state_manager.ssm_state.buffer[:, 0].zero_()
     req.indexer_state_manager.state.buffer.normal_()
     unchanged = req.indexer_state_manager.state.buffer[:, [0, 1, 3]].clone()
+    if mtp_step:
+        req.linear_state_manager.mtp_state_index.fill_(mtp_step)
+        tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")
+        req.state_manager.commit_accepted_state(
+            b_req_mtp_start_loc=tensor([0, 2]),
+            b_req_idx=tensor([0, 0, 1, 1, 1]),
+            b_mtp_index=tensor([0, 1, 0, 1, 2]),
+            accepted_index=tensor([1, 0, 1, 1, 0]),
+            verify_width=mtp_step + 1,
+        )
+        assert req.linear_state_manager.mtp_state_index.tolist() == [0, 1, mtp_step, mtp_step]
     dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
-    if small_page:
-        req.restore_small_page_state(dest_req)
-    else:
-        req.restore_big_page_state(slot, dest_req)
+    req.restore_state(dest_req.req_idx, cache, slot, restored_len=4)
+    if mtp_step:
+        assert req.linear_state_manager.mtp_state_index.tolist() == [0, 1, 0, mtp_step]
     torch.cuda.synchronize()
     assert torch.equal(req.linear_state_manager.conv_state.buffer[:, 2, ..., :3], conv)
     assert torch.equal(req.linear_state_manager.ssm_state.buffer[:, 2 * (mtp_step + 1)], ssm)
@@ -122,7 +138,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     assert not req.indexer_state_manager.state.buffer[:, 2].any()
     assert torch.equal(req.indexer_state_manager.state.buffer[:, [0, 1, 3]], unchanged)
     req.indexer_state_manager.state.buffer[:, 2].normal_()
-    req.init_hybrid_attention_state(dest_req)
+    req.reset(dest_req.req_idx)
     assert not req.linear_state_manager.conv_state.buffer[:, 2].any()
     assert not req.linear_state_manager.ssm_state.buffer[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
     assert not req.indexer_state_manager.state.buffer[:, 2].any()
@@ -145,7 +161,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     indexes = torch.arange(8, dtype=torch.int32, device="cuda")
     zero = torch.zeros(1, dtype=torch.int64, device="cuda")
     ready = torch.zeros(1, dtype=torch.int32, pin_memory=True)
-    big = mem.big_page_buffers
+    big = req.big_page_buffers
     packed_bytes[:, :8].random_(0, 256)
     big.conv_state_cache.buffer[0].normal_()
     big.ssm_state_cache.buffer[0].normal_()

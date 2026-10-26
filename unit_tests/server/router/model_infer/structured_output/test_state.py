@@ -8,6 +8,7 @@ import pytest
 import torch
 import xgrammar as xgr
 
+from lightllm.common.cache_manager import CacheManager, HybridCacheManager
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.grammar import OutputGrammarCompiler
 from unit_tests.server.grammar_helpers import (
@@ -35,7 +36,12 @@ def test_sampling_preparation_without_constraint_buffers():
 @pytest.mark.parametrize("mode", ["none", "xgrammar"])
 def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypatch, mode):
     args = SimpleNamespace(
-        output_constraint_mode=mode, model_dir="unused", tokenizer_mode="auto", trust_remote_code=False, eos_id=[255]
+        page_size=1,
+        output_constraint_mode=mode,
+        model_dir="unused",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        eos_id=[255],
     )
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: args)
     tokenizer = SimpleNamespace(eos_token_id=256)
@@ -47,10 +53,10 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
         patch.object(xgr.TokenizerInfo, "from_huggingface", return_value=tokenizer_info) as build_tokenizer_info,
         patch.object(xgr, "GrammarCompiler", side_effect=AssertionError("Inference must not compile")),
     ):
+        cache_manager = HybridCacheManager(args, 2, 16, device="cpu")
         context.register(
             backend=SimpleNamespace(dp_rank_in_node=0),
-            req_manager=SimpleNamespace(req_sampling_params_manager=None),
-            radix_cache=None,
+            req_manager=SimpleNamespace(req_sampling_params_manager=None, cache_manager=cache_manager),
             shm_req_manager=None,
             vocab_size=257,
         )
@@ -163,10 +169,15 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
         )
         requests.append((req_id, index, SimpleNamespace(to_dict=lambda: {}), owner_dp_rank))
     monkeypatch.setattr(compiler, "_compile", lambda *args: pytest.fail("Inference must not compile"))
-    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False, mtp_step=0))
+    monkeypatch.setattr(
+        infer_batch,
+        "get_env_start_args",
+        lambda: SimpleNamespace(diverse_mode=False, mtp_step=0, disable_chunked_mm_input=False),
+    )
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(
-            alloc=count().__next__,
+            cache_manager=CacheManager(SimpleNamespace(page_size=1), 4, 16, device="cpu"),
+            alloc_slot=count().__next__,
             req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None),
         ),
         shm_req_manager=SimpleNamespace(get_req_obj_by_index=lambda index: shared_reqs[index]),
@@ -240,14 +251,16 @@ def test_constraint_state_lifetime_follows_request_cleanup(compiler):
     payload = req.shm_req.get_compiled_grammar()
     grammar = compiler.output_constraint_state_factory.get_grammar(payload)
     context = infer_batch.InferenceContext(
-        req_manager=SimpleNamespace(free=lambda *args: None),
+        req_manager=SimpleNamespace(release_requests=lambda reqs: None),
         requests_mapping={1: req},
         shm_req_manager=SimpleNamespace(put_back_req_obj=lambda req: None),
     )
     context.infer_req_ids = [1]
     context.args = SimpleNamespace(diverse_mode=False)
     context.backend = SimpleNamespace(is_master_in_dp=False)
-    context.free_a_req_mem = lambda *args: None
+    context.req_manager.cache_manager = SimpleNamespace(
+        release_request_caches=lambda reqs: None, log_cache_stats=lambda: None
+    )
 
     context._filter([1], modify_shm_finish_state=False)
     assert context.requests_mapping == {} and context.infer_req_ids == []

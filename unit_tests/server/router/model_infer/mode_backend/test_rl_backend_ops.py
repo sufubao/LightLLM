@@ -17,8 +17,11 @@ from lightllm.utils.torch_memory_saver_utils import MemoryTag
 def test_resume_memory_initializes_hold_indexes_only_for_kv_cache(tags, should_init_hold_indexes):
     events = []
     model = SimpleNamespace(
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(100, 101, 102, 103)),
         torch_memory_saver=SimpleNamespace(resume=lambda tag: events.append(("resume", tag))),
-        req_manager=SimpleNamespace(init_hold_request_indexs=lambda: events.append(("init_hold_indexes", None))),
+        req_manager=SimpleNamespace(
+            init_hold_request_indexs=lambda indexes: events.append(("init_hold_indexes", indexes))
+        ),
     )
     backend = SimpleNamespace(model=model, logger=None)
     ops = RlBackendOps(backend)
@@ -30,4 +33,4 @@ def test_resume_memory_initializes_hold_indexes_only_for_kv_cache(tags, should_i
     assert bool(init_events) is should_init_hold_indexes
     if should_init_hold_indexes:
         last_resume_index = max(index for index, event in enumerate(events) if event[0] == "resume")
-        assert events.index(("init_hold_indexes", None)) > last_resume_index
+        assert events.index(("init_hold_indexes", model.mem_manager.HOLD_TOKEN_MEMINDEXES)) > last_resume_index

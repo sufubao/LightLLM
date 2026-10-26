@@ -161,7 +161,7 @@ class DiversehBackend(ChunkedPrefillBackend):
                 if req_obj.slave_reqs:
                     # 存在 slave reqs 的 master req 需要将自己的 kv 信息写入到 radix cache 中
                     # 方便 slave req 进行 kv 的复用
-                    self._master_req_to_radix_cache(master_req=req_obj)
+                    self.model.req_manager.cache_manager.publish_request_prefix(master_req=req_obj)
             else:
                 # slave req 直接复用 master req 的更新包。
                 assert pre_master_req_pack is not None
@@ -175,47 +175,12 @@ class DiversehBackend(ChunkedPrefillBackend):
         torch.cuda.current_stream().synchronize()
         return update_func_objs
 
-    def _master_req_to_radix_cache(self, master_req: InferReq):
-        key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
-        key = torch.tensor(key, dtype=torch.int64, device="cpu")
-        value = self.model.req_manager.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
-        prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
-        old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
-        assert old_prefix_len <= master_req.cur_kv_len
-        self.model.mem_manager.free(
-            self.model.req_manager.req_to_token_indexs[master_req.req_idx][old_prefix_len:prefix_len]
-        )
-
-        # 将原有共享节点替换为新共享节点，新共享节点对应的长度为当前的cur_kv_len
-        self.radix_cache.dec_node_ref_counter(master_req.shared_kv_node)
-        self.radix_cache.add_node_ref_counter(new_shared_kv_node)
-        master_req.shared_kv_node = new_shared_kv_node
-        assert (
-            new_shared_kv_node.node_prefix_total_len == master_req.cur_kv_len
-        ), f"shared len: {new_shared_kv_node.node_prefix_total_len} cur_kv_len {master_req.cur_kv_len}"
-
-        share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
-        assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
-        self.model.req_manager.req_to_token_indexs[master_req.req_idx][0 : master_req.cur_kv_len] = value
-        return
-
     def _copy_master_req_to_slave_req(self, slave_req: InferReq):
         master_req = slave_req.related_master_req
         assert master_req is not None
 
-        self.radix_cache.dec_node_ref_counter(slave_req.shared_kv_node)
-        self.radix_cache.add_node_ref_counter(master_req.shared_kv_node)
-
-        kv_len = master_req.cur_kv_len
-
-        self.model.req_manager.req_to_token_indexs[slave_req.req_idx][
-            0:kv_len
-        ] = self.model.req_manager.req_to_token_indexs[master_req.req_idx][0:kv_len]
-        # torch.cuda.current_stream().synchronize()
-        slave_req.shared_kv_node = master_req.shared_kv_node
-        slave_req.cur_kv_len = kv_len
-        # slave 在 prefill 阶段没有独立分配 KV，共享完成后需要同步其已持有的 KV 长度。
-        slave_req.hold_kv_len = kv_len
+        self.model.req_manager.cache_manager.share_request_prefix(master_req, slave_req)
+        kv_len = slave_req.cur_kv_len
         slave_req.cur_output_len = master_req.cur_output_len
         if self.is_master_in_dp:
             slave_req.shm_req.shm_cur_kv_len = slave_req.cur_kv_len

@@ -42,7 +42,7 @@ class Glm5NextMemManager(Qwen3NextMemManager):
         return self._layer_buffer(layer_index).view(torch.uint8)[:, :, -132:]
 
     def write_to_shm(self, req_manager):
-        self.req_to_indexer_tail = req_manager.req_to_indexer_tail
+        self.req_to_indexer_tail = req_manager.indexer_state_manager.state
         return super().write_to_shm(req_manager)
 
     def _create_att_state_page_helper(self):

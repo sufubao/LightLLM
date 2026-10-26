@@ -169,8 +169,8 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     for end, slot in req.hybrid_len_to_big_page_id.items():
         for actual, expected in zip(big.get_state_cache(slot), expected_big_states[end]):
             torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(requests.req_to_conv_state.buffer[:, 0].cpu(), expected_states[0])
-    torch.testing.assert_close(requests.req_to_ssm_state.buffer[:, 0].cpu(), expected_states[1])
+    torch.testing.assert_close(requests.linear_state_manager.conv_state.buffer[:, 0].cpu(), expected_states[0])
+    torch.testing.assert_close(requests.linear_state_manager.ssm_state.buffer[:, 0].cpu(), expected_states[1])
 
     # Loaded intermediate pages must remain unusable as radix restore points.
     tree = HybridAttPagedRadixCache(384, 103, 64, 2, mem, requests.small_page_buffers)

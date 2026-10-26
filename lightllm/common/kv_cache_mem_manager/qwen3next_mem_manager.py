@@ -71,8 +71,8 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def write_to_shm(self, req_manager):
-        self.req_to_conv_state = req_manager.req_to_conv_state
-        self.req_to_ssm_state = req_manager.req_to_ssm_state
+        self.req_to_conv_state = req_manager.linear_state_manager.conv_state
+        self.req_to_ssm_state = req_manager.linear_state_manager.ssm_state
         # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
         # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本
         # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针

@@ -13,7 +13,7 @@ class MockReqManager:
     """Mock request manager for testing"""
 
     def __init__(self, req_to_token_indexs):
-        self.req_to_token_indexs = req_to_token_indexs
+        self.cache_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
 
 
 class MockInferState:

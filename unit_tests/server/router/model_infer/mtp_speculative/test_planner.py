@@ -200,6 +200,39 @@ def test_mode_proposals_own_their_schedule_metadata():
     assert "schedule_scores_cpu" in DSparkSpecProposal.__dataclass_fields__
 
 
+@pytest.mark.parametrize("has_state", [False, True])
+def test_verify_mtp_state_provider(monkeypatch, has_state):
+    commit_args = {}
+    requests = SimpleNamespace()
+    requests.req_sampling_params_manager = SimpleNamespace(req_to_next_token_ids=None)
+    requests.cache_manager = SimpleNamespace(
+        state_manager=SimpleNamespace(commit_accepted_state=lambda **kwargs: commit_args.update(kwargs))
+        if has_state
+        else None
+    )
+    backend = SimpleNamespace(max_draft_step=1, model=SimpleNamespace(req_manager=requests))
+    accept_lengths = torch.tensor([2, 1], dtype=torch.int32)
+    accepted_index = torch.tensor([True, True, True, False])
+    monkeypatch.setattr(mtp_utils, "mtp_verify", lambda **kwargs: (accept_lengths, accepted_index))
+    req_idx = torch.tensor([1, 1, 2, 2], dtype=torch.int32)
+    start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    mtp_index = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+
+    lengths, accepted = mtp_utils.verify_mtp_tokens(
+        backend, torch.tensor([10, 11, 12, 13]), req_idx, start_loc, mtp_index
+    )
+
+    assert lengths is accept_lengths and accepted is accepted_index
+    if has_state:
+        assert commit_args["b_req_idx"] is req_idx
+        assert commit_args["b_req_mtp_start_loc"] is start_loc
+        assert commit_args["b_mtp_index"] is mtp_index
+        assert commit_args["accepted_index"] is accepted_index
+        assert commit_args["verify_width"] == 2
+    else:
+        assert not commit_args
+
+
 def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
     scatter_args = {}
     monkeypatch.setattr(

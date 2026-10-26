@@ -88,7 +88,7 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
             k_scale=k_scale,
             v=v,
             v_scale=v_scale,
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.infer_state.req_manager.cache_manager.req_to_token_indexs,
             b_seq_len=self.infer_state.b_seq_len,
             b_req_idx=self.infer_state.b_req_idx,
             b_kv_start_loc=self.b_kv_start_loc,

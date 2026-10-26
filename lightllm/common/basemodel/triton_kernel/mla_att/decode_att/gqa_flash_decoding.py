@@ -56,14 +56,14 @@ def gqa_token_decode_attention_flash_decoding(
         q_rope.view(calcu_shape2),
         kv_nope,
         kv_rope,
-        infer_state.req_manager.req_to_token_indexs,
+        infer_state.req_manager.cache_manager.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         mid_o,
         mid_o_logexpsum,
         softmax_scale,
         get_sm_count=True,
-        **run_config
+        **run_config,
     )
 
     if not hasattr(infer_state, "decode_att_block_seq"):
@@ -104,14 +104,14 @@ def gqa_token_decode_attention_flash_decoding(
         q_rope.view(calcu_shape2),
         kv_nope,
         kv_rope,
-        infer_state.req_manager.req_to_token_indexs,
+        infer_state.req_manager.cache_manager.req_to_token_indexs,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         mid_o,
         mid_o_logexpsum,
         softmax_scale,
         get_sm_count=False,
-        **run_config
+        **run_config,
     )
 
     flash_decode_stage2(
@@ -121,7 +121,7 @@ def gqa_token_decode_attention_flash_decoding(
         mid_o_logexpsum,
         infer_state.b_seq_len,
         o_tensor.view(calcu_shape1),
-        **run_config
+        **run_config,
     )
     return o_tensor
 

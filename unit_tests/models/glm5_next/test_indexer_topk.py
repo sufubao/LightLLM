@@ -120,7 +120,7 @@ def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, 
         b_seq_len=lengths,
         b1_cu_q_seq_len=torch.arange(rows + 1, device="cuda", dtype=torch.int32),
         max_q_seq_len=1,
-        req_manager=SimpleNamespace(req_to_token_indexs=table),
+        req_manager=SimpleNamespace(cache_manager=SimpleNamespace(req_to_token_indexs=table)),
     )
     att_state = SimpleNamespace(lengths=lengths)
     logits_outputs = []

@@ -31,7 +31,7 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    state_manager = backend.model.req_manager.linear_state_manager
+    state_manager = backend.model.req_manager.cache_manager.state_manager
     if state_manager is not None:
         state_manager.commit_accepted_state(
             b_req_mtp_start_loc=b_req_mtp_start_loc,

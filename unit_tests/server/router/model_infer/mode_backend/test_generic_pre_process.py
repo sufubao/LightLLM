@@ -14,7 +14,7 @@ def _patch_empty_input_context(monkeypatch):
         req_manager=SimpleNamespace(
             HOLD_REQUEST_ID=-1,
             mem_manager=mem_manager,
-            req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32),
+            cache_manager=SimpleNamespace(req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32)),
         ),
         radix_cache=None,
     )

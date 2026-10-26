@@ -50,8 +50,7 @@ class RlBackendOps:
         return getattr(self, op_name)(op_args)
 
     def flush_cache(self, request: FlushCacheReq):
-        if self.backend.radix_cache is not None:
-            self.backend.radix_cache.flush_cache()
+        self.backend.model.req_manager.cache_manager.flush_cache()
         return True, "Succeeded to flush cache."
 
     def _iter_memory_tags(self, tags: Optional[List[MemoryTag]]):
@@ -73,7 +72,9 @@ class RlBackendOps:
         for tag in memory_tags:
             self.backend.model.torch_memory_saver.resume(tag=tag)
         if MemoryTag.KV_CACHE in memory_tags:
-            self.backend.model.req_manager.init_hold_request_indexs()
+            self.backend.model.req_manager.init_hold_request_indexs(
+                self.backend.model.mem_manager.HOLD_TOKEN_MEMINDEXES
+            )
 
     def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
         try:

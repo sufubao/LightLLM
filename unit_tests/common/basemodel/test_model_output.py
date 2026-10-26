@@ -123,7 +123,9 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         model.is_mtp_draft_model = False
         model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
         model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1)
-        model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
+        model.req_manager = SimpleNamespace(
+            HOLD_REQUEST_ID=88, cache_manager=SimpleNamespace(req_to_token_indexs=object())
+        )
 
         pad_batch_sizes = []
 

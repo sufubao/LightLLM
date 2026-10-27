@@ -2,11 +2,6 @@ import os
 import yaml
 import collections
 from .registry import QUANTMETHODS
-from .w8a8 import *
-from .w8a8gx import *
-from .deepgemm import *
-from .awq import *
-from .no_quant import *
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import is_sm100_gpu
 
@@ -17,6 +12,26 @@ EXPERT_DTYPE_TO_QUANT_TYPE = {
     "fp4": "fp4fp8-b32-deepgemm",
 }
 SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
+
+
+def load_quant_config(quant_type="none", custom_cfg_path=None):
+    QUANTMETHODS.validate(quant_type)
+    if custom_cfg_path is None:
+        return None
+    with open(custom_cfg_path, "r") as file:
+        data = yaml.safe_load(file)
+    if not isinstance(data, dict):
+        raise ValueError(f"{custom_cfg_path}: quantization config must be a mapping")
+    try:
+        QUANTMETHODS.validate(data["quant_type"])
+        for index, layer_quant_cfg in enumerate(data.get("mix_bits", [])):
+            try:
+                QUANTMETHODS.validate(layer_quant_cfg["quant_type"])
+            except ValueError as e:
+                raise ValueError(f"mix_bits[{index}]: {e}") from e
+    except ValueError as e:
+        raise ValueError(f"{custom_cfg_path}: {e}") from e
+    return data
 
 
 class Quantcfg:
@@ -95,6 +110,8 @@ class Quantcfg:
             self._mapping_expert_quant_method()
 
         elif self.hf_quantization_method == "awq":
+            from .awq import is_awq_marlin_compatible
+
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):
                 self.quant_type = "awq_marlin"
@@ -105,11 +122,9 @@ class Quantcfg:
 
     def _parse_custom_cfg(self, custom_cfg_path):
         self.quant_cfg = collections.defaultdict(dict)
-        if custom_cfg_path is None:
+        data = load_quant_config(self.quant_type, custom_cfg_path)
+        if data is None:
             return
-
-        with open(custom_cfg_path, "r") as file:
-            data = yaml.safe_load(file)
 
         self.quant_type = data["quant_type"]
         for layer_quant_cfg in data.get("mix_bits", []):

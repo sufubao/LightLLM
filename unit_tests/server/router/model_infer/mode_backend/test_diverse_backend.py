@@ -82,6 +82,8 @@ def test_diverse_prefill_counts_increment_once_and_slaves_do_not_duplicate(monke
     backend.is_master_in_dp = True
     backend._master_req_to_radix_cache = Mock()
     backend._copy_master_req_to_slave_req = Mock()
+    from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
+
     target = [512]
     master = SimpleNamespace(
         is_master_req=lambda: True,
@@ -91,7 +93,11 @@ def test_diverse_prefill_counts_increment_once_and_slaves_do_not_duplicate(monke
         cur_output_len=0,
         slave_reqs=[],
         shm_req=SimpleNamespace(input_len=800, group_req_id=8),
+        req_idx=0,
+        multimodal_params=None,
+        get_chuncked_input_token_ids=lambda: [0] * target[0],
     )
+    prepare_prefill_inputs([master], True)
     first = backend._diverse_pre_post_handle([master], True)
     assert first[0].prefill_tokens == 512 and first[0].output_len == 0
     target[0] = 800
@@ -99,6 +105,7 @@ def test_diverse_prefill_counts_increment_once_and_slaves_do_not_duplicate(monke
         is_master_req=lambda: False, remove_master_req=Mock(), shm_req=SimpleNamespace(group_req_id=8)
     )
     master.slave_reqs = [slave]
+    prepare_prefill_inputs([master], True)
     second = backend._diverse_pre_post_handle([master, slave], True)
     assert [pack.prefill_tokens for pack in second] == [288, 0]
     assert sum(pack.prefill_tokens for pack in first + second) == 800

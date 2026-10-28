@@ -14,22 +14,38 @@ EXPERT_DTYPE_TO_QUANT_TYPE = {
 SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
 
-def load_quant_config(quant_type="none", custom_cfg_path=None):
-    QUANTMETHODS.validate(quant_type)
+def load_quant_config(quant_type="none", custom_cfg_path=None, platform="cuda"):
+    QUANTMETHODS.validate(quant_type, platform)
     if custom_cfg_path is None:
         return None
-    with open(custom_cfg_path, "r") as file:
-        data = yaml.safe_load(file)
-    if not isinstance(data, dict):
-        raise ValueError(f"{custom_cfg_path}: quantization config must be a mapping")
     try:
-        QUANTMETHODS.validate(data["quant_type"])
-        for index, layer_quant_cfg in enumerate(data.get("mix_bits", [])):
+        with open(custom_cfg_path, "r") as file:
+            data = yaml.safe_load(file)
+        if not isinstance(data, dict):
+            raise ValueError("quantization config must be a mapping")
+        if "quant_type" not in data:
+            raise ValueError("missing required field 'quant_type'")
+        QUANTMETHODS.validate(data["quant_type"], platform)
+        mix_bits = data.get("mix_bits", [])
+        if not isinstance(mix_bits, list):
+            raise ValueError("mix_bits must be a list")
+        for index, layer_quant_cfg in enumerate(mix_bits):
             try:
-                QUANTMETHODS.validate(layer_quant_cfg["quant_type"])
+                if not isinstance(layer_quant_cfg, dict):
+                    raise ValueError("entry must be a mapping")
+                for key in ("name", "quant_type"):
+                    if key not in layer_quant_cfg:
+                        raise ValueError(f"missing required field '{key}'")
+                if not isinstance(layer_quant_cfg["name"], str) or not layer_quant_cfg["name"]:
+                    raise ValueError("name must be a non-empty string")
+                QUANTMETHODS.validate(layer_quant_cfg["quant_type"], platform)
+                if "layer_nums" in layer_quant_cfg:
+                    layer_nums = layer_quant_cfg["layer_nums"]
+                    if not isinstance(layer_nums, list) or any(type(n) is not int or n < 0 for n in layer_nums):
+                        raise ValueError("layer_nums must be a list of non-negative integers")
             except ValueError as e:
                 raise ValueError(f"mix_bits[{index}]: {e}") from e
-    except ValueError as e:
+    except (ValueError, yaml.YAMLError) as e:
         raise ValueError(f"{custom_cfg_path}: {e}") from e
     return data
 

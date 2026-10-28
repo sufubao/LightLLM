@@ -715,7 +715,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--quant_type",
         type=str,
-        choices=QUANTMETHODS.supported_methods(),
+        choices=QUANTMETHODS.supported_methods(platform=None),
         default="none",
         help=(
             "Quantization methods (W = weight, A = activation):\n"
@@ -760,7 +760,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--vit_quant_type",
         type=str,
-        choices=QUANTMETHODS.supported_methods(),
+        choices=QUANTMETHODS.supported_methods(platform=None),
         default="none",
         help="""Quantization method for ViT: w8a8 | fp8w8a8""",
     )

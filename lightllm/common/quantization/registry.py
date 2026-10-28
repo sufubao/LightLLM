@@ -23,7 +23,9 @@ class QuantMethodFactory:
         return decorator
 
     def supported_methods(self, platform="cuda"):
-        return tuple(sorted(name for name, methods in self._quant_methods.items() if platform in methods))
+        return tuple(
+            sorted(name for name, methods in self._quant_methods.items() if platform is None or platform in methods)
+        )
 
     def validate(self, key, platform="cuda"):
         if not isinstance(key, str) or platform not in self._quant_methods.get(key, {}):

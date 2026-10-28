@@ -15,8 +15,8 @@ SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
 
 def load_quant_config(quant_type="none", custom_cfg_path=None, platform="cuda"):
-    QUANTMETHODS.validate(quant_type, platform)
     if custom_cfg_path is None:
+        QUANTMETHODS.validate(quant_type, platform)
         return None
     try:
         with open(custom_cfg_path, "r") as file:
@@ -45,7 +45,7 @@ def load_quant_config(quant_type="none", custom_cfg_path=None, platform="cuda"):
                         raise ValueError("layer_nums must be a list of non-negative integers")
             except ValueError as e:
                 raise ValueError(f"mix_bits[{index}]: {e}") from e
-    except (ValueError, yaml.YAMLError) as e:
+    except (OSError, ValueError, yaml.YAMLError) as e:
         raise ValueError(f"{custom_cfg_path}: {e}") from e
     return data
 

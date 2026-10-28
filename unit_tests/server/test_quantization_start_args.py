@@ -134,12 +134,12 @@ def test_musa_rejects_cuda_config(tmp_path, monkeypatch, option, mixed):
         assert "mix_bits[0]" in error
 
 
-@pytest.mark.parametrize("method", ["none", "musa-only"])
-def test_musa_methods_reach_startup(tmp_path, monkeypatch, method):
+@pytest.mark.parametrize("method, cli_method", [("none", "none"), ("musa-only", "musa-only"), ("none", "awq")])
+def test_musa_methods_reach_startup(tmp_path, monkeypatch, method, cli_method):
     monkeypatch.setitem(registry.QUANTMETHODS._quant_methods, "musa-only", {"musa": object})
     path = tmp_path / "quant.yaml"
     path.write_text(yaml.safe_dump({"quant_type": method, "mix_bits": [{"name": "q_proj", "quant_type": method}]}))
-    cli_args = ["--hardware_platform", "musa", "--quant_type", method, "--vit_quant_type", method]
+    cli_args = ["--hardware_platform", "musa", "--quant_type", cli_method, "--vit_quant_type", cli_method]
     cli_args += ["--quant_cfg", str(path), "--vit_quant_cfg", str(path)]
     args = StartArgs(**vars(make_argument_parser().parse_args(cli_args)))
     dispatched = []
@@ -154,6 +154,24 @@ def test_musa_methods_reach_startup(tmp_path, monkeypatch, method):
     monkeypatch.setattr("torch.multiprocessing.set_start_method", lambda *args: None)
     launch_server(args)
     assert dispatched == [args]
+
+
+@pytest.mark.parametrize("option", ["quant_cfg", "vit_quant_cfg"])
+@pytest.mark.parametrize("failure", ["missing", "unreadable"])
+def test_quant_config_file_errors(tmp_path, monkeypatch, option, failure):
+    path = tmp_path / "quant.yaml"
+    if failure == "unreadable":
+        path.write_text("quant_type: none\n")
+
+        def deny_open(*args, **kwargs):
+            raise PermissionError("permission denied")
+
+        monkeypatch.setattr("lightllm.common.quantization.open", deny_open, raising=False)
+    monkeypatch.setitem(sys.modules, "lightllm.server.api_start", None)
+    with pytest.raises(ValueError) as exc:
+        launch_server(StartArgs(**{option: str(path)}))
+    assert f"--{option}" in str(exc.value) and str(path) in str(exc.value)
+    assert isinstance(exc.value.__cause__.__cause__, OSError)
 
 
 def test_quantcfg_rejects_unknown_method_before_constructing_layers():
@@ -172,7 +190,7 @@ def test_mixed_config_preserves_quantization_precedence(tmp_path, expert_dtype):
             }
         )
     )
-    config = Quantcfg({"n_layer": 2, "expert_dtype": "fp8"}, "w8a8", str(path), expert_dtype=expert_dtype)
+    config = Quantcfg({"n_layer": 2, "expert_dtype": "fp8"}, INVALID_METHOD, str(path), expert_dtype=expert_dtype)
     assert config.get_quant_type(0, "q_proj") == "fp8w8a8-pt"
     assert config.get_quant_type(0, "fused_moe") == ("none" if expert_dtype is None else "fp8w8a8-b128-deepgemm")
     assert config.get_quant_type(1, "fused_moe") == "fp8w8a8-b128-deepgemm"

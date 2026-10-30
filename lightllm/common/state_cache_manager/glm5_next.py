@@ -1,4 +1,5 @@
 import dataclasses
+import torch
 
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
@@ -13,7 +14,9 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
     index_kpool: int = 4
     index_head_dim: int = 128
 
-    INDEX_PADDING_BYTES = 144
+    INDEXER_K_BYTES = 132
+    # FlashMLA V4 layout: 448 FP8 values, 64 BF16 values, seven E8M0 scales and one padding byte.
+    FP8_MLA_KV_BYTES = 584
 
     @classmethod
     def from_model_config(cls, config, args):
@@ -21,19 +24,19 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
         linear = config["linear_attn_config"]
         tp = args.tp // args.dp
         assert linear["num_heads"] % tp == 0
-        layers = config["num_hidden_layers"]
-        assert config["layer_types"] == [
-            "deepseek_sparse_attention" if i % 4 == 3 else "linear_attention" for i in range(layers)
-        ]
         dtype = get_torch_dtype(args.data_type)
+        use_fp8_kv = args.llm_kv_type == "fp8kv_dsa"
+        full_att_dtype = torch.uint8 if use_fp8_kv else dtype
+        mla_kv_bytes = cls.FP8_MLA_KV_BYTES if use_fp8_kv else config["kv_lora_rank"] * dtype.itemsize
+        # FlashMLA loads 16-byte vectors; keep every packed token row aligned.
+        packed_kv_bytes = ((mla_kv_bytes + cls.INDEXER_K_BYTES + 15) // 16) * 16
         # Raw index keys and compression scores only live in request tails.
-        packed_dim = config["kv_lora_rank"] + cls.INDEX_PADDING_BYTES // dtype.itemsize
         return cls(
             tp_world_size=tp,
             full_att_all_num_kv_heads=1,
-            full_att_dtype=dtype,
+            full_att_dtype=full_att_dtype,
             full_att_num_kv_heads=1,
-            full_att_head_dim=packed_dim,
+            full_att_head_dim=packed_kv_bytes // full_att_dtype.itemsize,
             global_linear_k_heads=linear["num_heads"],
             global_linear_v_heads=linear["num_heads"],
             num_linear_k_heads=linear["num_heads"] // tp,
@@ -41,11 +44,9 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
             head_linear_k_dim=linear["head_dim"],
             head_linear_v_dim=linear["head_dim"],
             conv_kernel_size=linear["short_conv_kernel_size"],
-            linear_layer_num=len(linear["kda_layers"]),
             conv_state_dtype=dtype,
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
-            full_attention_interval=4,
-            all_layer_num=layers,
+            layer_types=config["layer_types"],
             draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num() if args.mtp_mode is not None else 0,
             index_kpool=config["index_kpool"],
             index_head_dim=config["index_head_dim"],

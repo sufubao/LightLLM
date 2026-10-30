@@ -57,6 +57,14 @@ def get_tokenizer(
     if model_type == "deepseek_v32":
         # Register the custom config before AutoTokenizer tries to resolve it.
         from ..models import deepseek3_2  # noqa: F401
+    if model_type == "deepseek_v4":
+        from ..models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
+
+        if tokenizer_mode == "slow":
+            raise ValueError("DeepSeek-V4 requires a fast tokenizer loaded from tokenizer.json")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
+        logger.info("Using DeepSeek-V4 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV4Tokenizer(tokenizer, tokenizer_name, model_cfg)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
@@ -76,7 +84,7 @@ def get_tokenizer(
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.
     if model_type == "deepseek_v32":
-        from ..models.deepseek3_2.model import DeepSeekV32Tokenizer
+        from ..models.deepseek3_2.tokenizer import DeepSeekV32Tokenizer
 
         hf_tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs
@@ -118,14 +126,12 @@ def get_tokenizer(
         tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
-    elif model_type in ["qwen3_5", "qwen3_5_moe"] and "vision_config" in model_cfg:
-        from transformers import AutoProcessor
+    elif model_type in ["qwen3_5", "sensenova_loop", "qwen3_5_moe"] and "vision_config" in model_cfg:
         from ..models.qwen3_5.model import QWen3_5Tokenizer
+        from transformers import AutoImageProcessor
 
-        processor = AutoProcessor.from_pretrained(tokenizer_name)
-        tokenizer = QWen3_5Tokenizer(
-            tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
-        )
+        image_processor = AutoImageProcessor.from_pretrained(tokenizer_name)
+        tokenizer = QWen3_5Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
     elif model_cfg.get("thinker_config") is not None:
         from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
         from transformers import AutoProcessor

@@ -405,7 +405,10 @@ def test_cuda_graph_replay_cost_barrier_uses_current_device(monkeypatch, overlap
 @pytest.mark.parametrize("rank", [0, 1])
 def test_memory_manager_selection_logs_only_on_leader(monkeypatch, caplog, rank):
     from lightllm.common.kv_cache_mem_manager import mem_utils as module
+    from lightllm import models
 
+    for name in ("DeepseekV4TpPartModel", "Deepseek3_2TpPartModel", "Deepseek2TpPartModel"):
+        monkeypatch.setitem(vars(models), name, type(name, (), {}))
     logger = logging.getLogger("memory-selection-regression")
     monkeypatch.setattr(module, "logger", logger)
     monkeypatch.setattr(module, "get_llm_model_class", lambda: object)

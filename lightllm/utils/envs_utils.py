@@ -73,6 +73,10 @@ def enable_env_vars(args):
     return os.getenv(args, "False").upper() in ["ON", "TRUE", "1"]
 
 
+def get_env_use_ue8m0_scales() -> bool:
+    return os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
+
+
 @lru_cache(maxsize=None)
 def is_stop_matching_in_reasoning_enabled() -> bool:
     """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""
@@ -307,6 +311,10 @@ def get_mtp_weight_layer_num() -> int:
 def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
+
+    if draft_config.get("model_type") == "deepseek_v4":
+        return len(draft_config["dspark_target_layer_ids"])
+
     # Use the effective draft backbone config when the checkpoint stores it nested.
     draft_config.update(draft_config.get("dflash_config", {}))
     # A draft model may contain multiple attention layers; each layer needs a

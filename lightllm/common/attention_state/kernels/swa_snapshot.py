@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 if TYPE_CHECKING:
-    from .fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
+    from lightllm.common.attention_state.bounded_att.sliding_window.formats import FP8E8M0SlidingWindowConfig
 
 
 def copy_swa_window(

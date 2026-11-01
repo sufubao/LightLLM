@@ -1,55 +1,62 @@
-from .mla.create_mla_state import create_mla_state
-from .packed_mla.create_packed_mla_state import create_packed_mla_state
-from .gqa.create_gqa_state import create_gqa_state
-from .base_state import FullAttentionState
-from .gqa.gqa_state import GQAAttentionConfig, GQAFullAttentionState
-from .gqa import gqa_transfer
-from .mla.mla_state import MLAConfig, MLAFullAttentionState
+from lightllm.common.attention_state._exports import resolve_export
 
-__all__ = [
-    "create_gqa_state",
-    "create_mla_state",
-    "create_packed_mla_state",
-    "FullAttentionState",
-    "GQAFullAttentionState",
-    "GQAAttentionConfig",
-    "MLAConfig",
-    "MLAFullAttentionState",
-]
+_EXPORTS = {
+    "create_gqa_state": ("lightllm.common.attention_state.full_att.gqa.factory", "create_gqa_state"),
+    "create_mla_state": ("lightllm.common.attention_state.full_att.mla.mla_state", "create_mla_state"),
+    "create_packed_mla_state": (
+        "lightllm.common.attention_state.full_att.packed_mla.factory",
+        "create_packed_mla_state",
+    ),
+    "FullAttentionState": ("lightllm.common.attention_state.full_att.base_state", "FullAttentionState"),
+    "GQAFullAttentionState": ("lightllm.common.attention_state.full_att.gqa.gqa_state", "GQAFullAttentionState"),
+    "GQAAttentionConfig": ("lightllm.common.attention_state.full_att.gqa.formats", "GQAAttentionConfig"),
+    "MLAConfig": ("lightllm.common.attention_state.full_att.mla.formats", "MLAConfig"),
+    "MLAFullAttentionState": ("lightllm.common.attention_state.full_att.mla.mla_state", "MLAFullAttentionState"),
+    "GroupQuantizedFullAttentionState": (
+        "lightllm.common.attention_state.full_att.gqa.group_quantized_state",
+        "GroupQuantizedFullAttentionState",
+    ),
+    "GroupQuantizedAttentionConfig": (
+        "lightllm.common.attention_state.full_att.gqa.formats",
+        "GroupQuantizedAttentionConfig",
+    ),
+    "StaticFP8FullAttentionState": (
+        "lightllm.common.attention_state.full_att.gqa.static_fp8_state",
+        "StaticFP8FullAttentionState",
+    ),
+    "StaticFP8AttentionConfig": ("lightllm.common.attention_state.full_att.gqa.formats", "StaticFP8AttentionConfig"),
+    "PackedMLAFullAttentionState": (
+        "lightllm.common.attention_state.full_att.packed_mla.packed_mla_state",
+        "PackedMLAFullAttentionState",
+    ),
+    "PackedMLAAttentionConfig": (
+        "lightllm.common.attention_state.full_att.packed_mla.formats",
+        "PackedMLAAttentionConfig",
+    ),
+    "PackedMLALogicalConfig": ("lightllm.common.attention_state.full_att.packed_mla.formats", "PackedMLALogicalConfig"),
+    "PackedMLALayerView": ("lightllm.common.attention_state.types", "PackedMLALayerView"),
+    "create_compressed_att_state": (
+        "lightllm.common.attention_state.full_att.compressed_att.compressed_att_state",
+        "create_compressed_att_state",
+    ),
+    "CompressedAttentionConfig": (
+        "lightllm.common.attention_state.full_att.compressed_att.formats",
+        "CompressedAttentionConfig",
+    ),
+    "CompressedAttentionState": (
+        "lightllm.common.attention_state.full_att.compressed_att.compressed_att_state",
+        "CompressedAttentionState",
+    ),
+    "CompressedAttentionLayerView": ("lightllm.common.attention_state.types", "CompressedAttentionLayerView"),
+    "FP8E8M0PackedMLAConfig": ("lightllm.common.attention_state.full_att.packed_mla.formats", "FP8E8M0PackedMLAConfig"),
+    "FP8E8M0PackedMLAState": (
+        "lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_state",
+        "FP8E8M0PackedMLAState",
+    ),
+}
 
-from .gqa.group_quantized_state import (
-    GroupQuantizedFullAttentionState,
-    GroupQuantizedAttentionConfig,
-)
-from .gqa.static_fp8_state import StaticFP8FullAttentionState, StaticFP8AttentionConfig
-from .packed_mla.packed_mla_state import (
-    PackedMLAFullAttentionState,
-    PackedMLAAttentionConfig,
-    PackedMLALogicalConfig,
-    PackedMLALayerView,
-)
+__all__ = list(_EXPORTS)
 
-__all__ += [
-    "GroupQuantizedFullAttentionState",
-    "GroupQuantizedAttentionConfig",
-    "StaticFP8FullAttentionState",
-    "StaticFP8AttentionConfig",
-    "PackedMLAFullAttentionState",
-    "PackedMLAAttentionConfig",
-    "PackedMLALogicalConfig",
-    "PackedMLALayerView",
-]
 
-from .compressed_att.compressed_att_state import CompressedAttentionConfig, CompressedAttentionState, CompressedAttentionLayerView
-from .compressed_att.create_compressed_att_state import create_compressed_att_state
-
-__all__ += [
-    "create_compressed_att_state",
-    "CompressedAttentionConfig",
-    "CompressedAttentionState",
-    "CompressedAttentionLayerView",
-]
-
-from .packed_mla.fp8_e8m0_packed_mla_state import FP8E8M0PackedMLAConfig, FP8E8M0PackedMLAState
-
-__all__ += ["FP8E8M0PackedMLAConfig", "FP8E8M0PackedMLAState"]
+def __getattr__(name):
+    return resolve_export(name, _EXPORTS, globals())

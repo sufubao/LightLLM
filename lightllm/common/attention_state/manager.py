@@ -19,8 +19,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 from .allocators import StatePageAllocator, FullAttKVAllocator
-from .full_att import FullAttentionState
-from .bounded_att import BoundedAttentionState
+from lightllm.common.attention_state.full_att.base_state import FullAttentionState
+from lightllm.common.attention_state.bounded_att.base_state import BoundedAttentionState
 from .utils import MODEL_ROLES
 
 if TYPE_CHECKING:
@@ -55,9 +55,7 @@ class AttentionStateManager:
         self.bounded_att_small_page_allocator = None
         self._request_capacity = request_capacity
 
-    def register_state(
-        self, model_role: str, state: FullAttentionState | BoundedAttentionState
-    ) -> None:
+    def register_state(self, model_role: str, state: FullAttentionState | BoundedAttentionState) -> None:
         """按模型角色和具体方案注册 State，保留原对象及其存储。
 
         成员名和 state_name 均为 {model_role}_{state.get_state_type()}_state。
@@ -71,7 +69,9 @@ class AttentionStateManager:
         assert state_type.isidentifier() and state_type.islower(), f"invalid State type {state_type}"
         name = f"{model_role}_{state_type}_state"
         assert name not in self.__dict__, f"State {name} is already bound"
-        assert all(state is not value for value in self.__dict__.values()), "a State cannot belong to multiple model roles"
+        assert all(
+            state is not value for value in self.__dict__.values()
+        ), "a State cannot belong to multiple model roles"
         # config 只描述布局，资源身份仅保存在 State；绑定时保留原配置对象。
         state.state_name = name
         setattr(self, name, state)
@@ -108,52 +108,6 @@ class AttentionStateManager:
             f"matches={[state.state_name for state in matches]}"
         )
         return matches[0]
-
-    def load_full_att_calibration(self, args: StartArgs | EasyDict) -> None:
-        """全部 main/draft State 就绪后统一读取静态标定，并交给具体 State 绑定。
-
-        文件沿用物理行顺序：main、draft0..draft35；同角色有多个 State 时按最小逻辑层号
-        排序，State 内保留 logical_layer_groups 顺序。非静态 FP8 的 full State 同样占用
-        对应物理行区间，共享逻辑层只占一行；CPU 布局创建不需要调用本流程。
-        """
-        import json
-        from .full_att.gqa.static_fp8_state import StaticFP8FullAttentionState
-
-        full_states = self.get_full_attention_states()
-        calibration_states = [state for state in full_states if isinstance(state, StaticFP8FullAttentionState)]
-        if not calibration_states:
-            return
-
-        # 阶段一：只读取一次文件；无文件时由 per_tensor State 绑定单位 scale。
-        calibration = None
-        path = args.kv_quant_calibration_config_path
-        if path is not None:
-            with open(path) as file:
-                calibration = json.load(file)
-            if any(state.config.scale_mode == "per_tensor" for state in calibration_states):
-                from lightllm.utils.config_utils import get_model_architectures
-
-                assert calibration["architectures"] == get_model_architectures(args.model_dir), (
-                    "calibration architecture does not match the model"
-                )
-
-        # 阶段二：显式使用模型角色顺序，避免注册先后及 draft10 的字符串排序影响标定行。
-        storage_layer_start = 0
-        for role in MODEL_ROLES:
-            states = sorted(
-                self.get_full_attention_states(role),
-                key=lambda state: (
-                    min(layer for group in state.config.logical_layer_groups for layer in group), state.state_name,
-                ),
-            )
-            for state in states:
-                if isinstance(state, StaticFP8FullAttentionState):
-                    state.bind_calibration(
-                        calibration=calibration,
-                        storage_layer_start=storage_layer_start,
-                    )
-                storage_layer_start += len(state.config.logical_layer_groups)
-        logger.info("Full-attention calibration bound: states=%d, source=%s", len(calibration_states), path or "unit scales")
 
     def initialize_storage(
         self,
@@ -259,7 +213,8 @@ class AttentionStateManager:
                 if not state.get_cpu_transfer_regions():
                     continue
                 state.initialize_page_pools(
-                    big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity,
+                    big_page_capacity=big_page_capacity,
+                    small_page_capacity=small_page_capacity,
                     pin_memory=torch.device(device).type == "cuda",
                 )
             self.bounded_att_cpu_load_big_page_slot = big_page_capacity - 2
@@ -298,7 +253,9 @@ class AttentionStateManager:
                 if pool is not None:
                     for tensor in vars(pool).values():
                         if isinstance(tensor, torch.Tensor):
-                            assert tensor.device.type == "cpu" and tensor.is_shared(), "DP IPC requires shared CPU page pools"
+                            assert (
+                                tensor.device.type == "cpu" and tensor.is_shared()
+                            ), "DP IPC requires shared CPU page pools"
         ipc_copy = copy(self)
         ipc_copy.full_att_allocator = None
         ipc_copy.bounded_att_big_page_allocator = None
@@ -395,11 +352,15 @@ class AttentionStateManager:
     ) -> None:
         """按各请求已执行的绝对 token 长度保存全部 bounded State；三个列表逐项对应。"""
         bounded_states = self.get_bounded_attention_states()
-        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert isinstance(req_indices, list) and isinstance(
+            page_slot_ids, list
+        ), "request and slot indices must be lists"
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         allocator = self.bounded_att_big_page_allocator if page_kind == "big" else self.bounded_att_small_page_allocator
         assert allocator is not None, f"{page_kind} pages are disabled"
-        assert len(page_slot_ids) == len(req_indices) == len(state_token_lens), "one length and slot are required per request"
+        assert (
+            len(page_slot_ids) == len(req_indices) == len(state_token_lens)
+        ), "one length and slot are required per request"
         for state in bounded_states:
             state.save_bounded_att_runtime_to_pages(
                 req_indices=req_indices,
@@ -417,11 +378,15 @@ class AttentionStateManager:
     ) -> None:
         """按各快照对应的绝对 token 长度恢复运行态及 ring 位置等控制信息。"""
         bounded_states = self.get_bounded_attention_states()
-        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert isinstance(req_indices, list) and isinstance(
+            page_slot_ids, list
+        ), "request and slot indices must be lists"
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         allocator = self.bounded_att_big_page_allocator if page_kind == "big" else self.bounded_att_small_page_allocator
         assert allocator is not None, f"{page_kind} pages are disabled"
-        assert len(page_slot_ids) == len(req_indices) == len(state_token_lens), "one length and slot are required per request"
+        assert (
+            len(page_slot_ids) == len(req_indices) == len(state_token_lens)
+        ), "one length and slot are required per request"
         assert not page_slot_ids or bounded_states, "state restore requires participating bounded states"
         for state in bounded_states:
             state.restore_bounded_att_runtime_from_pages(
@@ -510,7 +475,9 @@ class AttentionStateManager:
             big_page_slot_ids = [] if big_page_slot_ids is None else big_page_slot_ids
             small_page_slot_ids = [] if small_page_slot_ids is None else small_page_slot_ids
             big_page_count = len(big_page_slot_ids)
-            assert big_page_count + len(small_page_slot_ids) == len(cpu_page_indices), "one state slot is required per CPU page"
+            assert big_page_count + len(small_page_slot_ids) == len(
+                cpu_page_indices
+            ), "one state slot is required per CPU page"
             big_cpu_page_indices = cpu_page_indices[:big_page_count]
             small_cpu_page_indices = cpu_page_indices[big_page_count:]
             big_page_readies = cpu_page_ready_flags[:big_page_count] if cpu_page_ready_flags is not None else None
@@ -580,7 +547,9 @@ class AttentionStateManager:
             # token 索引只用于判断本批末页是否完整，不读取 GPU 上的索引值。
             has_partial_page = token_indices.numel() % page_tokens != 0
             assert isinstance(big_page_slot_ids, list), "slot indices must be a list"
-            assert len(big_page_slot_ids) + int(has_partial_page) == len(cpu_page_indices), "slots must cover complete CPU pages only"
+            assert len(big_page_slot_ids) + int(has_partial_page) == len(
+                cpu_page_indices
+            ), "slots must cover complete CPU pages only"
             # 只扩展内部列表，预留槽位不写回调用方，也不作为普通大页发布。
             load_big_page_slot_ids = big_page_slot_ids.copy()
             if has_partial_page:
@@ -744,7 +713,9 @@ class AttentionStateManager:
             case "att_state":
                 # 前缀长度由 PD 任务提供，各 State 据此定位自己的运行态窗口。
                 assert req_idx is not None, "state PD pages require a request index"
-                assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
+                assert (
+                    state_token_len is not None and state_token_len >= 0
+                ), "PD state requires its prefill prefix length"
 
                 # 阶段一：写出 bounded 的 prefill 基准运行态。
                 for state in self.get_bounded_attention_states():
@@ -785,7 +756,9 @@ class AttentionStateManager:
             case "att_state":
                 # 前缀长度由 PD 任务提供，各 State 据此定位自己的运行态窗口。
                 assert req_idx is not None, "state PD pages require a request index"
-                assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
+                assert (
+                    state_token_len is not None and state_token_len >= 0
+                ), "PD state requires its prefill prefix length"
 
                 # 阶段一：恢复 bounded 的 prefill 基准运行态。
                 for state in self.get_bounded_attention_states():

@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ...utils import view_max_copy_dtype
+from lightllm.common.attention_state.tensor_views import view_max_copy_dtype
 
 
 def copy_compressor_window(

@@ -1,9 +1,23 @@
-from .compressed_att_state import CompressedAttentionConfig, CompressedAttentionLayerView, CompressedAttentionState
-from .create_compressed_att_state import create_compressed_att_state
+from lightllm.common.attention_state._exports import resolve_export
 
-__all__ = [
-    "CompressedAttentionConfig",
-    "CompressedAttentionLayerView",
-    "CompressedAttentionState",
-    "create_compressed_att_state",
-]
+_EXPORTS = {
+    "CompressedAttentionConfig": (
+        "lightllm.common.attention_state.full_att.compressed_att.formats",
+        "CompressedAttentionConfig",
+    ),
+    "CompressedAttentionLayerView": ("lightllm.common.attention_state.types", "CompressedAttentionLayerView"),
+    "CompressedAttentionState": (
+        "lightllm.common.attention_state.full_att.compressed_att.compressed_att_state",
+        "CompressedAttentionState",
+    ),
+    "create_compressed_att_state": (
+        "lightllm.common.attention_state.full_att.compressed_att.compressed_att_state",
+        "create_compressed_att_state",
+    ),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    return resolve_export(name, _EXPORTS, globals())

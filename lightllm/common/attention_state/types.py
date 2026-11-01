@@ -235,3 +235,17 @@ class StateTransferLayout:
     # 当前 State 参与传输的字段区域；其他 State 的区域放在它们各自的 layout 中。
     # 包含所需的 KV、动态量化参数或运行态字段，所有偏移均相对同一张完整外部页。
     regions: tuple[TransferRegion, ...]
+
+
+@dataclass(frozen=True)
+class PackedMLALayerView:
+    kv: torch.Tensor
+    indexer_k: torch.Tensor
+
+
+@dataclass(frozen=True)
+class CompressedAttentionLayerView:
+    # [压缩块, packed KV 字节]，保留整个块中数据与 scale 的分区格式。
+    kv: torch.Tensor
+    # 可选的 [压缩块, key/scale 字节]；未配置 indexer 时返回 None。
+    indexer_k: torch.Tensor | None

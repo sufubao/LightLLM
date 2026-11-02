@@ -1,5 +1,6 @@
 from functools import cached_property
 from .task_group import HttpServerTasks
+from lightllm.server.httpserver.slot_availability import RequestSlotAvailability
 import sys
 import zmq
 import zmq.asyncio
@@ -82,6 +83,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         args: StartArgs,
     ):
         self.args: StartArgs = args
+        self._request_slot_availability = RequestSlotAvailability.from_args(args)
         ports = get_shm_port_args()
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
@@ -630,6 +632,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
 
         # 空闲槽不足时整组重试，避免多个 n > 1 的请求各占部分槽后互相等待。
+        slot_availability = getattr(self, "_request_slot_availability", None)
+        observed_generation = slot_availability.generation if slot_availability is not None else 0
         alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
         # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
         sleep_time_factor = 0.2 if high_priority_request else 1
@@ -644,10 +648,19 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
                     f"within {alloc_timeout_seconds} seconds"
                 )
-            await asyncio.sleep(sleep_time * sleep_time_factor)
+            if slot_availability is None:
+                await asyncio.sleep(sleep_time * sleep_time_factor)
+            else:
+                await slot_availability.wait(observed_generation, sleep_time * sleep_time_factor)
+            observed_generation = slot_availability.generation if slot_availability is not None else 0
             sleep_time = min(1, sleep_time * 1.1)
             alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
         return alloced_req_indexes
+
+    def _notify_req_slot_release(self):
+        availability = getattr(self, "_request_slot_availability", None)
+        if availability is not None:
+            availability.notify_release()
 
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id") or get_http_request_id()
@@ -1033,6 +1046,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     # Resource release is summarized once per request group below.
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
+                    self._notify_req_slot_release()
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
                 log_debug_event(
                     logger,

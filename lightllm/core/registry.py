@@ -105,6 +105,7 @@ def default_providers():
 
     from lightllm.core.compute.linear.backend import LinearBackend
     from lightllm.core.compute.moe.backend import MoeBackend
+    from lightllm.core.compute.moe.flashinfer_trtllm import FlashInferTrtllmMoeBackend
     from lightllm.core.compute.moe.expert import ExpertComputeBackend
     from functools import partial
 
@@ -138,6 +139,6 @@ def default_providers():
         ),
         state_providers(),
         linear=(partial(LinearBackend, name) for name in LinearBackend.implementations),
-        moe=(MoeBackend,),
+        moe=(MoeBackend, FlashInferTrtllmMoeBackend),
         expert=(ExpertComputeBackend,),
     )

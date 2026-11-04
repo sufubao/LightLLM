@@ -166,8 +166,13 @@ class BoundSharedCompressed:
             history = self.window[req, positions % spec.window_size]
             window = torch.cat((history, kv), dim=0)
             rows = torch.arange(count, device=kv.device)[:, None] + prefix
-            window_indices = rows - spec.window_size + 1 + torch.arange(spec.window_size, device=kv.device)
-            window_indices = window_indices.masked_fill(window_indices < 0, -1).int()
+            if self.phase == "prefill":
+                width = min(end, spec.window_size)
+                window_indices = (rows - spec.window_size + 1).clamp_min(0) + torch.arange(width, device=kv.device)
+                window_indices = window_indices.masked_fill(window_indices > rows, -1).int()
+            else:
+                window_indices = rows - spec.window_size + 1 + torch.arange(spec.window_size, device=kv.device)
+                window_indices = window_indices.masked_fill(window_indices < 0, -1).int()
             keep = min(end, spec.window_size)
             self.window[req, torch.arange(end - keep, end, device=kv.device) % spec.window_size] = window[-keep:]
             values, indices = window, window_indices

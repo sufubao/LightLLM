@@ -52,7 +52,7 @@ def test_config_rejects_incompatible_shared_sources():
         config.validate_parallelism(3)
 
 
-def make_engine(config, state_dict, directory="/nonexistent"):
+def make_engine(config, state_dict, directory="/nonexistent", max_seq_len=64):
     from lightllm.models.deepseek_v41.adapter import DeepseekV41Adapter
     from lightllm.core.device.cuda import CudaRuntime
     from lightllm.core.build import build, BuildConfig
@@ -61,7 +61,7 @@ def make_engine(config, state_dict, directory="/nonexistent"):
     from lightllm.common.attention_state.full_att.base_state import FullAttentionState
 
     runtime = CudaRuntime()
-    adapter = DeepseekV41Adapter(config, role="main", runtime=runtime, request_capacity=3, max_seq_len=64)
+    adapter = DeepseekV41Adapter(config, role="main", runtime=runtime, request_capacity=3, max_seq_len=max_seq_len)
     pre, layers = adapter.build_weights()
     adapter.load_weights((pre, layers), directory, state_dict)
     from lightllm.core.registry import default_providers
@@ -76,7 +76,7 @@ def make_engine(config, state_dict, directory="/nonexistent"):
         for state in states:
             if isinstance(state, FullAttentionState):
                 state.device = runtime.device
-                state.allocate_storage(3 * 64)
+                state.allocate_storage(3 * max_seq_len)
 
     execution = build(
         model_adapter=adapter,
@@ -85,7 +85,7 @@ def make_engine(config, state_dict, directory="/nonexistent"):
         config=BuildConfig(
             adapter.recipes,
             manager,
-            ExecutionLimits(2 ** 28, 3, 64),
+            ExecutionLimits(2 ** 28, 3, max_seq_len),
             adapter.formats["history"],
             {"prefill": "auto", "decode": "auto"},
             static_params={
@@ -96,7 +96,7 @@ def make_engine(config, state_dict, directory="/nonexistent"):
             allocate_storage=allocate,
         ),
     )
-    table = torch.arange(3 * 64, device="cuda", dtype=torch.int32).view(3, 64)
+    table = torch.arange(3 * max_seq_len, device="cuda", dtype=torch.int32).view(3, max_seq_len)
     return adapter, execution, table
 
 
@@ -112,10 +112,8 @@ def run_batch(adapter, table, requests, tokens, phase):
     return adapter.forward(ids, metadata, phase)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires NVIDIA Hopper or newer")
-@pytest.mark.parametrize("quantized", [False, True])
-@torch.inference_mode()
-def test_official_reference_variable_batches_and_reuse(tmp_path, quantized):
+@pytest.fixture
+def official_reference():
     root = os.getenv("DEEPSEEK_V41_REFERENCE")
     if not root:
         pytest.skip("set DEEPSEEK_V41_REFERENCE to the pinned official inference source")
@@ -127,7 +125,17 @@ def test_official_reference_variable_batches_and_reuse(tmp_path, quantized):
     for name, digest in hashes.items():
         assert hashlib.sha256((Path(root) / name).read_bytes()).hexdigest() == digest
     sys.path.insert(0, root)
-    reference = importlib.import_module("model")
+    try:
+        yield importlib.import_module("model")
+    finally:
+        sys.path.remove(root)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires NVIDIA Hopper or newer")
+@pytest.mark.parametrize("quantized", [False, True])
+@torch.inference_mode()
+def test_official_reference_variable_batches_and_reuse(tmp_path, quantized, official_reference):
+    reference = official_reference
     config = tiny_config()
     tokenizer = None
     if quantized:
@@ -298,4 +306,48 @@ def test_official_reference_variable_batches_and_reuse(tmp_path, quantized):
             (directory / "golden.json").write_text(json.dumps(golden_results))
     finally:
         torch.set_default_dtype(previous)
-        sys.path.remove(root)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires NVIDIA Hopper or newer")
+@torch.inference_mode()
+def test_window_prefill_and_wrap(official_reference):
+    config = replace(
+        tiny_config(),
+        n_layers=1,
+        window_size=128,
+        compress_ratios=(0,),
+        kv_source_layers=(),
+        index_source_layers=(),
+        candidate_source_layer=-1,
+    )
+    args = official_reference.ModelArgs(**asdict(config), max_batch_size=1, max_seq_len=192, n_mtp_layers=0)
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        with torch.device("cuda"):
+            expected = official_reference.Transformer(args)
+        torch.manual_seed(42)
+        for name, parameter in expected.named_parameters():
+            if "norm.weight" in name:
+                parameter.fill_(1)
+            elif name.endswith("attn_sink"):
+                parameter.zero_()
+            else:
+                parameter.normal_(0, 0.03)
+        adapter, execution, table = make_engine(config, dict(expected.state_dict()), max_seq_len=192)
+        for length in (3, 144):
+            tokens = [i % config.vocab_size for i in range(length)]
+            result = run_batch(adapter, table, [(0, 0, tokens)], tokens, "prefill")
+            with torch.device("cuda"):
+                _, golden, _ = expected(torch.tensor([tokens], device="cuda"), 0)
+            torch.testing.assert_close(result, golden, rtol=0.025, atol=0.02)
+            for start in range(length, length + 3):
+                token = start % config.vocab_size
+                result = run_batch(adapter, table, [(0, start, [token])], [token], "decode")
+                with torch.device("cuda"):
+                    _, golden, _ = expected(torch.tensor([[token]], device="cuda"), start)
+                torch.testing.assert_close(result, golden, rtol=0.025, atol=0.02)
+                relative = (result - golden).square().mean().sqrt() / golden.square().mean().sqrt()
+                assert relative < 0.01, relative
+    finally:
+        torch.set_default_dtype(previous)

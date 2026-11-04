@@ -336,7 +336,7 @@ def get_platform(platform_name: Optional[str] = None) -> Platform:
     Returns:
         Platform: platform enum value
     """
-    assert platform_name in ["cuda", "musa"], f"Only support cuda and musa now, but got {platform_name}"
+    assert platform_name in ["cuda", "musa", "ascend"], f"Unsupported platform: {platform_name}"
     platform_name = platform_name.lower()
     platform_map = {
         "cuda": Platform.CUDA,

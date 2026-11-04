@@ -38,8 +38,6 @@ def create_context(*, index=0, config=None):
     validate_config(config)
     from lightllm.core.device.musa import MusaRuntime
     from lightllm.core.compute.attention.dense.musa import MusaAttentionBackend
-    from lightllm.core.compute.attention.dense.backend import DenseStaticParams
-    from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
     from lightllm.core.compute.linear.backend import LinearBackend
     from lightllm.core.formats.kv.dense import DenseKVWriter
     from lightllm.core.storage.attention import DenseStateStore
@@ -58,7 +56,6 @@ def create_context(*, index=0, config=None):
                 supports=lambda format: format.encoding == "plain",
             ),
         ),
-        parameters=((DenseAttentionSpec, DenseStaticParams.from_weights),),
         linear=(partial(LinearBackend, "torch.linear"),),
     )
     return ExecutionContext(MusaRuntime(index), providers)

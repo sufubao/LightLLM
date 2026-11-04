@@ -102,7 +102,7 @@ def test_llama_prefill_prefix_decode_and_graph(dtype, tmp_path, monkeypatch):
         req_to_token_indexs=torch.arange(32, dtype=torch.int32, device=runtime.device).view(2, 16)
     )
     assert model.linear_plan.bindings and not model.linear_plan.legacy
-    assert model.execution_runner is not None
+    assert model.attention_execution is not None
     assert model.batch_runner.runtime is runtime
 
     def prepare(sequences, cached, prefill):

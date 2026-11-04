@@ -96,6 +96,8 @@ def test_llama_prefill_prefix_decode_and_graph(dtype, tmp_path, monkeypatch):
         state.allocate_storage(64)
     model._init_execution_plan()
     model._init_hidden_collector()
+    model.prefill_att_backend = model.decode_att_backend = None
+    model.prefill_att_backend1 = model.decode_att_backend1 = None
     model.req_manager = SimpleNamespace(
         req_to_token_indexs=torch.arange(32, dtype=torch.int32, device=runtime.device).view(2, 16)
     )

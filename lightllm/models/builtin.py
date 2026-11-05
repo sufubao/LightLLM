@@ -34,6 +34,10 @@ ModelRegistry.register("gpt_oss", "lightllm.models.gpt_oss.model:GptOssTpPartMod
 ModelRegistry.register("internlm", "lightllm.models.internlm.model:InternlmTpPartModel")
 ModelRegistry.register("internlm2", "lightllm.models.internlm2.model:Internlm2TpPartModel")
 ModelRegistry.register(
+    ["kimi_k31", "kimi_k3", "kimi_linear"],
+    "lightllm.models.kimi_linear.model:KimiLinearTpPartModel",
+)
+ModelRegistry.register(
     "internlm2",
     "lightllm.models.internlm2_reward.model:Internlm2RewardTpPartModel",
     condition=is_reward_model(),

@@ -35,6 +35,9 @@ class FusedMoeWeight(BaseWeightTpl):
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
         per_expert_scale_name: str = "",
+        activation: str = "silu",
+        activation_situ_beta: Optional[float] = None,
+        activation_situ_linear_beta: Optional[float] = None,
     ) -> None:
         super().__init__(data_type=data_type)
         self.w1_weight_name = gate_proj_name
@@ -51,6 +54,9 @@ class FusedMoeWeight(BaseWeightTpl):
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
         self.quant_method = quant_method
+        self.activation = activation
+        self.activation_situ_beta = activation_situ_beta
+        self.activation_situ_linear_beta = activation_situ_linear_beta
         assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.n_routed_experts = n_routed_experts
@@ -68,6 +74,9 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
+        self.fuse_moe_impl.activation = activation
+        self.fuse_moe_impl.activation_situ_beta = activation_situ_beta
+        self.fuse_moe_impl.activation_situ_linear_beta = activation_situ_linear_beta
         self.lock = threading.Lock()
         self._create_weight()
 

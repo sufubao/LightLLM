@@ -1027,6 +1027,9 @@ def fused_experts_impl(
     limit=None,
     alpha=None,
     clamp_up_add_one=True,
+    activation="silu",
+    activation_situ_beta=None,
+    activation_situ_linear_beta=None,
     use_tanh_approximate_gelu=None,
     quantize_input=None,
     round_intermediates=False,
@@ -1115,6 +1118,9 @@ def fused_experts_impl(
             layout=layout,
             use_tanh_approximate_gelu=use_tanh_approximate_gelu,
             round_intermediates=round_intermediates,
+            activation=activation,
+            activation_situ_beta=activation_situ_beta,
+            activation_situ_linear_beta=activation_situ_linear_beta,
         )
 
         grouped_matmul(

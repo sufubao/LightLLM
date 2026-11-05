@@ -200,7 +200,18 @@ class GDNModelAdapter(DenseModelAdapter):
         return super().layer_attention_params(spec, weight, device)
 
 
-def grouped_moe_specs(config, dtype, *, limit=None, clamp_up_add_one=True, layer_ids=None, group_score_topk=1):
+def grouped_moe_specs(
+    config,
+    dtype,
+    *,
+    limit=None,
+    clamp_up_add_one=True,
+    layer_ids=None,
+    group_score_topk=1,
+    activation="silu",
+    activation_situ_beta=None,
+    activation_situ_linear_beta=None,
+):
     """DeepSeek/GLM recipe semantics, before weights or execution resources exist."""
     experts = config.get("n_routed_experts")
     if not experts:
@@ -237,5 +248,8 @@ def grouped_moe_specs(config, dtype, *, limit=None, clamp_up_add_one=True, layer
         shared_experts=config.get("n_shared_experts") or 0,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        activation=activation,
+        activation_situ_beta=activation_situ_beta,
+        activation_situ_linear_beta=activation_situ_linear_beta,
     )
     return {layer: spec for layer in layers}

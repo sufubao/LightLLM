@@ -72,9 +72,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = w13_weight.dtype == torch.float8_e4m3fn
 
-        from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import fused_experts
+        from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe
 
-        fused_experts(
+        kwargs = dict(
             hidden_states=input_tensor,
             w1=w13_weight,
             w2=w2_weight,
@@ -88,6 +88,15 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
         )
+        if getattr(self, "activation", "silu") == "situ":
+            grouped_fused_moe.fused_experts_impl(
+                **kwargs,
+                activation="situ",
+                activation_situ_beta=getattr(self, "activation_situ_beta", None),
+                activation_situ_linear_beta=getattr(self, "activation_situ_linear_beta", None),
+            )
+        else:
+            grouped_fused_moe.fused_experts(**kwargs)
         return input_tensor
 
     def fused_experts_with_topk(

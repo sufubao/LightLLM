@@ -23,6 +23,9 @@ class MoeSpec:
     clamp_up_add_one: bool = True
     # Preserve input-dtype rounding in routing, projections, activations and routed/shared subtotals.
     round_intermediates: bool = False
+    activation: str = "silu"
+    activation_situ_beta: float | None = None
+    activation_situ_linear_beta: float | None = None
 
     def __post_init__(self):
         if min(self.hidden_size, self.intermediate_size, self.experts, self.top_k, self.groups) <= 0:
@@ -45,3 +48,13 @@ class MoeSpec:
             raise ValueError("MoE activation limit must be finite and positive")
         if self.limit is None and self.alpha != 1:
             raise ValueError("MoE activation alpha requires an explicit limit")
+        if self.activation not in ("silu", "situ"):
+            raise ValueError("unsupported MoE activation")
+        if self.activation == "situ" and self.limit is not None:
+            raise ValueError("SiTU does not support limit/alpha clipping")
+        for value, name in (
+            (self.activation_situ_beta, "activation_situ_beta"),
+            (self.activation_situ_linear_beta, "activation_situ_linear_beta"),
+        ):
+            if value is not None and (not isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be finite and positive")

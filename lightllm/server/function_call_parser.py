@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import ast
+import html
 import json
 import os
 import orjson
@@ -41,6 +42,7 @@ TOOLS_TAG_LIST = [
     "<｜tool▁calls▁begin｜>",
     "<｜DSML｜function_calls>",
     "<｜DSML｜tool_calls>",
+    "<|open|>tools<|sep|>",
 ]
 
 
@@ -792,6 +794,333 @@ class KimiK2Detector(BaseFormatDetector):
 
                     if parsed_args_diff:
 
+                        calls.append(
+                            ToolCallItem(
+                                tool_index=self.current_tool_id,
+                                name=None,
+                                parameters=parsed_args_diff,
+                            )
+                        )
+                        self._last_arguments += argument_diff
+                        self.streamed_args_for_tool[self.current_tool_id] += parsed_args_diff
+
+                    parsed_args = function_args.split("<|tool_call_end|>", 1)[0]
+                    if _is_complete_json(parsed_args):
+                        try:
+                            parsed_args = json.loads(parsed_args)
+                            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = parsed_args
+                        except json.JSONDecodeError:
+                            pass
+
+                        # Find the end of the current tool call and remove only that part from buffer
+                        tool_call_end_pattern = r"<\|tool_call_begin\|>.*?<\|tool_call_end\|>"
+                        match = re.search(tool_call_end_pattern, current_text, re.DOTALL)
+                        if match:
+                            # Remove the completed tool call from buffer, keep any remaining content
+                            self._buffer = current_text[match.end() :]
+                        else:
+                            self._buffer = ""
+
+                        result = StreamingParseResult(normal_text="", calls=calls)
+                        self.current_tool_id += 1
+                        self._last_arguments = ""
+                        self.current_tool_name_sent = False
+                        return result
+
+            return StreamingParseResult(normal_text="", calls=calls)
+
+        except Exception as e:
+            logger.error(f"Error in parse_streaming_increment: {e}")
+            return StreamingParseResult(normal_text=current_text)
+
+
+class KimiK3Detector(BaseFormatDetector):
+    tools_start = "<|open|>tools<|sep|>"
+    tools_end = "<|close|>tools<|sep|>"
+    message_end = "<|close|>message<|sep|>"
+    response_end = "<|close|>response<|sep|>"
+    call_end = "<|close|>call<|sep|>"
+    argument_end = "<|close|>argument<|sep|>"
+    json_end = "<|close|>json<|sep|>"
+
+    call_start_re = re.compile(r"<\|open\|>call(?P<attrs>.*?)<\|sep\|>", re.DOTALL)
+    argument_start_re = re.compile(r"<\|open\|>argument(?P<attrs>.*?)<\|sep\|>", re.DOTALL)
+    json_start_re = re.compile(r"<\|open\|>json(?P<attrs>.*?)<\|sep\|>", re.DOTALL)
+    attr_re = re.compile(r'([A-Za-z_][\w.-]*)="([^"]*)"')
+
+    def __init__(self):
+        super().__init__()
+        self.bot_token = self.tools_start
+        self.eot_token = self.tools_end
+
+    @classmethod
+    def _attrs(cls, text: str) -> Dict[str, str]:
+        return {key: html.unescape(value) for key, value in cls.attr_re.findall(text)}
+
+    @staticmethod
+    def _typed_value(value: str, value_type: str) -> Any:
+        if value_type == "string":
+            return value
+        if value_type == "null":
+            return None
+        if value_type == "boolean":
+            return value.strip().lower() == "true"
+        if value_type in {"number", "object", "array"}:
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+
+    @classmethod
+    def _parse_call_body(cls, body: str) -> Dict[str, Any]:
+        json_match = cls.json_start_re.search(body)
+        if json_match is not None:
+            json_end = body.find(cls.json_end, json_match.end())
+            if json_end != -1:
+                raw_json = body[json_match.end() : json_end]
+                try:
+                    value = json.loads(raw_json)
+                    return value if isinstance(value, dict) else {"value": value}
+                except (TypeError, ValueError):
+                    return {}
+
+        arguments: Dict[str, Any] = {}
+        position = 0
+        while True:
+            match = cls.argument_start_re.search(body, position)
+            if match is None:
+                break
+            end = body.find(cls.argument_end, match.end())
+            if end == -1:
+                break
+            attrs = cls._attrs(match.group("attrs"))
+            key = attrs.get("key")
+            if key is not None:
+                arguments[key] = cls._typed_value(
+                    body[match.end() : end],
+                    attrs.get("type", "string"),
+                )
+            position = end + len(cls.argument_end)
+        return arguments
+
+    @classmethod
+    def _clean_normal_text(cls, text: str) -> str:
+        text = text.split(cls.tools_start, 1)[0]
+        for marker in (cls.response_end, cls.message_end):
+            text = text.replace(marker, "")
+        return text
+
+    def has_tool_call(self, text: str) -> bool:
+        return self.tools_start in text
+
+    def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        normal_text = self._clean_normal_text(text)
+        tools_pos = text.find(self.tools_start)
+        if tools_pos == -1:
+            return StreamingParseResult(normal_text=normal_text)
+
+        section_end = text.find(self.tools_end, tools_pos)
+        section = text[tools_pos + len(self.tools_start) : section_end if section_end != -1 else None]
+        calls: List[ToolCallItem] = []
+        parsed_arguments: List[Dict[str, Any]] = []
+        position = 0
+        while True:
+            match = self.call_start_re.search(section, position)
+            if match is None:
+                break
+            end = section.find(self.call_end, match.end())
+            if end == -1:
+                break
+            attrs = self._attrs(match.group("attrs"))
+            name = attrs.get("tool")
+            if name:
+                arguments = self._parse_call_body(section[match.end() : end])
+                try:
+                    tool_index = max(int(attrs.get("index", len(calls) + 1)) - 1, 0)
+                except ValueError:
+                    tool_index = len(calls)
+                calls.append(
+                    ToolCallItem(
+                        tool_index=tool_index,
+                        name=name,
+                        parameters=json.dumps(arguments, ensure_ascii=False),
+                    )
+                )
+                parsed_arguments.append(arguments)
+            position = end + len(self.call_end)
+
+        self.prev_tool_call_arr = [
+            {"name": call.name, "arguments": arguments} for call, arguments in zip(calls, parsed_arguments)
+        ]
+        self.streamed_args_for_tool = [call.parameters for call in calls]
+        return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        self._buffer += new_text
+        if self.message_end not in self._buffer:
+            return StreamingParseResult()
+        text = self._buffer
+        self._buffer = ""
+        return self.detect_and_parse(text, tools)
+
+
+class KimiK2Detector(BaseFormatDetector):
+    """
+    Detector for Kimi K2 model function call format.
+
+    Format Structure:
+    ```
+    <|tool_calls_section_begin|>
+    <|tool_call_begin|>functions.{func_name}:{index}<|tool_call_argument_begin|>{json_args}<|tool_call_end|>
+    <|tool_calls_section_end|>
+    ```
+
+    Reference: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
+    """
+
+    def __init__(self):
+        super().__init__()
+
+        self.bot_token: str = "<|tool_calls_section_begin|>"
+        self.eot_token: str = "<|tool_calls_section_end|>"
+
+        self.tool_call_start_token: str = "<|tool_call_begin|>"
+        self.tool_call_end_token: str = "<|tool_call_end|>"
+
+        self.tool_call_regex = re.compile(
+            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*?\})\s*<\|tool_call_end\|>"  # noqa
+        )
+
+        self.stream_tool_call_portion_regex = re.compile(
+            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*)"  # noqa
+        )
+
+        self._last_arguments = ""
+
+        # Robust parser for ids like "functions.search:0" or fallback "search:0"
+        self.tool_call_id_regex = re.compile(r"^(?:functions\.)?(?P<name>[\w\.]+):(?P<index>\d+)$")
+
+    def has_tool_call(self, text: str) -> bool:
+        """Check if the text contains a KimiK2 format tool call."""
+        return self.bot_token in text
+
+    def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        """
+        One-time parsing: Detects and parses tool calls in the provided text.
+
+        :param text: The complete text to parse.
+        :param tools: List of available tools.
+        :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
+        """
+        if self.bot_token not in text:
+            return StreamingParseResult(normal_text=text, calls=[])
+        try:
+            # there are two possible captures - between tags, or between a
+            # tag and end-of-string so the result of
+            # findall is an array of tuples where one is a function call and
+            # the other is None
+            function_call_tuples = self.tool_call_regex.findall(text)
+
+            logger.debug("function_call_tuples: %s", function_call_tuples)
+
+            tool_calls = []
+            for match in function_call_tuples:
+                function_id, function_args = match
+                m = self.tool_call_id_regex.match(function_id)
+                if not m:
+                    logger.warning("Unexpected tool_call_id format: %s", function_id)
+                    continue
+                function_name = m.group("name")
+                function_idx = int(m.group("index"))
+
+                logger.info(f"function_name {function_name}")
+
+                tool_calls.append(
+                    ToolCallItem(
+                        tool_index=function_idx,
+                        name=function_name,
+                        parameters=function_args,
+                    )
+                )
+
+            content = text[: text.find(self.bot_token)]
+            return StreamingParseResult(normal_text=content, calls=tool_calls)
+
+        except Exception as e:
+            logger.error(f"Error in detect_and_parse: {e}")
+            # return the normal text if parsing fails
+            return StreamingParseResult(normal_text=text)
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        """
+        Streaming incremental parsing tool calls for KimiK2 format.
+        """
+        self._buffer += new_text
+        current_text = self._buffer
+
+        # Check if we have a tool call (either the start token or individual tool call)
+        has_tool_call = self.bot_token in current_text or self.tool_call_start_token in current_text
+
+        if not has_tool_call:
+            self._buffer = ""
+            for e_token in [self.eot_token, self.tool_call_end_token]:
+                if e_token in new_text:
+                    new_text = new_text.replace(e_token, "")
+            return StreamingParseResult(normal_text=new_text)
+
+        if not hasattr(self, "_tool_indices"):
+            self._tool_indices = self._get_tool_indices(tools)
+
+        calls: list[ToolCallItem] = []
+        try:
+            match = self.stream_tool_call_portion_regex.search(current_text)
+            if match:
+                function_id = match.group("tool_call_id")
+                function_args = match.group("function_arguments")
+
+                m = self.tool_call_id_regex.match(function_id)
+                if not m:
+                    logger.warning("Unexpected tool_call_id format: %s", function_id)
+                    return StreamingParseResult(normal_text="", calls=calls)
+                function_name = m.group("name")
+
+                # Initialize state if this is the first tool call
+                if self.current_tool_id == -1:
+                    self.current_tool_id = 0
+                    self.prev_tool_call_arr = []
+                    self.streamed_args_for_tool = [""]
+
+                # Ensure we have enough entries in our tracking arrays
+                while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                    self.prev_tool_call_arr.append({})
+                while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                    self.streamed_args_for_tool.append("")
+
+                if not self.current_tool_name_sent:
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=function_name,
+                            parameters="",
+                        )
+                    )
+                    self.current_tool_name_sent = True
+                    # Store the tool call info for serving layer completions endpoint
+                    self.prev_tool_call_arr[self.current_tool_id] = {
+                        "name": function_name,
+                        "arguments": {},
+                    }
+                else:
+                    argument_diff = (
+                        function_args[len(self._last_arguments) :]
+                        if function_args.startswith(self._last_arguments)
+                        else function_args
+                    )
+
+                    parsed_args_diff = argument_diff.split("<|tool_call_end|>", 1)[0]
+
+                    if parsed_args_diff:
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,
@@ -1961,6 +2290,8 @@ class FunctionCallParser:
         "deepseekv32": DeepSeekV32Detector,
         "deepseekv4": DeepSeekV4Detector,
         "glm47": Glm47Detector,
+        "kimi_k3": KimiK3Detector,
+        "kimi_k31": KimiK3Detector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,
         "mistral": MistralDetector,

@@ -6,6 +6,7 @@ from .w8a8 import *
 from .w8a8gx import *
 from .deepgemm import *
 from .awq import *
+from .mxfp4 import *
 from .no_quant import *
 from lightllm.utils.log_utils import init_logger, log_info_on_leader
 from lightllm.utils.device_utils import is_sm100_gpu
@@ -100,6 +101,13 @@ class Quantcfg:
             if is_awq_marlin_compatible(self.hf_quantization_config):
                 self.quant_type = "awq_marlin"
             log_info_on_leader(logger, f"select awq quant way: {self.quant_type}")
+        elif (
+            self.hf_quantization_method == "compressed-tensors"
+            and self.hf_quantization_config.get("format") == "mxfp4-pack-quantized"
+        ):
+            for layer_num in range(self.layer_num):
+                self.quant_cfg[layer_num]["fused_moe"] = "mxfp4"
+            log_info_on_leader(logger, "select compressed-tensors MXFP4 quant way for fused_moe")
         else:
             # TODO: more quant method
             pass

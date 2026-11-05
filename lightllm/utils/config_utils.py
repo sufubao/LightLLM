@@ -465,6 +465,9 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
             "qwen3_5_moe_text",
             "glm5_next",
             "glm5_next_text",
+            "kimi_k31",
+            "kimi_k3",
+            "kimi_linear",
         ]
     except:
         logger.debug(f"model path: {model_path} does not has linear hybrid attention")
@@ -534,6 +537,9 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     # DeepSeek V4
     if model_type == "deepseek_v4":
         return "deepseekv4"
+
+    if model_type in ("kimi_k31", "kimi_k3", "kimi_linear"):
+        return "kimi_k3"
 
     return None
 

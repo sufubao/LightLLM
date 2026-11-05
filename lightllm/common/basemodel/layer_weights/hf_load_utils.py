@@ -11,7 +11,27 @@ from lightllm.utils.dist_utils import get_current_device
 from lightllm.utils.progress import ThreadProgress
 
 
-def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
+def _select_weights(weights, prefix=""):
+    """Return checkpoint fields below an optional wrapper prefix.
+
+    Kimi K3.1 stores the text decoder under ``language_model.`` while the
+    existing layer-weight classes describe the decoder-local names.  Keeping
+    this translation at the loader boundary avoids teaching every weight
+    object about the outer multimodal checkpoint layout.
+    """
+    if not prefix:
+        return weights
+    return {key[len(prefix) :]: value for key, value in weights.items() if key.startswith(prefix)}
+
+
+def load_func(
+    file_,
+    use_safetensors=False,
+    pre_post_layer=None,
+    transformer_layer_list=None,
+    weight_dir=None,
+    weight_prefix="",
+):
     # fix bug for 多线程加载的时候，每个线程内部的cuda device 会切回 0， 修改后来保证不会出现bug
     import torch.distributed as dist
 
@@ -24,6 +44,7 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
         weights = {k: weights.get_tensor(k) for k in weights.keys()}
     else:
         weights = utils.PetrelHelper.load(os.path.join(weight_dir, file_), map_location="cpu")
+    weights = _select_weights(weights, weight_prefix)
 
     if pre_post_layer is not None:
         pre_post_layer.load_hf_weights(weights)
@@ -60,7 +81,14 @@ def checkpoint_weight_names(weight_dir, weight_dict=None):
     return frozenset(names)
 
 
-def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None):
+def load_hf_weights(
+    data_type,
+    weight_dir,
+    pre_post_layer=None,
+    transformer_layer_list=None,
+    weight_dict=None,
+    weight_prefix="",
+):
     if isinstance(data_type, str):
         data_type = torch.float16 if data_type == "fp16" else torch.float32
     if pre_post_layer is not None:
@@ -68,6 +96,7 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
     if transformer_layer_list is not None:
         assert transformer_layer_list[0].data_type_ == data_type, "type is not right"
     if weight_dict:
+        weight_dict = _select_weights(weight_dict, weight_prefix)
         if pre_post_layer is not None:
             pre_post_layer.load_hf_weights(weight_dict)
         if transformer_layer_list is not None:
@@ -85,6 +114,7 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
         pre_post_layer=pre_post_layer,
         transformer_layer_list=transformer_layer_list,
         weight_dir=weight_dir,
+        weight_prefix=weight_prefix,
     )  # noqa
     worker = int(os.environ.get("LOADWORKER", 1))
     started = time.monotonic()

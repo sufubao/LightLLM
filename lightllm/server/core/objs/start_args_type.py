@@ -64,6 +64,7 @@ class StartArgs:
                 "deepseekv32",
                 "deepseekv4",
                 "glm47",
+                "kimi_k3",
                 "kimi_k2",
                 "qwen3_coder",
             ]
@@ -78,6 +79,7 @@ class StartArgs:
                 "deepseek-v4",
                 "glm45",
                 "gpt-oss",
+                "kimi_k3",
                 "kimi",
                 "kimi_k2",
                 "qwen3",

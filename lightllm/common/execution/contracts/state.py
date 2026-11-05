@@ -1,10 +1,32 @@
 from dataclasses import dataclass
 from math import isfinite
-from typing import Any, Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol, TypeAlias
+
+
+StateKey: TypeAlias = tuple[str, str]
 
 
 class StateParams(Protocol):
     def validate(self) -> None:
+        ...
+
+
+class StateStore(Protocol):
+    """Expose the native views owned by one retention domain.
+
+    Allocation and eviction remain outside this protocol.  The execution
+    planner only needs a stable view map after storage has been allocated.
+    """
+
+    def views(self) -> Mapping[StateKey, "StateView"]:
+        ...
+
+
+class StateWriter(Protocol):
+    """Write an append payload into a bound state view."""
+
+    def __call__(self, *, token_indices: object, kv: object) -> None:
         ...
 
 

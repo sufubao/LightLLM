@@ -29,6 +29,7 @@ class AttentionMetadata(Protocol):
 InputT = TypeVar("InputT", contravariant=True)
 MetadataT = TypeVar("MetadataT", bound=AttentionMetadata)
 OutputT = TypeVar("OutputT", covariant=True)
+OutputBufferT = TypeVar("OutputBufferT")
 
 
 class BoundAttention(Protocol[InputT, MetadataT, OutputT]):
@@ -48,6 +49,13 @@ class BoundAttention(Protocol[InputT, MetadataT, OutputT]):
         ...
 
     def run(self, inputs: InputT, metadata: MetadataT) -> OutputT:
+        ...
+
+
+class OutputBoundAttention(Protocol[InputT, MetadataT, OutputBufferT]):
+    """Optional extension for implementations that support caller-owned output."""
+
+    def run(self, inputs: InputT, metadata: MetadataT, out: OutputBufferT) -> OutputBufferT:
         ...
 
 

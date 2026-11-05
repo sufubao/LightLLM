@@ -1,8 +1,16 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Hashable, Mapping
+from typing import Any, Hashable
 from lightllm.common.execution.contracts.provider import AttentionOffer, Phase
-from lightllm.common.execution.contracts.state import StateSpec, FormatSpec
-from lightllm.common.execution.compute.attention.backend import AttentionBackend, AttentionSpec, AttentionParams, BoundAttention
+from lightllm.common.execution.contracts.state import FormatSpec, StateSpec, StateView
+from lightllm.common.execution.compute.attention.backend import (
+    AttentionBackend,
+    AttentionSpec,
+    AttentionParams,
+    BoundAttention,
+)
 
 
 @dataclass(frozen=True)
@@ -60,10 +68,14 @@ class AttentionSelectionPlan:
     def workspace_bytes(self):
         return sum(self.workspace_sizes.values())
 
-    def reserve(self, allocate):
+    def reserve(self, allocate: Callable[[int], object]) -> Mapping[Hashable, object]:
         return {key: allocate(size) for key, size in self.workspace_sizes.items() if size}
 
-    def bind(self, views, workspaces):
+    def bind(
+        self,
+        views: Mapping[tuple[str, str], StateView],
+        workspaces: Mapping[Hashable, object],
+    ) -> BoundAttentionPlan:
         bindings = []
         for selection in self.selections:
             request, backend, offer = selection.request, selection.backend, selection.offer

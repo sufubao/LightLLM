@@ -14,6 +14,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
+from lightllm.common.execution.contracts.device import DeviceRuntime
 from lightllm.common.execution.device.cuda import CudaRuntime
 from lightllm.common.execution.device.graph import bind_graph
 
@@ -66,9 +67,13 @@ class CudaGraph:
         max_len_in_batch=8192,
         tp_world_size: int = 1,
         capture_infer_cost: bool = False,
-        runtime=CudaRuntime,
+        runtime: DeviceRuntime | type[CudaRuntime] = CudaRuntime,
     ):
-        self.runtime = runtime
+        # The default keeps legacy CUDA callers working, but all later code
+        # receives an initialized runtime object with an explicit device.
+        self.runtime = CudaRuntime() if runtime is CudaRuntime else runtime
+        if isinstance(self.runtime, type):
+            raise TypeError("runtime must be an initialized DeviceRuntime instance")
         self.graph = {}
         self.tp_world_size = tp_world_size
         self.mempool = self.runtime.graph_pool()
@@ -206,7 +211,7 @@ class CudaGraph:
         infer_cost_ms_tensor = torch.tensor(
             [start_event.elapsed_time(end_event)],
             dtype=torch.float32,
-            device=getattr(self.runtime, "device", "cuda"),
+            device=self.runtime.device,
         )
         dist.all_reduce(infer_cost_ms_tensor, op=dist.ReduceOp.MIN, group=dist.group.WORLD)
         if self.enable_decode_microbatch_overlap:

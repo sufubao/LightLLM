@@ -1,19 +1,22 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping, Hashable, Protocol
+from typing import Hashable
 
 from lightllm.common.execution.contracts.model import ModelAdapter
 from lightllm.common.execution.contracts.device import DeviceRuntime, ExecutionLimits
 from lightllm.common.execution.contracts.provider import Phase
-from lightllm.common.execution.contracts.state import StateSpec, StateView, FormatSpec
+from lightllm.common.execution.contracts.state import (
+    FormatSpec,
+    StateKey,
+    StateSpec,
+    StateStore,
+    StateView,
+    StateWriter,
+)
 from lightllm.common.execution.compute.attention.backend import AttentionParams, AttentionSpec
 from lightllm.common.execution.planner import AttentionRequest, Planner, AttentionSelectionPlan, BoundAttentionPlan
 from lightllm.common.execution.registry import ProviderRegistry, StateProvider
 from lightllm.common.execution.runner.attention import AttentionMetadataRunner
-
-
-class StateStore(Protocol):
-    def views(self) -> Mapping[tuple[str, str], StateView]:
-        ...
 
 
 @dataclass(frozen=True)
@@ -41,7 +44,7 @@ class AttentionBuild:
     specs: Mapping[int, AttentionSpec]
     decode_phase: Phase
 
-    def allocate(self, *, manager, device: DeviceRuntime) -> "AttentionResources":
+    def allocate(self, *, manager: object | None, device: DeviceRuntime) -> "AttentionResources":
         workspaces = self.selection.reserve(device.allocate_workspace)
         stores = {
             item.retention: item.provider.create_store(item.declarations, item.format, manager, device, self.specs)
@@ -62,14 +65,14 @@ class AttentionResources:
     def bind(self) -> "AttentionExecution":
         if self._bound:
             raise RuntimeError("bound execution plans cannot be replaced while resources or Graphs may be in use")
-        views = {}
+        views: dict[StateKey, StateView] = {}
         for store in self.stores.values():
             for key, view in store.views().items():
                 if key in views:
                     raise ValueError("a resource must resolve to exactly one native view")
                 views[key] = view
         plan = self.build.selection.bind(views, self.workspaces)
-        writers = {}
+        writers: dict[StateKey, StateWriter] = {}
         providers = {item.retention: item.provider for item in self.build.allocations}
         for key, view in views.items():
             create_writer = providers[view.state.retention].create_writer
@@ -86,8 +89,8 @@ class AttentionExecution:
 
     plan: BoundAttentionPlan
     metadata: AttentionMetadataRunner
-    views: Mapping[tuple[str, str], StateView]
-    writers: Mapping[tuple[str, str], object]
+    views: Mapping[StateKey, StateView]
+    writers: Mapping[StateKey, StateWriter]
     resources: AttentionResources
 
 
@@ -152,7 +155,7 @@ def build(
     providers: ProviderRegistry,
     device: DeviceRuntime,
     config: BuildConfig,
-    manager=None,
+    manager: object | None = None,
 ) -> AttentionExecution:
     """Build with self-allocating stores; shared allocation uses prepare, allocate, then bind."""
     prepared = prepare(model_adapter=model_adapter, providers=providers, device=device, config=config)

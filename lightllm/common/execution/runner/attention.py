@@ -1,5 +1,9 @@
+"""Batch metadata preparation shared by bound attention implementations."""
+
 from __future__ import annotations
-from typing import Hashable, Mapping, TYPE_CHECKING
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Hashable
 from lightllm.common.execution.compute.attention.backend import BoundAttention, AttentionMetadata
 from lightllm.common.execution.contracts.device import DeviceRuntime, GraphBinding
 from lightllm.common.execution.contracts.provider import Phase
@@ -12,6 +16,12 @@ from lightllm.common.execution.compute.attention.backend import GraphAttention
 
 
 class AttentionMetadataRunner:
+    """Create one metadata object per compatible bound execution group.
+
+    ``metadata_key`` is a sharing contract: executions with equal keys must
+    accept metadata produced by either member of the group for the same batch.
+    """
+
     def __init__(self, plan: BoundAttentionPlan, decode_phase: Phase = "decode"):
         self.plan = plan
         self.decode_phase = decode_phase
@@ -26,7 +36,7 @@ class AttentionMetadataRunner:
         return {execution.metadata_key: execution.create_metadata(batch) for execution in executions}
 
     def bind_graph(self, metadata: Mapping[Hashable, AttentionMetadata], runtime: DeviceRuntime) -> list[GraphBinding]:
-        bindings = []
+        bindings: list[GraphBinding] = []
         for key, value in metadata.items():
             execution = self.metadata_sources[key]
             if isinstance(execution, GraphAttention):

@@ -1,5 +1,10 @@
-from lightllm.common.execution.compute.attention.backend import AttentionBackend
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping
+from lightllm.common.execution.compute.attention.backend import AttentionBackend, AttentionParams, AttentionSpec
+from lightllm.common.execution.contracts.state import FormatSpec, StateView
 from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.common.execution.contracts.provider import AttentionOffer, Phase
 from .plan import (
     AttentionBinding,
     AttentionRequest,
@@ -19,7 +24,14 @@ class Planner:
         self.device = device
         self.limits = limits
 
-    def select(self, spec, format, phase: str, requested: str = "auto", auxiliary_formats=None):
+    def select(
+        self,
+        spec: AttentionSpec,
+        format_spec: FormatSpec,
+        phase: Phase,
+        requested: str = "auto",
+        auxiliary_formats: Mapping[str, FormatSpec] | None = None,
+    ) -> tuple[AttentionBackend, AttentionOffer]:
         failures = []
         for backend in self.backends:
             if requested not in ("auto", backend.name, backend.implementation):
@@ -27,18 +39,18 @@ class Planner:
             if auxiliary_formats and not backend.supports_auxiliary_states:
                 failures.append(f"{backend.name}: does not consume auxiliary state")
                 continue
-            result = backend.probe(spec, format, self.device, self.limits, auxiliary_formats=auxiliary_formats)
+            result = backend.probe(spec, format_spec, self.device, self.limits, auxiliary_formats=auxiliary_formats)
             for offer in result.offers:
                 if offer.backend != backend.name:
                     raise ValueError("backend returned an offer with another backend's identity")
-                if offer.phase != phase or offer.format != format:
+                if offer.phase != phase or offer.format != format_spec:
                     continue
                 if offer.workspace_bytes <= self.limits.workspace_bytes:
                     return backend, offer
             failures.append(f"{backend.name}: {result.reason or 'no compatible phase/format within workspace budget'}")
         raise ValueError(f"{phase} attention ({requested}): " + ("; ".join(failures) or "backend is not registered"))
 
-    def prepare(self, requests) -> AttentionSelectionPlan:
+    def prepare(self, requests: Iterable[AttentionRequest]) -> AttentionSelectionPlan:
         selections, sizes, identities, states = [], {}, set(), {}
         for request in requests:
             identity = request.layer_id, request.phase
@@ -80,7 +92,11 @@ class Planner:
             raise ValueError(f"plan workspace {total} exceeds budget {self.limits.workspace_bytes}")
         return AttentionSelectionPlan(tuple(selections), sizes)
 
-    def bind(self, layers, allocate_workspace) -> BoundAttentionPlan:
+    def bind(
+        self,
+        layers: Iterable[tuple[int, Phase, AttentionSpec, StateView, AttentionParams, str]],
+        allocate_workspace: Callable[[int], object],
+    ) -> BoundAttentionPlan:
         requests, views = [], {}
         for layer, phase, spec, view, params, requested in layers:
             if view.state.key in views and views[view.state.key] is not view:

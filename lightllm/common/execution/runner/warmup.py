@@ -11,6 +11,7 @@ from lightllm.utils.progress import ThreadProgress
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.log_utils import init_logger, log_info_on_leader, progress_enabled
+from lightllm.common.execution.contracts.device import DeviceRuntime
 from lightllm.common.execution.device.cuda import CudaRuntime
 
 logger = init_logger(__name__)
@@ -31,7 +32,7 @@ class WarmupRunner:
         *,
         overlap_prefill,
         overlap_decode,
-        runtime=CudaRuntime,
+        runtime: DeviceRuntime | type[CudaRuntime] = CudaRuntime,
     ):
         self.requests = requests
         self.kv_allocator = kv_allocator
@@ -40,7 +41,11 @@ class WarmupRunner:
         self.vocab_size = vocab_size
         self.overlap_prefill = overlap_prefill
         self.overlap_decode = overlap_decode
-        self.runtime = runtime
+        # Normalize the legacy CUDA class default at this boundary so warmup
+        # never has to guess platform methods or device placement.
+        self.runtime = CudaRuntime() if runtime is CudaRuntime else runtime
+        if isinstance(self.runtime, type):
+            raise TypeError("runtime must be an initialized DeviceRuntime instance")
         self.device = requests.req_to_token_indexs.device
 
     def prefill_input(self, tokens, request_id, *, random=False):
@@ -71,7 +76,7 @@ class WarmupRunner:
         )
 
     def decode_input(self, rows, max_kv_length):
-        length = getattr(self.runtime, "decode_warmup_length", lambda maximum: 2)(max_kv_length)
+        length = self.runtime.decode_warmup_length(max_kv_length)
         if not 1 <= length <= max_kv_length:
             raise ValueError("decode warmup length exceeds the Graph capacity")
         return ModelInput(

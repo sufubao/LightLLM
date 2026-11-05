@@ -37,7 +37,13 @@ def make_runner(requests, allocator, forward, *, runtime=None, overlap=None):
         19,
         overlap_prefill=overlap,
         overlap_decode=overlap,
-        runtime=runtime or SimpleNamespace(synchronize=lambda: None, barrier=lambda: None, empty_cache=lambda: None),
+        runtime=runtime
+        or SimpleNamespace(
+            synchronize=lambda: None,
+            barrier=lambda: None,
+            empty_cache=lambda: None,
+            decode_warmup_length=lambda maximum: 2,
+        ),
     )
 
 

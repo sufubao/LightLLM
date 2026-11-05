@@ -91,7 +91,7 @@ def _compress_pools(
         key = tl.sum(raw * weights, 0).to(tl.bfloat16).to(tl.float32).reshape(1, 128)
         for step in tl.static_range(7):
             key = _butterfly_stage(key, 64 >> step, 1 << step, 1, 128)
-        key = (key * (128 ** -0.5)).to(tl.bfloat16).to(tl.float32)
+        key = (key * (128**-0.5)).to(tl.bfloat16).to(tl.float32)
         scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0)))
         key = tl.minimum(tl.maximum(key / scale[:, None], -448.0), 448.0).to(tl.float8e4nv)
         loc = tl.load(Ragged + start + length - 1).to(tl.int64)

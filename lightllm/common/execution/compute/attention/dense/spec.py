@@ -28,7 +28,7 @@ class DenseAttentionSpec:
 
     @property
     def scale(self):
-        return self.head_dim ** -0.5 if self.score_scale is None else self.score_scale
+        return self.head_dim**-0.5 if self.score_scale is None else self.score_scale
 
     def validate_state(self, request):
         params = request.state.params

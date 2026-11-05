@@ -17,8 +17,8 @@ from lightllm.common.execution.compute.attention.workspace import lane_workspace
 from lightllm.common.execution.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
 
-FLOAT_WORKSPACE_BYTES = 128 * 1024 ** 2
-INT_WORKSPACE_BYTES = 8 * 1024 ** 2
+FLOAT_WORKSPACE_BYTES = 128 * 1024**2
+INT_WORKSPACE_BYTES = 8 * 1024**2
 
 
 @dataclass

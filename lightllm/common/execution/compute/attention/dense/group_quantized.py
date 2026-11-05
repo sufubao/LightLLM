@@ -7,7 +7,11 @@ import torch
 
 from lightllm.common.execution.compute.attention.dense.inputs import query_tensor
 
-from lightllm.common.execution.compute.attention.dense.backend import BoundDenseAttention, decode_blocks, scratch_elements
+from lightllm.common.execution.compute.attention.dense.backend import (
+    BoundDenseAttention,
+    decode_blocks,
+    scratch_elements,
+)
 from lightllm.common.execution.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
 
@@ -137,7 +141,7 @@ class GroupQuantizedAttentionBackend:
         if (
             not spec.causal
             or spec.softcap
-            or spec.scale != spec.head_dim ** -0.5
+            or spec.scale != spec.head_dim**-0.5
             or (spec.window != (-1, -1) and not (spec.window[0] >= 0 and spec.window[1] == 0))
         ):
             return ProbeResult(reason="requires causal attention with default scale and optional left window")

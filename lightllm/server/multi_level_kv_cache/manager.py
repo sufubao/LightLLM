@@ -137,6 +137,55 @@ class MultiLevelKVCacheManager:
         self.cpu_cache_client.lock.release()
         return all_pages, len(new_page_indexes)
 
+    def _match_hybrid_tail(self, req: Req, hashes: List[int], pages: List[int]) -> tuple[List[int], int]:
+        """Reuse a shorter historical tail inside the first missing CPU cache page."""
+        small_hashes = req.hybrid_token_hash_list.get_all()
+        if not small_hashes or len(pages) == len(hashes):
+            return pages, 0
+
+        block_num = self.args.linear_att_page_block_num
+        start = len(pages) * block_num
+        stop_page = len(pages) + 1
+        if not self.only_cpu_cache_enable:
+            disk_block_pages = self.disk_cache_worker.service._n
+            stop_page = (len(pages) // disk_block_pages + 1) * disk_block_pages
+        stop = min(stop_page * block_num, len(small_hashes))
+        deadline = time.monotonic() + self.cpu_cache_time_out
+
+        for end in range(stop - 1, start, -1):
+            if time.monotonic() >= deadline:
+                break
+
+            tail_hash = small_hashes[end - 1]
+            full_pages = (end - 1) // block_num
+            page = None
+            if full_pages == len(pages):
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                try:
+                    page, _ = self.cpu_cache_client.query_one_page(tail_hash)
+                finally:
+                    self.cpu_cache_client.lock.release()
+
+            disk_pages = 0
+            candidate_hashes = hashes[:full_pages] + [tail_hash]
+            if page is not None:
+                matched_pages = pages + [page]
+            elif not self.only_cpu_cache_enable:
+                matched_pages, disk_pages = self._disk_cache_match(candidate_hashes, pages.copy())
+                if not disk_pages:
+                    continue
+            else:
+                continue
+
+            lengths = req.token_hash_page_len_list.get_all()[:full_pages]
+            lengths.append(end * self.args.linear_att_hash_page_size)
+            req.token_hash_list.fill(candidate_hashes)
+            req.token_hash_page_len_list.clear()
+            req.token_hash_page_len_list.fill(lengths)
+            return matched_pages, disk_pages
+
+        return pages, 0
+
     def _handle_group_req_multi_cache_match(self, group_req_indexes: GroupReqIndexes, start_time: float):
         """
         match cpu cache and disk cache pages
@@ -164,7 +213,7 @@ class MultiLevelKVCacheManager:
                 continue
 
             req: Req = req
-            if req.sample_params.prompt_logprobs >= 0:
+            if req.sample_params.prompt_logprobs >= 0 or req.sample_params.disable_prompt_cache:
                 continue
 
             token_hash_list = req.token_hash_list.get_all()
@@ -176,32 +225,25 @@ class MultiLevelKVCacheManager:
 
             # 匹配 CPU cache
             all_pages = self._cpu_cache_match(token_hash_list)
-            if len(all_pages) == len(token_hash_list) or self.only_cpu_cache_enable:
-                finded_page_indexes = all_pages
-            else:
-                # 匹配 disk cache并load到cpu cache
+            disk_page_num = 0
+            finded_page_indexes = all_pages
+            if len(all_pages) < len(token_hash_list) and not self.only_cpu_cache_enable:
                 finded_page_indexes, disk_page_num = self._disk_cache_match(token_hash_list, all_pages)
 
-                try:
-                    token_hash_page_len_list = req.token_hash_page_len_list.get_all()
+            lengths = req.token_hash_page_len_list.get_all()
+            old_length = lengths[len(finded_page_indexes) - 1] if finded_page_indexes else 0
+            if disk_page_num:
+                cpu_pages = len(finded_page_indexes) - disk_page_num
+                cpu_length = lengths[cpu_pages - 1] if cpu_pages else 0
+                req.disk_prompt_cache_len = old_length - cpu_length
 
-                    if disk_page_num == 0 or len(finded_page_indexes) == 0:
-                        req.disk_prompt_cache_len = 0
-                    else:
-                        all_page_num = len(finded_page_indexes)
-                        cpu_match_page_num = all_page_num - disk_page_num
-
-                        if cpu_match_page_num == 0:
-                            cpu_match_page_len = 0
-                        else:
-                            cpu_match_page_len = token_hash_page_len_list[cpu_match_page_num - 1]
-
-                        req.disk_prompt_cache_len = token_hash_page_len_list[all_page_num - 1] - cpu_match_page_len
-                except Exception as e:
-                    # 因为不清楚上面的代码是否存在边界 bug，调用者是多线程的，自己打日志记录，避免
-                    # 日志无法记录， 无法排查问题。
-                    logger.exception(f"calculate disk prompt cache len has exception {str(e)}")
-                    raise e
+            if req.hybrid_token_hash_list.size and not self.args.disable_linear_att_small_page_cpu_cache:
+                finded_page_indexes, tail_disk_pages = self._match_hybrid_tail(
+                    req, token_hash_list, finded_page_indexes
+                )
+                if tail_disk_pages:
+                    lengths = req.token_hash_page_len_list.get_all()
+                    req.disk_prompt_cache_len += lengths[len(finded_page_indexes) - 1] - old_length
 
             while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
                 time.sleep(0.01)

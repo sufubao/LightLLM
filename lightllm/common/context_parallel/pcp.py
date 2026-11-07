@@ -6,7 +6,23 @@ inputs without duplicating rank arithmetic.  Communication and attention
 execution remain backend responsibilities.
 """
 
+import operator
 from dataclasses import dataclass, field
+from typing import Any
+
+
+def _validated_int(value: Any, name: str, *, minimum: int) -> int:
+    """Return an integer argument or raise a useful topology error."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, got bool")
+    try:
+        value = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be an integer, got {type(value).__name__}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -17,12 +33,59 @@ class PrefillTokenRange:
     end: int
 
     def __post_init__(self) -> None:
-        if self.start < 0 or self.end < self.start:
-            raise ValueError("token range must satisfy 0 <= start <= end")
+        start = _validated_int(self.start, "start", minimum=0)
+        end = _validated_int(self.end, "end", minimum=0)
+        if end < start:
+            raise ValueError(f"token range must satisfy 0 <= start <= end, got ({start}, {end})")
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "end", end)
 
     @property
     def length(self) -> int:
         return self.end - self.start
+
+
+@dataclass(frozen=True)
+class PrefillTokenMetadata:
+    """Global coordinates for the local slice of one prefill PCP rank.
+
+    ``token_range`` is expressed in the unsharded prompt coordinate space.  A
+    backend can therefore slice token-aligned tensors and retain enough
+    metadata to map local outputs back to the original prompt.  This class
+    does not describe attention state or communication; those remain backend
+    responsibilities.
+    """
+
+    token_count: int
+    token_range: PrefillTokenRange
+    pcp_rank: int
+    pcp_size: int
+
+    def __post_init__(self) -> None:
+        token_count = _validated_int(self.token_count, "token_count", minimum=0)
+        pcp_rank = _validated_int(self.pcp_rank, "pcp_rank", minimum=0)
+        pcp_size = _validated_int(self.pcp_size, "pcp_size", minimum=1)
+        if pcp_rank >= pcp_size:
+            raise ValueError(f"pcp_rank must be in [0, {pcp_size}), got {pcp_rank}")
+        if self.token_range.end > token_count:
+            raise ValueError(
+                f"token range ({self.token_range.start}, {self.token_range.end}) exceeds token_count {token_count}"
+            )
+        object.__setattr__(self, "token_count", token_count)
+        object.__setattr__(self, "pcp_rank", pcp_rank)
+        object.__setattr__(self, "pcp_size", pcp_size)
+
+    @property
+    def global_start(self) -> int:
+        return self.token_range.start
+
+    @property
+    def global_end(self) -> int:
+        return self.token_range.end
+
+    @property
+    def local_token_count(self) -> int:
+        return self.token_range.length
 
 
 def rank_layout(global_rank: int, *, tp_size: int, pcp_size: int, dp_size: int = 1) -> tuple[int, int, int]:
@@ -33,8 +96,10 @@ def rank_layout(global_rank: int, *, tp_size: int, pcp_size: int, dp_size: int =
     stable when ``pcp_size == 1``.
     """
 
-    if tp_size <= 0 or pcp_size <= 0 or dp_size <= 0:
-        raise ValueError("parallel sizes must be positive")
+    global_rank = _validated_int(global_rank, "global_rank", minimum=0)
+    tp_size = _validated_int(tp_size, "tp_size", minimum=1)
+    pcp_size = _validated_int(pcp_size, "pcp_size", minimum=1)
+    dp_size = _validated_int(dp_size, "dp_size", minimum=1)
     world_size = dp_size * pcp_size * tp_size
     if not 0 <= global_rank < world_size:
         raise ValueError(f"global_rank must be in [0, {world_size}), got {global_rank}")
@@ -84,8 +149,7 @@ class PrefillContextParallelConfig:
     def token_range(self, token_count: int) -> PrefillTokenRange:
         """Return this rank's balanced contiguous range for a prefill prompt."""
 
-        if token_count < 0:
-            raise ValueError("token_count must be nonnegative")
+        token_count = _validated_int(token_count, "token_count", minimum=0)
         base, remainder = divmod(token_count, self.pcp_size)
         start = self.pcp_rank * base + min(self.pcp_rank, remainder)
         return PrefillTokenRange(start, start + base + (self.pcp_rank < remainder))
@@ -93,8 +157,7 @@ class PrefillContextParallelConfig:
     def token_ranges(self, token_count: int) -> tuple[PrefillTokenRange, ...]:
         """Return all PCP ranges in rank order and prove they cover the prompt."""
 
-        if token_count < 0:
-            raise ValueError("token_count must be nonnegative")
+        token_count = _validated_int(token_count, "token_count", minimum=0)
         base, remainder = divmod(token_count, self.pcp_size)
         ranges = []
         start = 0
@@ -103,3 +166,26 @@ class PrefillContextParallelConfig:
             ranges.append(PrefillTokenRange(start, start + length))
             start += length
         return tuple(ranges)
+
+    def token_metadata(self, token_count: int) -> PrefillTokenMetadata:
+        """Return this rank's range together with its global prompt metadata."""
+
+        token_count = _validated_int(token_count, "token_count", minimum=0)
+        return PrefillTokenMetadata(
+            token_count=token_count,
+            token_range=self.token_range(token_count),
+            pcp_rank=self.pcp_rank,
+            pcp_size=self.pcp_size,
+        )
+
+    def slice_tokens(self, tokens: Any) -> tuple[Any, PrefillTokenMetadata]:
+        """Slice a token-aligned buffer along its first dimension.
+
+        The input may be a Python sequence, NumPy array, or tensor-like object;
+        the object's normal slice semantics (view or copy) are preserved.  The
+        returned metadata remains in global prompt coordinates so callers can
+        perform the required attention and output reconciliation explicitly.
+        """
+
+        metadata = self.token_metadata(len(tokens))
+        return tokens[metadata.global_start : metadata.global_end], metadata

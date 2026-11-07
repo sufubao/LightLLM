@@ -1,6 +1,11 @@
 import pytest
 
-from lightllm.common.context_parallel.pcp import PrefillContextParallelConfig, PrefillTokenRange, rank_layout
+from lightllm.common.context_parallel.pcp import (
+    PrefillContextParallelConfig,
+    PrefillTokenMetadata,
+    PrefillTokenRange,
+    rank_layout,
+)
 
 
 def test_rank_layout_is_dp_pcp_tp_ordered():
@@ -40,6 +45,31 @@ def test_empty_ranges_are_valid_when_prompt_is_shorter_than_pcp_group():
     assert config.token_range(1) == PrefillTokenRange(1, 1)
 
 
+def test_slice_tokens_returns_local_buffer_and_global_metadata():
+    config = PrefillContextParallelConfig(global_rank=1, pcp_size=3)
+
+    local_tokens, metadata = config.slice_tokens(list(range(8)))
+
+    assert local_tokens == [3, 4, 5]
+    assert metadata == PrefillTokenMetadata(8, PrefillTokenRange(3, 6), pcp_rank=1, pcp_size=3)
+    assert (metadata.global_start, metadata.global_end, metadata.local_token_count) == (3, 6, 3)
+
+
+def test_slice_tokens_preserves_empty_local_ranges():
+    config = PrefillContextParallelConfig(global_rank=2, pcp_size=3)
+
+    local_tokens, metadata = config.slice_tokens([10])
+
+    assert local_tokens == []
+    assert metadata.global_start == metadata.global_end == 1
+    assert metadata.token_count == 1
+
+
+def test_prefill_token_metadata_rejects_range_outside_prompt():
+    with pytest.raises(ValueError, match="exceeds token_count"):
+        PrefillTokenMetadata(2, PrefillTokenRange(1, 3), pcp_rank=0, pcp_size=1)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -51,3 +81,9 @@ def test_empty_ranges_are_valid_when_prompt_is_shorter_than_pcp_group():
 def test_invalid_topology_is_rejected(kwargs):
     with pytest.raises(ValueError):
         PrefillContextParallelConfig(**kwargs)
+
+
+@pytest.mark.parametrize("token_count", [-1, 1.5, True])
+def test_invalid_token_counts_are_rejected(token_count):
+    with pytest.raises(ValueError):
+        PrefillContextParallelConfig(pcp_size=2).token_ranges(token_count)

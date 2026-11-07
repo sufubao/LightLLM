@@ -21,6 +21,7 @@ from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
@@ -160,6 +161,11 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
+        snapshot_event = getattr(req, "cache_snapshot_event", None)
+        if snapshot_event is not None:
+            snapshot_event.synchronize()
+            req.cache_snapshot_event = None
+
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.hold_kv_len])
         elif CacheTier.GPU not in req.cache_tiers:
@@ -242,7 +248,7 @@ class InferenceContext:
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-            block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:page_num]
+            block_hashs = req.get_cache_hashes(hash_page_size, req.cur_kv_len)[:page_num]
             state_idxs = [None for _ in range(page_num)]
             state_idxs[-1] = req.tail_small_page_buffer_id
             req.tail_small_page_buffer_id = None
@@ -273,7 +279,7 @@ class InferenceContext:
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
             cur_page_num = tail_big_page_token_num // hash_page_size
             assert tail_big_page_token_num % hash_page_size == 0
-            block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:cur_page_num]
+            block_hashs = req.get_cache_hashes(hash_page_size, req.cur_kv_len)[:cur_page_num]
             state_idxs = [None for _ in range(cur_page_num)]
             prefix_len, _ = self.radix_cache.insert(
                 key,
@@ -479,6 +485,76 @@ class InferenceContext:
                         )
         return
 
+    def save_decode_state_to_cache(self, reqs: List["InferReq"], start_lengths: Dict[int, int]):
+        """Publish completed hybrid-attention pages produced during ordinary decode.
+
+        Hybrid attention needs both the full-attention KV pages and a bounded-state
+        snapshot to resume a cached prefix.  Input prompt matching already creates
+        those checkpoints; this method extends the same lifecycle to generated
+        pages, which are the reusable part of an agent's next tool turn.
+
+        Speculative decoding is deliberately excluded until the accepted candidate
+        state is exposed by every participating bounded-attention implementation.
+        A missing big-page slot stops publication for the request instead of creating
+        a cache path that cannot be restored from its earlier checkpoint.
+        """
+        if not self.is_hybrid_att_model or self.radix_cache is None:
+            return
+        if getattr(self.args, "mtp_mode", None) is not None:
+            return
+
+        hash_page_size = self.args.linear_att_hash_page_size
+        big_page_tokens = hash_page_size * self.args.linear_att_page_block_num
+        allocator = self.att_state_manager.bounded_att_big_page_allocator
+        small_allocator = self.att_state_manager.bounded_att_small_page_allocator
+
+        unique_reqs = {req.req_idx: req for req in reqs}.values()
+        with torch.cuda.stream(self.get_overlap_stream()):
+            for req in unique_reqs:
+                if getattr(req, "decode_cache_blocked", False) or req.cur_kv_len <= req.shm_req.input_len:
+                    continue
+
+                first_page_end = (start_lengths[req.req_idx] // hash_page_size + 1) * hash_page_size
+                for page_end in range(first_page_end, req.cur_kv_len + 1, hash_page_size):
+                    if page_end <= req.hybrid_cache_len:
+                        continue
+
+                    if page_end % big_page_tokens == 0:
+                        slots = allocator.alloc(1)
+                        if slots is None:
+                            req.decode_cache_blocked = True
+                            break
+                        page_slot = slots[0]
+                        req.hybrid_len_to_big_page_id[page_end] = page_slot
+                        page_kind = "big"
+                    else:
+                        page_slot = req.tail_small_page_buffer_id
+                        if page_slot is None:
+                            self.radix_cache.free_one_small_page_buffer()
+                            slots = small_allocator.alloc(1) if small_allocator is not None else None
+                            if not slots:
+                                continue
+                            page_slot = slots[0]
+                            req.tail_small_page_buffer_id = page_slot
+                        page_kind = "small"
+
+                    self.att_state_manager.save_bounded_att_runtime_to_pages(
+                        req_indices=[req.req_idx],
+                        state_token_lens=[page_end],
+                        page_kind=page_kind,
+                        page_slot_ids=[page_slot],
+                    )
+                    req.hybrid_cache_len = page_end
+                    req.cache_snapshot_event = torch.cuda.Event()
+                    req.cache_snapshot_event.record()
+
+                    if page_kind == "big" and req.tail_small_page_buffer_id is not None:
+                        req.cache_snapshot_event.synchronize()
+                        small_allocator.free([req.tail_small_page_buffer_id])
+                        req.tail_small_page_buffer_id = None
+
+        return
+
 
 g_infer_context = InferenceContext()
 
@@ -581,6 +657,8 @@ class InferReq:
         self.hybrid_cache_len: Optional[int] = None
         # 存储对应长度位置的大页buffer_id
         self.hybrid_len_to_big_page_id: Optional[SortedDict] = None
+        self.cache_snapshot_event: Optional[torch.cuda.Event] = None
+        self.decode_cache_blocked: bool = False
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
@@ -856,6 +934,28 @@ class InferReq:
 
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
+
+    def get_cache_hashes(self, page_size: int, token_len: int) -> List[int]:
+        """Hash the executed prefix, including generated tokens when present.
+
+        The router's input hash list intentionally omits the final prompt token so
+        prefill still has a next-token position.  A generated prefix has the same
+        requirement: hash exactly the executed pages and use the following token as
+        the sentinel when it is available.  Appending a dummy sentinel handles an
+        exact-length request that is released before another token is written.
+        """
+        if token_len < 0 or page_size <= 0:
+            raise ValueError("page_size must be positive and token_len must be non-negative")
+        if token_len <= self.shm_req.input_len:
+            input_hashes = getattr(self.shm_req, "hybrid_token_hash_list", None)
+            if input_hashes is not None:
+                return input_hashes.get_all()[: token_len // page_size]
+
+        token_ids = np.asarray(self.get_input_token_ids())
+        token_ids = token_ids[: token_len + 1]
+        if len(token_ids) == token_len:
+            token_ids = np.concatenate((token_ids, np.zeros(1, dtype=token_ids.dtype)))
+        return compute_token_list_hash(token_ids, page_size)
 
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len

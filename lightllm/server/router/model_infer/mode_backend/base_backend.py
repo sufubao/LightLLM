@@ -980,6 +980,7 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
+        cache_starts = {req.req_idx: req.cur_kv_len for req in run_reqs}
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
         for req_obj in run_reqs:
@@ -1006,6 +1007,7 @@ class ModeBackend:
             req_obj.cur_output_len += 1
             pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len, prefill_tokens=prefill_tokens)
             update_func_objs.append(pack)
+        g_infer_context.save_decode_state_to_cache(run_reqs, cache_starts)
         return update_func_objs
 
     # 一些可以复用的通用功能函数

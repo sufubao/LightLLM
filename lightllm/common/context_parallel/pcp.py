@@ -189,3 +189,26 @@ class PrefillContextParallelConfig:
 
         metadata = self.token_metadata(len(tokens))
         return tokens[metadata.global_start : metadata.global_end], metadata
+
+    def runtime_layout(self):
+        """Return the explicit process-group layout for a PCP worker."""
+
+        from lightllm.common.context_parallel_runtime import ContextParallelLayout
+
+        return ContextParallelLayout(
+            global_rank=self.global_rank,
+            dp_size=self.dp_size,
+            context_size=self.pcp_size,
+            tp_size=self.tp_size,
+        )
+
+    def create_runtime_groups(self, *, backend: str | None = None):
+        """Create PCP/TP/DP groups after distributed bootstrap.
+
+        This method owns no global state and does not initialize the default
+        process group; launcher code must call it consistently on every rank.
+        """
+
+        from lightllm.common.context_parallel_runtime import create_context_parallel_groups
+
+        return create_context_parallel_groups(self.runtime_layout(), backend=backend)

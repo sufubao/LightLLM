@@ -65,6 +65,27 @@ def test_slice_tokens_preserves_empty_local_ranges():
     assert metadata.token_count == 1
 
 
+def test_runtime_layout_maps_pcp_to_context_dimension():
+    config = PrefillContextParallelConfig(global_rank=3, tp_size=2, pcp_size=2, dp_size=2)
+
+    layout = config.runtime_layout()
+
+    assert (layout.dp_size, layout.context_size, layout.tp_size, layout.global_rank) == (2, 2, 2, 3)
+
+
+def test_create_runtime_groups_delegates_to_shared_owner(monkeypatch):
+    config = PrefillContextParallelConfig(pcp_size=2)
+    captured = []
+    monkeypatch.setattr(
+        "lightllm.common.context_parallel_runtime.create_context_parallel_groups",
+        lambda layout, backend: captured.append((layout, backend)) or "groups",
+    )
+
+    assert config.create_runtime_groups(backend="gloo") == "groups"
+    assert captured[0][0] == config.runtime_layout()
+    assert captured[0][1] == "gloo"
+
+
 def test_prefill_token_metadata_rejects_range_outside_prompt():
     with pytest.raises(ValueError, match="exceeds token_count"):
         PrefillTokenMetadata(2, PrefillTokenRange(1, 3), pcp_rank=0, pcp_size=1)

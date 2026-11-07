@@ -8,7 +8,7 @@ from typing import Tuple, Any, Optional, List
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
+from lightllm.utils.dist_utils import get_global_dp_rank, get_tp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
@@ -66,6 +66,7 @@ class InferStateInfo:
         self.is_cuda_graph_capture: bool = False  # 标记是否用于 decode CUDA Graph 捕获
         self.is_cuda_graph_replay: bool = False  # 标记是否为 decode CUDA Graph 回放准备输入
         self.dist_group: CustomProcessGroup = None
+        self.context_parallel = None
 
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
         # 在一些细节场景下需要有该信息区分一些资源的申请和管理。
@@ -234,7 +235,7 @@ class InferStateInfo:
                 dp_handle_lens[i] += 1
         else:
             # tpsp mix mode 需要让每个dp 的处理长度是 tp_world_size 的整数倍
-            tp_world_size = get_dp_world_size()
+            tp_world_size = get_tp_world_size()
             assert all(e % tp_world_size == 0 for e in dp_input_lens)
             _dp_input_lens = [e // tp_world_size for e in dp_input_lens]
             _sum_input_len = sum(_dp_input_lens)

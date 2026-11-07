@@ -2,13 +2,13 @@ import torch
 import numpy as np
 import threading
 from lightllm.common.basemodel.layer_weights.meta_weights import BaseWeight
-from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_tp, get_tp_world_size
 
 
 class BaseLayerWeight:
     def __init__(self):
-        self.tp_rank_ = get_current_rank_in_dp()
-        self.tp_world_size_ = get_dp_world_size()
+        self.tp_rank_ = get_current_rank_in_tp()
+        self.tp_world_size_ = get_tp_world_size()
         self.lock = threading.Lock()
 
     def load_hf_weights(self, weights):

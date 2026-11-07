@@ -4,7 +4,7 @@ from typing import Dict, Optional
 from .base_weight import BaseWeightTpl
 from .platform_op import PlatformAwareOp
 from lightllm.common.basemodel.triton_kernel.embedding import embedding as embedding_kernel
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
+from lightllm.utils.dist_utils import get_tp_world_size, get_current_rank_in_tp
 
 
 class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):

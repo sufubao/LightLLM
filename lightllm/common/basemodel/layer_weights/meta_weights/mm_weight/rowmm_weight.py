@@ -4,7 +4,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from typing import Dict, List, Optional, Union
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_tp, get_tp_world_size
 from .mm_slicer import BMMRowSliceMixin, get_row_slice_mixin
 
 
@@ -20,8 +20,8 @@ class ROWMMWeight(MMWeightTpl):
         tp_rank: int = None,
         tp_world_size: int = None,
     ) -> None:
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_tp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_tp_world_size()
         out_dims = [self._get_tp_dim(out_dim) for out_dim in out_dims]
         super().__init__(
             in_dim=in_dim,
@@ -51,8 +51,8 @@ class KVROWNMMWeight(MMWeightTpl):
         tp_rank: int = None,
         tp_world_size: int = None,
     ) -> None:
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_tp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_tp_world_size()
         self.repeat_times = self._get_repeat_times(kv_head_num)
         kv_hidden_size = self._get_tp_padded_head_num(kv_head_num, self.repeat_times) * head_dim
         out_dims = [kv_hidden_size, kv_hidden_size]
@@ -102,8 +102,8 @@ class QKVROWNMMWeight(MMWeightTpl):
         tp_rank: int = None,
         tp_world_size: int = None,
     ) -> None:
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_tp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_tp_world_size()
         self.q_repeat_times = 1
         self.kv_repeat_times = self._get_kv_repeat_times(kv_head_num)
         assert q_head_num % self.tp_world_size_ == 0, (
@@ -176,8 +176,8 @@ class ROWBMMWeight(BMMWeightTpl):
         tp_rank: int = None,
         tp_world_size: int = None,
     ) -> None:
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_tp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_tp_world_size()
         assert (
             dim0 % self.tp_world_size_ == 0
         ), f"dim0 of bmm must be divisible by tp_world_size_, but found: {dim0} % {self.tp_world_size_}"

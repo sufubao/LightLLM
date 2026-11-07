@@ -1,7 +1,7 @@
 import torch
 from typing import Dict, Optional, Tuple
 from .base_weight import BaseWeightTpl
-from lightllm.utils.dist_utils import get_dp_world_size
+from lightllm.utils.dist_utils import get_tp_world_size
 
 
 class ParameterWeight(BaseWeightTpl):
@@ -65,7 +65,7 @@ class TpParameterWeight(ParameterWeight):
             0 <= dim < len(weight_shape)
         ), f"split dimension: {dim} must be less than the length of weight_shape: {weight_shape}"
         n_embed = weight_shape[dim]
-        tp_world_size = get_dp_world_size()
+        tp_world_size = get_tp_world_size()
         assert (
             n_embed % tp_world_size == 0
         ), f"weight_shape[{dim}]={weight_shape[dim]} must be divisible by tp_world_size_: {tp_world_size}"

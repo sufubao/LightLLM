@@ -32,7 +32,7 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
-    get_dp_world_size,
+    get_tp_world_size,
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
@@ -56,7 +56,7 @@ class CustomProcessGroup:
         self.runtime = runtime
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
-        self.dp_world_size = get_dp_world_size()
+        self.dp_world_size = get_tp_world_size()
         backend = runtime.distributed_backend if runtime is not None else "nccl"
         self.device_group = create_new_group_for_current_dp(backend)
         if get_env_start_args().enable_dp_prefill_balance:

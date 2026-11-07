@@ -3,7 +3,7 @@ import torch.distributed as dist
 
 from typing import Tuple
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_tp, get_tp_world_size
 from lightllm.models.vit.triton_kernel.gelu_vit import gelu_fwd
 from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
@@ -14,8 +14,8 @@ class ViTTransformerLayerInfer:
     """ """
 
     def __init__(self, layer_num, network_config):
-        self.tp_rank_ = get_current_rank_in_dp()
-        self.tp_world_size_ = get_dp_world_size()
+        self.tp_rank_ = get_current_rank_in_tp()
+        self.tp_world_size_ = get_tp_world_size()
         self.eps_ = network_config["layer_norm_eps"]
         self.head_num = network_config["num_attention_heads"]
         self.tp_padding_head_num = network_config["padding_head_num"] // self.tp_world_size_

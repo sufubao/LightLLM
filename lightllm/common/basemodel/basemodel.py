@@ -30,7 +30,7 @@ from lightllm.common.execution.runner.batch import (
 )
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.log_utils import init_logger, log_info_on_leader, progress_enabled
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
+from lightllm.utils.dist_utils import get_tp_world_size, get_current_rank_in_tp
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_llm_data_type,
@@ -176,6 +176,8 @@ class TpPartBaseModel:
         return self._batch_runner
 
     def _initialize_batch_state(self, state):
+        if self.context_parallel is not None:
+            self.context_parallel.attach(state)
         self.batch_metadata(state)
 
     @property
@@ -220,6 +222,7 @@ class TpPartBaseModel:
         self.execution_device = kvargs.get("execution_device")
         self.execution_communication = kvargs.get("execution_communication", ())
         self.execution_formats = kvargs.get("execution_formats")
+        self.context_parallel_groups = kvargs.get("context_parallel_groups")
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
@@ -237,8 +240,8 @@ class TpPartBaseModel:
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.expert_dtype = kvargs.get("expert_dtype", None)
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
-        self.tp_world_size_ = get_dp_world_size()
-        self.tp_rank_ = get_current_rank_in_dp()
+        self.tp_world_size_ = get_tp_world_size()
+        self.tp_rank_ = get_current_rank_in_tp()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
         self.graph_max_batch_size = self._align_decode_batch_size(self.graph_max_batch_size)
 
@@ -259,6 +262,16 @@ class TpPartBaseModel:
             recipe.execution_device = self.execution_device
         self._init_some_value()
         self._init_custom()
+        self.context_parallel = None
+        if self.context_parallel_groups is not None:
+            from lightllm.common.context_parallel.execution import ContextParallelExecutor
+
+            self.context_parallel = ContextParallelExecutor(
+                self.context_parallel_groups,
+                pcp_size=self.args.pcp_size,
+                dcp_size=self.args.dcp_size,
+                block_size=self.args.page_size,
+            )
         self.load_weights(self.weight_dict)
         # The backend calls each model's runtime stages after all weights are loaded.
         self.graph = None
@@ -702,6 +715,9 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
+        context_parallel = getattr(infer_state, "context_parallel", None)
+        if context_parallel is not None:
+            context_parallel.prepare_prefill(infer_state)
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -731,6 +747,8 @@ class TpPartBaseModel:
         input_embs = output_tensors[0]
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        if context_parallel is not None:
+            last_input_embs = context_parallel.finish_prefill(infer_state, last_input_embs)
         if infer_state.need_dp_prefill_balance:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 

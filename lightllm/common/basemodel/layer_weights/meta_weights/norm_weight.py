@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Dict
 from .base_weight import BaseWeightTpl
-from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_tp, get_tp_world_size
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
@@ -213,8 +213,8 @@ class TpRMSNormWeight(RMSNormWeight):
         dim = padded_head_num * head_dim
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
         # 重新初始化 tp rank 的信息， load hf weights 的时候会用到
-        self.tp_rank_ = get_current_rank_in_dp()
-        self.tp_world_size_ = get_dp_world_size()
+        self.tp_rank_ = get_current_rank_in_tp()
+        self.tp_world_size_ = get_tp_world_size()
         self.repeat_times_ = 1
 
     def _get_tp_padded_head_num(self, head_num: int):
@@ -226,7 +226,7 @@ class TpRMSNormWeight(RMSNormWeight):
         3. If head_num is less than tp_world_size_, assert tp_world_size_ is
            divisible by head_num, and return head_num.
         """
-        self.tp_world_size_ = get_dp_world_size()
+        self.tp_world_size_ = get_tp_world_size()
         if head_num % self.tp_world_size_ == 0:
             return head_num // self.tp_world_size_
 

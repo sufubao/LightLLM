@@ -3,7 +3,7 @@ import weakref
 import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
+from lightllm.utils.dist_utils import get_tp_world_size, get_current_device_id
 from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
@@ -18,7 +18,7 @@ class FlashInferAttBackend(BaseAttBackend):
         set_flashinfer_envs()
         super().__init__(model=model)
         self._init_infer_page_size()
-        tp_world_size = get_dp_world_size()
+        tp_world_size = get_tp_world_size()
         self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
         self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
         head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]

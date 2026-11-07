@@ -42,3 +42,32 @@ def test_owner_wraps_at_virtual_block_boundary():
 def test_invalid_dcp_layout_is_rejected(kwargs):
     with pytest.raises(ValueError):
         DecodeContextParallelConfig(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["global_rank", "tp_size", "dcp_size", "dp_size", "block_size", "interleave_size"])
+@pytest.mark.parametrize("value", [True, 1.5, "1"])
+def test_non_integer_dcp_layout_values_are_rejected(field, value):
+    with pytest.raises(ValueError, match=f"{field} must be an integer"):
+        DecodeContextParallelConfig(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("method", "value"),
+    [
+        ("owner", True),
+        ("owner", 1.5),
+        ("local_slot", "1"),
+        ("local_token_count", True),
+        ("local_token_count", 1.5),
+    ],
+)
+def test_non_integer_dcp_position_values_are_rejected(method, value):
+    config = DecodeContextParallelConfig(tp_size=2, dcp_size=2)
+    with pytest.raises(ValueError, match="must be an integer"):
+        getattr(config, method)(value)
+
+
+def test_slot_mapping_rejects_non_integer_positions():
+    config = DecodeContextParallelConfig(tp_size=2, dcp_size=2)
+    with pytest.raises(ValueError, match="must be an integer"):
+        config.slot_mapping((0, "1"))

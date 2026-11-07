@@ -5,7 +5,24 @@ device-independent ownership rule used by paged KV allocators; collective
 attention and process-group construction remain outside this pure contract.
 """
 
+import operator
 from dataclasses import dataclass
+from typing import Any
+
+
+def _validated_int(value: Any, name: str, *, minimum: int) -> int:
+    """Return an integer argument or raise a useful topology error."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, got bool")
+    try:
+        value = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be an integer, got {type(value).__name__}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
+
 
 PAD_SLOT = -1
 
@@ -22,12 +39,17 @@ class DecodeContextParallelConfig:
     interleave_size: int = 1
 
     def __post_init__(self) -> None:
-        if self.tp_size <= 0 or self.dcp_size <= 0 or self.dp_size <= 0:
-            raise ValueError("parallel sizes must be positive")
+        for name, minimum in (
+            ("global_rank", 0),
+            ("tp_size", 1),
+            ("dcp_size", 1),
+            ("dp_size", 1),
+            ("block_size", 1),
+            ("interleave_size", 1),
+        ):
+            object.__setattr__(self, name, _validated_int(getattr(self, name), name, minimum=minimum))
         if self.tp_size % self.dcp_size:
             raise ValueError("dcp_size must divide tp_size")
-        if self.block_size <= 0 or self.interleave_size <= 0:
-            raise ValueError("block_size and interleave_size must be positive")
         if self.block_size % self.interleave_size:
             raise ValueError("block_size must be divisible by interleave_size")
         world_size = self.dp_size * self.tp_size
@@ -60,15 +82,16 @@ class DecodeContextParallelConfig:
     def owner(self, token_position: int) -> int:
         """Return the DCP rank that stores one sequence position."""
 
-        if token_position < 0:
-            raise ValueError("token_position must be nonnegative")
+        token_position = _validated_int(token_position, "token_position", minimum=0)
         offset = token_position % self.virtual_block_size
         return (offset // self.interleave_size) % self.dcp_size
 
     def local_slot(self, token_position: int) -> int:
         """Return the compact local slot, or ``PAD_SLOT`` when not owned."""
 
-        if self.owner(token_position) != self.dcp_rank:
+        token_position = _validated_int(token_position, "token_position", minimum=0)
+        offset = token_position % self.virtual_block_size
+        if (offset // self.interleave_size) % self.dcp_size != self.dcp_rank:
             return PAD_SLOT
         virtual_block, offset = divmod(token_position, self.virtual_block_size)
         interleave_index, intra_interleave = divmod(offset, self.interleave_size)
@@ -83,6 +106,5 @@ class DecodeContextParallelConfig:
     def local_token_count(self, sequence_length: int) -> int:
         """Return the number of KV entries owned below ``sequence_length``."""
 
-        if sequence_length < 0:
-            raise ValueError("sequence_length must be nonnegative")
+        sequence_length = _validated_int(sequence_length, "sequence_length", minimum=0)
         return sum(self.owner(position) == self.dcp_rank for position in range(sequence_length))

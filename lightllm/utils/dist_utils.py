@@ -140,7 +140,7 @@ def init_distributed_env(kvargs, runtime=None):
     set_dp_world_size(get_global_world_size() // get_dp_size())
     set_global_dp_rank(get_global_rank() // get_dp_world_size())
     set_current_rank_in_dp(get_global_rank() % get_dp_world_size())
-    set_log_context(global_rank=get_global_rank(), tp_rank=get_current_rank_in_dp(), dp_rank=get_global_dp_rank())
+    set_log_context(global_rank=get_global_rank(), tp_rank=get_current_rank_in_tp(), dp_rank=get_global_dp_rank())
     set_current_rank_in_node(get_global_rank() % node_world_size)
     set_node_world_size(node_world_size)
 
@@ -206,6 +206,51 @@ def get_dp_world_size():
     return int(get_environ("LIGHTLLM_DP_WORLD_SIZE"))
 
 
+def get_context_parallel_size() -> int:
+    """Return the context degree for the current model phase.
+
+    The launcher keeps ``LIGHTLLM_DP_WORLD_SIZE`` as the historical DP-local
+    world size (context × TP).  Context-parallel execution uses a TP subgroup
+    inside that world, so callers that split model weights or run TP collectives
+    must use this helper instead of treating the whole DP-local world as TP.
+    """
+
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    try:
+        args = get_env_start_args()
+    except (KeyError, RuntimeError):
+        # Auxiliary vision/audio workers do not receive the LLM StartArgs.
+        return 1
+    pcp_size = int(getattr(args, "pcp_size", 1))
+    dcp_size = int(getattr(args, "dcp_size", 1))
+    if pcp_size > 1 and dcp_size > 1 and pcp_size != dcp_size:
+        raise RuntimeError("pcp_size and dcp_size must match when both are enabled")
+    return max(pcp_size, dcp_size)
+
+
+def get_tp_world_size() -> int:
+    """Return the number of ranks that own distinct TP weight shards."""
+
+    dp_world_size = get_dp_world_size()
+    context_size = get_context_parallel_size()
+    if dp_world_size % context_size:
+        raise RuntimeError(f"DP-local world size {dp_world_size} must be divisible by context size {context_size}")
+    return dp_world_size // context_size
+
+
+def get_context_rank() -> int:
+    """Return the rank within the current context-parallel subgroup."""
+
+    return (get_global_rank() % get_dp_world_size()) // get_tp_world_size()
+
+
+def get_current_rank_in_tp() -> int:
+    """Return the rank used to shard model weights and TP tensors."""
+
+    return get_global_rank() % get_tp_world_size()
+
+
 def set_global_dp_rank(rank: int):
     set_environ("LIGHTLLM_GLOBAL_DP_RANK", rank)
 
@@ -263,12 +308,22 @@ def get_node_world_size():
 
 
 def create_new_group_for_current_dp(backend):
+    """Create the current TP subgroup, retaining the legacy function name."""
+
     ans_group = None
+    context_size = get_context_parallel_size()
+    tp_world_size = get_tp_world_size()
     for iter_dp_rank in range(get_dp_size()):
-        ranks = list(i + iter_dp_rank * get_dp_world_size() for i in range(get_dp_world_size()))
-        device_group = dist.new_group(ranks, backend=backend)
-        if get_global_dp_rank() == iter_dp_rank:
-            ans_group = device_group
+        for context_rank in range(context_size):
+            ranks = [
+                iter_dp_rank * get_dp_world_size() + context_rank * tp_world_size + tp_rank
+                for tp_rank in range(tp_world_size)
+            ]
+            device_group = dist.new_group(ranks, backend=backend)
+            if get_global_dp_rank() == iter_dp_rank and get_context_rank() == context_rank:
+                ans_group = device_group
+    if ans_group is None:
+        raise RuntimeError("current rank did not belong to a TP subgroup")
     return ans_group
 
 

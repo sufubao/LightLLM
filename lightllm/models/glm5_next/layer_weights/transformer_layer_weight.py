@@ -24,7 +24,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import (
     MMWeightTpl,
 )
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_tp, get_tp_world_size
 from lightllm.utils.envs_utils import get_env_start_args
 from .pre_and_post_layer_weight import add_language_model_aliases
 
@@ -43,8 +43,8 @@ class Glm5NextMergedKdaProjection(MMWeightTpl):
         tp_rank: int | None = None,
         tp_world_size: int | None = None,
     ):
-        tp_rank = get_current_rank_in_dp() if tp_rank is None else tp_rank
-        tp_world_size = get_dp_world_size() if tp_world_size is None else tp_world_size
+        tp_rank = get_current_rank_in_tp() if tp_rank is None else tp_rank
+        tp_world_size = get_tp_world_size() if tp_world_size is None else tp_world_size
         assert projection % tp_world_size == 0
         assert head_count % tp_world_size == 0
         super().__init__(

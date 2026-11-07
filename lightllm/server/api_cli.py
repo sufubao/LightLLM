@@ -341,6 +341,22 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         do not set it and keep the default value as 1.""",
     )
     parser.add_argument(
+        "--pcp_size",
+        "--prefill_context_parallel_size",
+        dest="pcp_size",
+        type=int,
+        default=1,
+        help="prefill context-parallel degree; ranks are split as DP x PCP x TP",
+    )
+    parser.add_argument(
+        "--dcp_size",
+        "--decode_context_parallel_size",
+        dest="dcp_size",
+        type=int,
+        default=1,
+        help="decode context-parallel degree; ranks are split as DP x DCP x TP",
+    )
+    parser.add_argument(
         "--dp_balancer",
         type=str,
         default="bs_balancer",

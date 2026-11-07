@@ -127,6 +127,22 @@ class ModeBackend:
         g_pin_mem_manager.runtime = self.execution_device
         init_distributed_env(kvargs, runtime=self.execution_device)
         self.init_rank_infos()
+        context_parallel_groups = None
+        context_size = max(self.args.pcp_size, self.args.dcp_size)
+        if context_size > 1:
+            from lightllm.common.context_parallel_runtime import ContextParallelLayout, create_context_parallel_groups
+
+            tp_size = self.world_size // (self.dp_size * context_size)
+            layout = ContextParallelLayout(
+                global_rank=get_global_rank(),
+                dp_size=self.dp_size,
+                context_size=context_size,
+                tp_size=tp_size,
+                order="context_major",
+            )
+            context_parallel_groups = create_context_parallel_groups(
+                layout, backend=self.execution_device.distributed_backend
+            )
         self.engine_counters = (
             EngineCounters(self.dp_size_in_node, self.dp_rank_in_node) if self.is_master_in_dp else None
         )
@@ -169,6 +185,7 @@ class ModeBackend:
             "execution_device": self.execution_device,
             "execution_formats": self.execution_context.formats,
             "execution_communication": self.execution_context.communication,
+            "context_parallel_groups": context_parallel_groups,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -454,6 +471,7 @@ class ModeBackend:
                 "execution_device": main_kvargs.get("execution_device"),
                 "execution_formats": main_kvargs.get("execution_formats"),
                 "execution_communication": main_kvargs.get("execution_communication"),
+                "context_parallel_groups": main_kvargs.get("context_parallel_groups"),
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 

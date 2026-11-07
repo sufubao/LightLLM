@@ -18,7 +18,7 @@ from typing import List, Union
 from io import BytesIO
 from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
-from lightllm.utils.dist_utils import get_dp_world_size
+from lightllm.utils.dist_utils import get_tp_world_size
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
@@ -36,7 +36,7 @@ class VisionTransformer:
     post_layer_infer_class = ViTPostLayerInfer
 
     def __init__(self, kvargs):
-        self.tp_world_size_ = get_dp_world_size()
+        self.tp_world_size_ = get_tp_world_size()
         self.weight_dir_ = kvargs["weight_dir"]
         self.load_way = kvargs.get("load_way", "HF")
         self.weight_dict = kvargs.get("weight_dict", None)

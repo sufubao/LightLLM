@@ -2,8 +2,8 @@ import torch
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple
 from lightllm.utils.dist_utils import (
-    get_dp_world_size,
-    get_current_rank_in_dp,
+    get_tp_world_size,
+    get_current_rank_in_tp,
     get_current_device_id,
     get_current_device,
 )
@@ -30,8 +30,8 @@ class BaseWeight(ABC):
 class BaseWeightTpl(BaseWeight):
     def __init__(self, tp_rank: int = None, tp_world_size: int = None, data_type: torch.dtype = None):
         super().__init__()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_tp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_tp()
         self.device_id_ = get_current_device_id()
         self.device_ = get_current_device(self.device_id_)
         self.data_type_ = data_type

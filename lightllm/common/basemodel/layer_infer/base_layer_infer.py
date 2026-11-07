@@ -3,7 +3,7 @@ import torch.distributed as dist
 from typing import Dict, Iterable, Literal, Tuple, Union, List
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_tp, get_tp_world_size
 from .cache_tensor_manager import g_cache_manager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor, all_reduce
@@ -12,8 +12,8 @@ from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
 
 class BaseLayerInfer:
     def __init__(self) -> None:
-        self.tp_rank_ = get_current_rank_in_dp()
-        self.tp_world_size_ = get_dp_world_size()
+        self.tp_rank_ = get_current_rank_in_tp()
+        self.tp_world_size_ = get_tp_world_size()
 
     def context_forward(self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BaseLayerWeight):
         raise Exception("need to impl")

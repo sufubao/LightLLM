@@ -1,6 +1,6 @@
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightTpl
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import get_row_slice_mixin
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_tp, get_tp_world_size
 
 
 class QKVGatedROWNMMWeight(MMWeightTpl):
@@ -17,8 +17,8 @@ class QKVGatedROWNMMWeight(MMWeightTpl):
         tp_rank=None,
         tp_world_size=None,
     ):
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_tp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_tp_world_size()
         self.q_repeat_times = 1
         self.kv_repeat_times = self._get_kv_repeat_times(kv_head_num)
         assert (

@@ -1,15 +1,15 @@
 import torch
 from typing import Optional, Tuple
 from abc import ABC, abstractmethod
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_tp, get_tp_world_size
 
 
 class SliceMixinBase(ABC):
     """切片操作的Mixin基类"""
 
     def __init__(self, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1):
-        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_tp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_tp_world_size()
         # this param is used to slice the weight when tp_world_size_ is divisible by the kv_head_num
         # for example, if tp_world_size_ is 8 and kv_head_num is 4, then repeat_times_ is 2
         self.repeat_times_ = repeat_times
@@ -104,7 +104,7 @@ class ColSliceMixin(SliceMixinTpl):
         self._assert_weight_ndim(weight)
         assert (
             weight.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {weight.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
+        ), f"tp slice error {weight.shape[-1] * self.repeat_times_} % {self.tp_world_size_}"
         start, end = self._get_slice_start_end(weight.shape[-1])
         return weight[..., start:end]
 
@@ -120,7 +120,7 @@ class QuantizedColSliceMixin(ColSliceMixin):
         self._assert_weight_ndim(weight_scale)
         assert (
             weight_scale.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {weight_scale.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
+        ), f"tp slice error {weight_scale.shape[-1] * self.repeat_times_} % {self.tp_world_size_}"
         start, end = self._get_slice_start_end(weight_scale.shape[-1])
         return weight_scale[..., start:end]
 
@@ -128,7 +128,7 @@ class QuantizedColSliceMixin(ColSliceMixin):
         self._assert_weight_ndim(weight_zero_point)
         assert (
             weight_zero_point.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {weight_zero_point.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
+        ), f"tp slice error {weight_zero_point.shape[-1] * self.repeat_times_} % {self.tp_world_size_}"
         start, end = self._get_slice_start_end(weight_zero_point.shape[-1])
         return weight_zero_point[..., start:end]
 
@@ -141,7 +141,7 @@ class AwqQuantizedRowSliceMixin(QuantizedColSliceMixin):
     def _slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         assert (
             bias.shape[0] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {bias.shape[0] * self.repeat_times_ } % {self.tp_world_size_}"
+        ), f"tp slice error {bias.shape[0] * self.repeat_times_} % {self.tp_world_size_}"
         start, end = self._get_slice_start_end(bias.shape[0])
         return bias[start:end]
 

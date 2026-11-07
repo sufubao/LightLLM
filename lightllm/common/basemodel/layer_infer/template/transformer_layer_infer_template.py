@@ -64,9 +64,13 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def context_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         q, cache_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_wrapper_run(
-            q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
-        )
+        context_parallel = getattr(infer_state, "context_parallel", None)
+        if context_parallel is not None and context_parallel.executor.pcp_size > 1:
+            o = context_parallel.prefill_attention(self, q, cache_kv, infer_state)
+        else:
+            o = self._context_attention_wrapper_run(
+                q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
+            )
         q = None
         o = self._get_o(o, infer_state, layer_weight)
 
@@ -88,7 +92,11 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def token_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         q, cache_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._token_attention_kernel(q, infer_state, layer_weight)
+        context_parallel = getattr(infer_state, "context_parallel", None)
+        if context_parallel is not None and context_parallel.executor.dcp_size > 1:
+            o = context_parallel.decode_attention(self, q, infer_state)
+        else:
+            o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
 

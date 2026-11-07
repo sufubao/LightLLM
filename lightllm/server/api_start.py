@@ -33,6 +33,7 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
     get_default_disable_chunked_mm_input,
+    get_model_type,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -149,6 +150,7 @@ def _launch_subprocesses(args: StartArgs):
 
     # mode setting check.
     is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    model_type = get_model_type(args.model_dir)
     if is_hybrid_model:
         # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
         assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
@@ -181,6 +183,45 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
+
+    if args.pcp_size < 1 or args.dcp_size < 1:
+        raise ValueError("--pcp_size and --dcp_size must be at least 1")
+    if args.pcp_size > 1 and args.dcp_size > 1 and args.pcp_size != args.dcp_size:
+        raise ValueError("--pcp_size and --dcp_size must match when both are enabled")
+    context_size = max(args.pcp_size, args.dcp_size)
+    if args.tp % (args.dp * context_size) != 0:
+        raise ValueError(f"--tp ({args.tp}) must be divisible by --dp * context size ({args.dp * context_size})")
+    if context_size > 1:
+        if is_hybrid_model or model_type in {
+            "deepseek2",
+            "deepseek_v2",
+            "deepseek3",
+            "deepseek_v3",
+            "qwen3_dflash",
+            "qwen3_dflash2",
+            "qwen3_dspark",
+        }:
+            raise ValueError("PCP/DCP currently supports standard dense GQA attention only")
+        if args.enable_tpsp_mix_mode:
+            raise ValueError("PCP/DCP cannot be combined with tensor-sequence-parallel mix mode yet")
+        if args.enable_dp_prefill_balance:
+            raise ValueError("PCP/DCP cannot be combined with DP prefill balance yet")
+        if args.mtp_mode is not None:
+            raise ValueError("PCP/DCP does not support MTP yet")
+        if args.enable_prefill_cudagraph or not args.disable_cudagraph:
+            raise ValueError("PCP/DCP requires --disable_cudagraph until context-aware graph capture is implemented")
+        if args.enable_prefill_decode_mixed:
+            raise ValueError("PCP/DCP does not support mixed prefill/decode batches")
+        if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
+            raise ValueError("PCP/DCP does not support microbatch overlap yet")
+        if args.enable_ep_moe:
+            raise ValueError("PCP/DCP does not support expert parallel MoE yet")
+        if args.enable_prompt_logprobs:
+            raise ValueError("PCP/DCP does not support prompt logprobs yet")
+        if args.enable_multimodal:
+            raise ValueError("PCP/DCP currently supports text-only batches")
+        if args.llm_kv_type != "None":
+            raise ValueError("PCP/DCP currently requires plain floating-point KV storage")
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}

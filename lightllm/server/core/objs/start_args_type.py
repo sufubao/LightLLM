@@ -95,6 +95,10 @@ class StartArgs:
     running_max_req_size: int = field(default=256)
     tp: int = field(default=1)
     dp: int = field(default=1)
+    # Context-parallel degrees.  The global process count remains ``tp``;
+    # each DP replica is laid out as context x tensor-parallel ranks.
+    pcp_size: int = field(default=1)
+    dcp_size: int = field(default=1)
     nnodes: int = field(default=1)
     node_rank: int = field(default=0)
     # If None, will be automatically derived from model config in `lightllm.server.api_start`.

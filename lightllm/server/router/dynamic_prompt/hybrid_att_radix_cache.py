@@ -26,6 +26,9 @@ class HybridAttPagedTreeNode:
 
         self.ref_counter = 0
         self.time_id = time_gen.generate_time_id()
+        # Traversing a node refreshes tree recency; state recency changes only
+        # when its bounded-attention snapshot is actually restored.
+        self.state_time_id = self.time_id
 
         self.node_value_len = 0
         self.node_prefix_total_len = 0
@@ -54,7 +57,7 @@ class HybridAttPagedTreeNode:
         assert self.is_big_page_node() is False
         # 对于有 buffer_id 的节点的回收处理比较器
         assert self.small_page_buffer_idx is not None
-        return (self.time_id,)
+        return (self.state_time_id,)
 
     def add_and_return_new_child(
         self,
@@ -171,6 +174,13 @@ class HybridAttPagedRadixCache:
         if node.small_page_buffer_idx is not None:
             self._evict_tree_set_for_state_cache.add(node)
         return
+
+    def mark_small_page_state_used(self, node: HybridAttPagedTreeNode):
+        """Refresh the small-state LRU only after restoring that snapshot."""
+        assert node.small_page_buffer_idx is not None
+        self._evict_tree_set_for_state_cache.discard(node)
+        node.state_time_id = time_gen.generate_time_id()
+        self._evict_tree_set_for_state_cache.add(node)
 
     def insert(
         self,
@@ -302,6 +312,7 @@ class HybridAttPagedRadixCache:
                             # 将这个buffer id 移交给这个存在的节点。
                             self._discard_node(child)
                             child.small_page_buffer_idx = block_state_idxs[0]
+                            child.state_time_id = time_gen.generate_time_id()
                             self._add_node(child)
                         else:
                             # 节点已有 checkpoint，释放本次重复申请的槽位。
@@ -632,22 +643,32 @@ class HybridAttPagedRadixCache:
         num_evicted = 0
         while num_evicted < need_remove_tokens:
             node: HybridAttPagedTreeNode = self._evict_tree_set.pop(0)
-            self._discard_node(node)
+            while True:
+                self._discard_node(node)
 
-            assert (
-                node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
-            ), "error evict tree node state"
-            num_evicted += len(node.token_mem_index_value)
+                assert (
+                    node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
+                ), "error evict tree node state"
+                num_evicted += len(node.token_mem_index_value)
 
-            if node.is_big_page_node():
-                assert node.big_page_buffer_idx is not None
-                self._release_pages("big", [node.big_page_buffer_idx])
+                if node.is_big_page_node():
+                    assert node.big_page_buffer_idx is not None
+                    self._release_pages("big", [node.big_page_buffer_idx])
 
-            evict_callback(node.token_mem_index_value, node.small_page_buffer_idx)
-            self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
-            parent_node: HybridAttPagedTreeNode = node.parent
-            parent_node.remove_child(node)
+                evict_callback(node.token_mem_index_value, node.small_page_buffer_idx)
+                self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
+                parent_node: HybridAttPagedTreeNode = node.parent
+                parent_node.remove_child(node)
 
-            self._add_node(parent_node)
+                self._add_node(parent_node)
+                if (
+                    parent_node is self.root_node
+                    or parent_node.ref_counter != 0
+                    or not parent_node.is_leaf()
+                    or parent_node.is_big_page_node()
+                    or parent_node.small_page_buffer_idx is not None
+                ):
+                    break
+                node = parent_node
 
         return

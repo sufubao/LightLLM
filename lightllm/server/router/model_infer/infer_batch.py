@@ -708,6 +708,7 @@ class InferReq:
         assert len(block_hashs) == self.shm_req.hybrid_token_hash_list.size
         big_page_token_num = hash_page_size * self.args.linear_att_page_block_num
         big_page_is_disable = big_page_token_num > self.args.max_req_total_len
+        radix_cache = g_infer_context.radix_cache
         if enable_prompt_cache and match_tokens > 1 and len(block_hashs) > 0 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
@@ -741,13 +742,13 @@ class InferReq:
                         assert self.tail_small_page_buffer_id is None
                         # 恢复 hybrid checkpoint
                         self._restore_attention_page(share_node, "small")
+                        radix_cache.mark_small_page_state_used(share_node)
                     else:
                         # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
                         # 对应的小页对应的节点，递归找到对应最近的大叶节点进行返回,然后赋值到req.shared_node 对象上
                         shared_kv_len = share_node.node_prefix_total_len
                         cur_big_page_tokens = (shared_kv_len // big_page_token_num) * big_page_token_num
                         need_tokens = shared_kv_len - cur_big_page_tokens
-                        radix_cache = g_infer_context.radix_cache
                         if g_infer_context.get_can_alloc_token_num() > need_tokens:
                             # 有充足的token 容量时
                             assert need_tokens % self.args.page_size == 0
@@ -776,6 +777,7 @@ class InferReq:
                             )
 
                             self._restore_attention_page(share_node, "small")
+                            radix_cache.mark_small_page_state_used(share_node)
 
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
                             self.shared_kv_node = big_page_shared_node

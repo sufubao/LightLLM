@@ -71,3 +71,26 @@ def test_slot_mapping_rejects_non_integer_positions():
     config = DecodeContextParallelConfig(tp_size=2, dcp_size=2)
     with pytest.raises(ValueError, match="must be an integer"):
         config.slot_mapping((0, "1"))
+
+
+def test_runtime_layout_maps_dcp_to_context_dimension():
+    config = DecodeContextParallelConfig(global_rank=3, tp_size=4, dcp_size=2, dp_size=2)
+
+    layout = config.runtime_layout()
+
+    assert (layout.dp_size, layout.context_size, layout.tp_size, layout.global_rank) == (2, 2, 2, 3)
+    assert layout.order == "tp_major"
+    assert layout.group_ranks("context") == (2, 3)
+
+
+def test_create_runtime_groups_delegates_to_shared_owner(monkeypatch):
+    config = DecodeContextParallelConfig(tp_size=2, dcp_size=2)
+    captured = []
+    monkeypatch.setattr(
+        "lightllm.common.context_parallel_runtime.create_context_parallel_groups",
+        lambda layout, backend: captured.append((layout, backend)) or "groups",
+    )
+
+    assert config.create_runtime_groups(backend="gloo") == "groups"
+    assert captured[0][0] == config.runtime_layout()
+    assert captured[0][1] == "gloo"

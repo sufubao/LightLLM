@@ -108,3 +108,28 @@ class DecodeContextParallelConfig:
 
         sequence_length = _validated_int(sequence_length, "sequence_length", minimum=0)
         return sum(self.owner(position) == self.dcp_rank for position in range(sequence_length))
+
+    def runtime_layout(self):
+        """Return the explicit process-group layout for a DCP worker."""
+
+        from lightllm.common.context_parallel_runtime import ContextParallelLayout
+
+        return ContextParallelLayout(
+            global_rank=self.global_rank,
+            dp_size=self.dp_size,
+            context_size=self.dcp_size,
+            tp_size=self.tp_size // self.dcp_size,
+            order="tp_major",
+        )
+
+    def create_runtime_groups(self, *, backend: str | None = None):
+        """Create DCP/TP/DP groups after distributed bootstrap.
+
+        The DCP contract treats ``dcp_size`` ranks as the context dimension;
+        the remaining TP degree is the number of DCP subgroups per replica.
+        Launcher code must call this consistently on every rank.
+        """
+
+        from lightllm.common.context_parallel_runtime import create_context_parallel_groups
+
+        return create_context_parallel_groups(self.runtime_layout(), backend=backend)

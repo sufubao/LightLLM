@@ -31,5 +31,6 @@ setup(
         "apache-tvm-ffi==0.1.11",
         "xgrammar>=0.2.8,<0.3",
     ],
+    extras_require={"deepseek_v41": ["torch>=2.10", "safetensors>=0.7.0", "tilelang==0.1.9", "sympy"]},
     package_data=package_data,
 )

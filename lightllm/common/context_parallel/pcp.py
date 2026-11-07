@@ -8,7 +8,9 @@ execution remain backend responsibilities.
 
 import operator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
+
+import torch
 
 
 def _validated_int(value: Any, name: str, *, minimum: int) -> int:
@@ -23,6 +25,56 @@ def _validated_int(value: Any, name: str, *, minimum: int) -> int:
     if value < minimum:
         raise ValueError(f"{name} must be >= {minimum}, got {value}")
     return value
+
+
+def assemble_prefill_slices(
+    slices: Sequence[torch.Tensor], ranges: Sequence["PrefillTokenRange"], token_count: int
+) -> torch.Tensor:
+    """Assemble rank-local prefill outputs in global token order.
+
+    The caller owns the collective that produced ``slices``.  This function
+    only validates the global ranges and performs the deterministic local
+    assembly; it therefore remains useful in CPU tests and does not imply
+    distributed runtime support.
+    """
+
+    token_count = _validated_int(token_count, "token_count", minimum=0)
+    if len(slices) != len(ranges) or not slices:
+        raise ValueError("slices and ranges must contain the same nonzero number of entries")
+
+    cursor = 0
+    trailing_shape = None
+    reference_dtype = None
+    reference_device = None
+    for index, (local, token_range) in enumerate(zip(slices, ranges)):
+        if not isinstance(token_range, PrefillTokenRange):
+            raise ValueError(f"ranges[{index}] must be a PrefillTokenRange")
+        if token_range.start != cursor:
+            raise ValueError(
+                f"ranges must be ordered and contiguous; ranges[{index}] starts at {token_range.start}, "
+                f"expected {cursor}"
+            )
+        if not isinstance(local, torch.Tensor) or local.ndim == 0:
+            raise ValueError(f"slices[{index}] must be a tensor with a token dimension")
+        if local.shape[0] != token_range.length:
+            raise ValueError(
+                f"slices[{index}] has {local.shape[0]} tokens, expected {token_range.length} for its range"
+            )
+        if trailing_shape is None:
+            trailing_shape = local.shape[1:]
+            reference_dtype = local.dtype
+            reference_device = local.device
+        elif local.shape[1:] != trailing_shape:
+            raise ValueError(
+                f"slices[{index}] trailing shape {tuple(local.shape[1:])} does not match {tuple(trailing_shape)}"
+            )
+        if local.dtype != reference_dtype or local.device != reference_device:
+            raise ValueError("all slices must use the same dtype and device")
+        cursor = token_range.end
+
+    if cursor != token_count:
+        raise ValueError(f"ranges cover {cursor} tokens, expected token_count {token_count}")
+    return torch.cat(tuple(slices), dim=0)
 
 
 @dataclass(frozen=True)

@@ -1,9 +1,11 @@
 import pytest
+import torch
 
 from lightllm.common.context_parallel.pcp import (
     PrefillContextParallelConfig,
     PrefillTokenMetadata,
     PrefillTokenRange,
+    assemble_prefill_slices,
     rank_layout,
 )
 
@@ -63,6 +65,54 @@ def test_slice_tokens_preserves_empty_local_ranges():
     assert local_tokens == []
     assert metadata.global_start == metadata.global_end == 1
     assert metadata.token_count == 1
+
+
+def test_assemble_prefill_slices_restores_global_token_order():
+    config = PrefillContextParallelConfig(pcp_size=3)
+    ranges = config.token_ranges(5)
+    slices = (torch.tensor([[0], [1]]), torch.tensor([[2], [3]]), torch.tensor([[4]]))
+
+    assembled = assemble_prefill_slices(slices, ranges, token_count=5)
+
+    torch.testing.assert_close(assembled, torch.arange(5).reshape(5, 1))
+
+
+def test_assemble_prefill_slices_accepts_empty_local_shards():
+    config = PrefillContextParallelConfig(pcp_size=3)
+    ranges = config.token_ranges(1)
+    slices = (torch.tensor([[10.0]]), torch.empty((0, 1)), torch.empty((0, 1)))
+
+    assembled = assemble_prefill_slices(slices, ranges, token_count=1)
+
+    torch.testing.assert_close(assembled, torch.tensor([[10.0]]))
+
+
+@pytest.mark.parametrize(
+    ("slices", "ranges", "token_count", "message"),
+    [
+        (
+            (torch.ones(1, 2), torch.ones(1, 2)),
+            (PrefillTokenRange(1, 2), PrefillTokenRange(0, 1)),
+            2,
+            "ordered and contiguous",
+        ),
+        (
+            (torch.ones(1, 2),),
+            (PrefillTokenRange(0, 1),),
+            2,
+            "cover",
+        ),
+        (
+            (torch.ones(1, 2), torch.ones(1, 3)),
+            (PrefillTokenRange(0, 1), PrefillTokenRange(1, 2)),
+            2,
+            "trailing shape",
+        ),
+    ],
+)
+def test_assemble_prefill_slices_rejects_invalid_ranges(slices, ranges, token_count, message):
+    with pytest.raises(ValueError, match=message):
+        assemble_prefill_slices(slices, ranges, token_count)
 
 
 def test_runtime_layout_maps_pcp_to_context_dimension():

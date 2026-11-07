@@ -9,6 +9,8 @@ import operator
 from dataclasses import dataclass
 from typing import Any
 
+import torch
+
 
 def _validated_int(value: Any, name: str, *, minimum: int) -> int:
     """Return an integer argument or raise a useful topology error."""
@@ -25,6 +27,54 @@ def _validated_int(value: Any, name: str, *, minimum: int) -> int:
 
 
 PAD_SLOT = -1
+
+
+def merge_attention_partials(
+    partial_output: torch.Tensor, partial_lse: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge normalized attention outputs from DCP KV shards.
+
+    ``partial_output`` has shape ``[shard, ..., hidden]`` and ``partial_lse``
+    has shape ``[shard, ...]``.  Each shard output is assumed to be normalized
+    by its own attention denominator; the log-sum-exp values provide the stable
+    weights needed to reconstruct the result over the complete KV history.
+    A shard with ``-inf`` LSE is empty and contributes no output.  If every
+    shard is empty, the result is zero with an ``-inf`` LSE.
+
+    This is a device-independent math contract.  It does not allocate KV
+    pages, perform collectives, or select an attention backend.
+    """
+
+    if partial_output.ndim < 2:
+        raise ValueError("partial_output must have shape [shard, ..., hidden]")
+    if partial_lse.ndim != partial_output.ndim - 1:
+        raise ValueError("partial_lse must have one fewer dimension than partial_output")
+    if partial_output.shape[0] == 0:
+        raise ValueError("partial_output must contain at least one shard")
+    if partial_output.shape[0] != partial_lse.shape[0]:
+        raise ValueError("partial_output and partial_lse must have the same shard dimension")
+    if partial_output.shape[1:-1] != partial_lse.shape[1:]:
+        raise ValueError("partial_output and partial_lse batch dimensions must match")
+    if partial_output.device != partial_lse.device:
+        raise ValueError("partial_output and partial_lse must be on the same device")
+    if not partial_output.is_floating_point():
+        raise ValueError("partial_output must use a floating-point dtype")
+    if not partial_lse.is_floating_point():
+        raise ValueError("partial_lse must use a floating-point dtype")
+    if torch.isnan(partial_lse).any():
+        raise ValueError("partial_lse must not contain NaN")
+    if torch.isposinf(partial_lse).any():
+        raise ValueError("partial_lse must not contain positive infinity")
+
+    merged_lse = torch.logsumexp(partial_lse, dim=0)
+    finite = torch.isfinite(merged_lse)
+    normalized_lse = partial_lse - merged_lse.unsqueeze(0)
+    weights = torch.where(finite.unsqueeze(0), normalized_lse.exp(), torch.zeros_like(normalized_lse))
+    safe_output = torch.where(weights.unsqueeze(-1) == 0, torch.zeros_like(partial_output), partial_output)
+    accumulation_dtype = torch.promote_types(partial_output.dtype, partial_lse.dtype)
+    merged_output = (safe_output.to(accumulation_dtype) * weights.unsqueeze(-1).to(accumulation_dtype)).sum(dim=0)
+    merged_output = torch.where(finite.unsqueeze(-1), merged_output, torch.zeros_like(merged_output))
+    return merged_output.to(partial_output.dtype), merged_lse
 
 
 @dataclass(frozen=True)

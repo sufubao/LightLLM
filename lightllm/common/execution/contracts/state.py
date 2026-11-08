@@ -131,6 +131,27 @@ class StateView:
             raise ValueError("view fields must match its format")
 
 
+class StateStore(Protocol):
+    """Lifecycle owned by the execution layer for one logical state family.
+
+    The store is deliberately smaller than the native attention-state API. It
+    owns allocation and release, while the native state remains responsible
+    for kernels, transfers, and layout-specific operations.
+    """
+
+    def allocate_storage(self, token_capacity: int) -> None:
+        """Create the physical storage described by the bound state."""
+        ...
+
+    def view_for(self, logical_layer_id: int) -> StateView:
+        """Return a view only after storage has been allocated."""
+        ...
+
+    def close(self) -> None:
+        """Release owned storage after all users have stopped reading it."""
+        ...
+
+
 @dataclass(frozen=True)
 class LayerStates:
     primary: StateSpec

@@ -1,3 +1,3 @@
-from .gqa import GQAStateAdapter, GQAStateParams
+from .gqa import GQAStateAdapter, GQAStateParams, GQAStateStore
 
-__all__ = ["GQAStateAdapter", "GQAStateParams"]
+__all__ = ["GQAStateAdapter", "GQAStateParams", "GQAStateStore"]

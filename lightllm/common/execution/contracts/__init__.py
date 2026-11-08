@@ -1,3 +1,3 @@
-from .state import FormatSpec, LayerStates, StateSpec, StateView
+from .state import FormatSpec, LayerStates, StateSpec, StateStore, StateView
 
-__all__ = ["FormatSpec", "LayerStates", "StateSpec", "StateView"]
+__all__ = ["FormatSpec", "LayerStates", "StateSpec", "StateStore", "StateView"]

@@ -77,3 +77,61 @@ class GQAStateAdapter:
             shard=(config.tp_rank, config.tp_world_size),
         )
         return StateView(spec, format_spec, self.state.get_layer_view(logical_layer_id))
+
+
+class GQAStateStore:
+    """Own the lifecycle of one native GQA state behind the execution contract.
+
+    ``GQAFullAttentionState`` remains the owner of layout-specific operations.
+    This class owns only the transition between unallocated, allocated, and
+    closed storage, so callers no longer need to reach into ``k_storage`` or
+    ``v_storage`` to determine whether a view is usable.
+    """
+
+    def __init__(self, adapter: GQAStateAdapter) -> None:
+        if not isinstance(adapter, GQAStateAdapter):
+            raise TypeError("GQAStateStore requires a GQAStateAdapter")
+        self.adapter = adapter
+        state = adapter.state
+        if (state.k_storage is None) != (state.v_storage is None):
+            raise RuntimeError("GQA native storage must contain both K and V fields")
+        self._allocated = state.k_storage is not None
+        self._closed = False
+
+    @property
+    def is_allocated(self) -> bool:
+        """Whether this store currently owns allocated native storage."""
+        return self._allocated and not self._closed
+
+    def allocate_storage(self, token_capacity: int) -> None:
+        """Allocate native storage exactly once for this store."""
+        if self._closed:
+            raise RuntimeError("cannot allocate a closed GQA state store")
+        if self._allocated:
+            raise RuntimeError("GQA state storage is already allocated")
+        if isinstance(token_capacity, bool) or not isinstance(token_capacity, int) or token_capacity <= 0:
+            raise ValueError("GQA token capacity must be a positive integer")
+        state = self.adapter.state
+        if state.k_storage is not None or state.v_storage is not None:
+            raise RuntimeError("GQA native storage was allocated outside its execution store")
+        state.allocate_storage(token_capacity)
+        if state.k_storage is None or state.v_storage is None:
+            raise RuntimeError("GQA native state did not allocate both K and V storage")
+        self._allocated = True
+
+    def view_for(self, logical_layer_id: int) -> StateView:
+        """Return a contract view from allocated, live storage."""
+        if not self.is_allocated:
+            raise RuntimeError("GQA state storage must be allocated before creating a StateView")
+        return self.adapter.view_for(logical_layer_id)
+
+    def close(self) -> None:
+        """Release native tensors and make future views fail deterministically."""
+        if self._closed:
+            return
+        state = self.adapter.state
+        state.k_storage = None
+        state.v_storage = None
+        state.capacity = 0
+        self._allocated = False
+        self._closed = True

@@ -36,7 +36,12 @@ def window_store(declarations, format, manager, device, specs):
 
 
 def state_providers():
-    from lightllm.v2.execution.storage.attention import DenseStateStore, MLAStateStore, PackedMLAStateStore
+    from lightllm.v2.execution.storage.attention import (
+        DenseStateStore,
+        LexicalStateStore,
+        MLAStateStore,
+        PackedMLAStateStore,
+    )
     from .kv.mla import MLAKVWriter
     from .kv.packed_mla import PackedMLAKVWriter
     from .kv.pooled_nope import PooledNoPEKVWriter
@@ -57,6 +62,16 @@ def state_providers():
                 lambda format, encoding=encoding: format.encoding == encoding,
             )
         )
+    providers.append(
+        StateProvider(
+            "token_head_dim",
+            "positions",
+            lambda declarations, format, manager, device, specs: DenseStateStore(
+                declarations, format, manager, kv_type="None"
+            ),
+            lambda format: format.encoding == "plain" and format.fields == ("k", "v"),
+        )
+    )
     for layout, store, writer, encodings in (
         ("token_latent", MLAStateStore, MLAKVWriter, ("plain",)),
         ("token_packed_mla", PackedMLAStateStore, PackedMLAKVWriter, ("plain", "fp8_group128", "fp8_group64_e8m0")),
@@ -76,5 +91,13 @@ def state_providers():
     )
     providers.append(
         StateProvider("request_indexer_window", "window", window_store, supports=lambda fmt: fmt.encoding == "plain")
+    )
+    providers.append(
+        StateProvider(
+            "request_lexical",
+            "bounded",
+            LexicalStateStore,
+            supports=lambda fmt: fmt.encoding == "lexical" and fmt.fields == ("ngram", "convolution"),
+        )
     )
     return tuple(providers)

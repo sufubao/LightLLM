@@ -63,12 +63,15 @@ class BoundSparseMLA:
     flash_mla = None
     requires_dynamic_prefill = False
 
-    def __init__(self, offer, view, params, workspace, *, implementation):
+    def __init__(self, offer, view, params, workspace, *, implementation, auxiliary_views=None):
         self.name, self.phase = offer.backend, offer.phase
         self.implementation = implementation
         self.spec, self.view = params.spec, view
         self.alloc_tensor = params.alloc_tensor
         self.workspace, self.limits = workspace, offer.execution_limits
+        self.positions = None if auxiliary_views is None else auxiliary_views.get("positions")
+        self.position_cos = None if self.positions is None else self.positions.fields[0]
+        self.position_sin = None if self.positions is None else self.positions.fields[1]
         self.transfer_requires_compute_sync = offer.transfer_requires_compute_sync
         self.cache, self.indexer = view.fields
         self.quantized = view.format.encoding == "fp8_group128"
@@ -90,6 +93,14 @@ class BoundSparseMLA:
         else:
             self.payload, self.rope = self.cache[..., :512], self.cache[..., 512:]
             self.scales = self.payload
+
+    def store_positions(self, token_indices, cos, sin):
+        if self.position_cos is None or self.position_sin is None:
+            raise RuntimeError("QSA positions were not bound")
+        if token_indices.ndim != 1 or cos.shape != sin.shape or cos.shape[0] != token_indices.numel():
+            raise ValueError("QSA position updates must have one rotary pair per token")
+        self.position_cos[:, 0].index_copy_(0, token_indices, cos)
+        self.position_sin[:, 0].index_copy_(0, token_indices, sin)
 
     @property
     def metadata_key(self):
@@ -311,7 +322,7 @@ class BoundSparseMLA:
 
 
 class SparseMLAAttentionBackend:
-    supports_auxiliary_states = False
+    supports_auxiliary_states = True
 
     def __init__(self, implementation, phase):
         if implementation not in ("triton", "flashmla_sparse") or phase not in ("prefill", "decode"):
@@ -403,4 +414,15 @@ class SparseMLAAttentionBackend:
             or not workspace.is_contiguous()
         ):
             raise ValueError("sparse MLA workspace does not satisfy the selected offer")
-        return BoundSparseMLA(offer, state_view, static_params, workspace, implementation=self.implementation)
+        if auxiliary_views and "positions" in auxiliary_views:
+            positions = auxiliary_views["positions"]
+            if positions.format.layout != "token_head_dim" or positions.format.fields != ("k", "v"):
+                raise ValueError("QSA positions use the token head-dimension format")
+        return BoundSparseMLA(
+            offer,
+            state_view,
+            static_params,
+            workspace,
+            implementation=self.implementation,
+            auxiliary_views=auxiliary_views,
+        )

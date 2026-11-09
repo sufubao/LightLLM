@@ -13,6 +13,7 @@ from lightllm.v2.execution.formats.kv.spec import (
     IndexerWindowStateSpec,
 )
 from lightllm.v2.execution.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.v2.execution.formats.lexical import LexicalStateSpec
 
 
 class DenseStateStore:
@@ -27,8 +28,8 @@ class DenseStateStore:
         groups = defaultdict(list)
         self.resources = {}
         for spec in declarations:
-            if spec.retention != "history" or not isinstance(spec.params, DenseKVStateSpec):
-                raise ValueError("Dense storage requires two-dimensional full-history states")
+            if spec.retention not in ("history", "positions") or not isinstance(spec.params, DenseKVStateSpec):
+                raise ValueError("Dense storage requires two-dimensional KV states")
             if spec.key in self.resources:
                 raise ValueError(f"duplicate resource: {spec.key}")
             self.resources[spec.key] = None
@@ -274,5 +275,44 @@ class IndexerWindowStateStore:
     def views(self):
         return {
             key: StateView(spec, self.format, (state.get_layer_view(spec.producer),))
+            for key, (spec, state) in self.resources.items()
+        }
+
+
+class LexicalStateStore:
+    def __init__(self, declarations, format, manager, device, specs):
+        from lightllm.v2.models.qwen38_flash_next.lexical_state import (
+            LexicalStateConfig,
+            Qwen38LexicalState,
+        )
+
+        if format.encoding != "lexical" or format.layout != "request_lexical":
+            raise ValueError("lexical storage requires the request lexical format")
+        groups, self.resources = defaultdict(list), {}
+        for spec in declarations:
+            if spec.retention != "bounded" or not isinstance(spec.params, LexicalStateSpec):
+                raise ValueError("lexical storage requires bounded lexical declarations")
+            if spec.key in self.resources:
+                raise ValueError(f"duplicate resource: {spec.key}")
+            self.resources[spec.key] = None
+            groups[spec.role, spec.params].append(spec)
+        for (role, params), group in groups.items():
+            config = LexicalStateConfig(
+                tuple(layer for declaration in group for layer in declaration.consumers),
+                params.ngram_context,
+                params.conv_context,
+                params.width,
+                params.eos_token_id,
+                params.dtype,
+            )
+            state = Qwen38LexicalState(config, manager._request_capacity, device=device.device)
+            manager.register_state(role, state)
+            for declaration in group:
+                self.resources[declaration.key] = (declaration, state)
+        self.format = format
+
+    def views(self):
+        return {
+            key: StateView(spec, self.format, state.get_layer_view(spec.producer))
             for key, (spec, state) in self.resources.items()
         }

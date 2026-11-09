@@ -22,6 +22,7 @@ from .utils import MODEL_ROLES
 
 if TYPE_CHECKING:
     from easydict import EasyDict
+    from lightllm.common.execution.contracts import StateStore, StateView
     from lightllm.server.core.objs.start_args_type import StartArgs
 
 
@@ -54,6 +55,7 @@ class AttentionStateManager:
         self.full_att_allocator = None
         self.bounded_att_big_page_allocator = None
         self.bounded_att_small_page_allocator = None
+        self._execution_stores = {}
         self._request_capacity = request_capacity
         self._cpu_cache_operator = CpuCacheOperator(self)
         self._dp_shared_operator = DPSharedOperator(self)
@@ -64,6 +66,19 @@ class AttentionStateManager:
         self._cpu_cache_operator = CpuCacheOperator(self)
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
+        self._reset_execution_stores()
+
+    def _reset_execution_stores(self) -> None:
+        """让浅拷贝后的 execution store 重新绑定当前 manager 的 State。"""
+        from lightllm.common.attention_state.full_att.gqa.gqa_state import GQAFullAttentionState
+        from lightllm.common.execution.storage import GQAStateAdapter, GQAStateStore
+
+        stores = {}
+        for name, state in self.__dict__.items():
+            if isinstance(state, GQAFullAttentionState):
+                model_role = name.split("_", 1)[0]
+                stores[name] = GQAStateStore(GQAStateAdapter(state, role=model_role))
+        self._execution_stores = stores
 
     def get_cpu_cache_operator(self) -> CpuCacheOperator:
         """返回当前资源管理器唯一的 CPU cache 操作对象。"""
@@ -97,6 +112,15 @@ class AttentionStateManager:
         # config 只描述布局，资源身份仅保存在 State；绑定时保留原配置对象。
         state.state_name = name
         setattr(self, name, state)
+        self._register_execution_store(model_role=model_role, name=name, state=state)
+
+    def _register_execution_store(self, model_role: str, name: str, state: object) -> None:
+        """为已支持的 native State 建立 execution lifecycle owner。"""
+        from lightllm.common.attention_state.full_att.gqa.gqa_state import GQAFullAttentionState
+        from lightllm.common.execution.storage import GQAStateAdapter, GQAStateStore
+
+        if isinstance(state, GQAFullAttentionState):
+            self._execution_stores[name] = GQAStateStore(GQAStateAdapter(state, role=model_role))
 
     @lru_cache(maxsize=None)
     def get_state(
@@ -130,6 +154,47 @@ class AttentionStateManager:
             f"matches={[state.state_name for state in matches]}"
         )
         return matches[0]
+
+    def get_execution_store(
+        self,
+        model_role: str,
+        state_type_filter: str,
+        logical_layer_id: int,
+        state_class: type[FullAttentionState | BoundedAttentionState] | None = None,
+    ) -> StateStore:
+        """返回当前 State 对应的 execution lifecycle owner。"""
+        state = self.get_state(
+            model_role=model_role,
+            state_type_filter=state_type_filter,
+            logical_layer_id=logical_layer_id,
+            state_class=state_class,
+        )
+        store = self._execution_stores.get(state.state_name)
+        if store is None:
+            raise NotImplementedError(
+                f"execution state contract is not implemented for {type(state).__name__} ({state.state_name})"
+            )
+        return store
+
+    def get_execution_view(
+        self,
+        model_role: str,
+        state_type_filter: str,
+        logical_layer_id: int,
+        state_class: type[FullAttentionState | BoundedAttentionState] | None = None,
+    ) -> StateView:
+        """通过 execution contract 读取一个已分配的逻辑层 view。"""
+        return self.get_execution_store(
+            model_role=model_role,
+            state_type_filter=state_type_filter,
+            logical_layer_id=logical_layer_id,
+            state_class=state_class,
+        ).view_for(logical_layer_id)
+
+    def close_execution_stores(self) -> None:
+        """关闭所有已接入 execution contract 的 State store。"""
+        for store in self._execution_stores.values():
+            store.close()
 
     def load_full_att_calibration(self, args: StartArgs | EasyDict) -> None:
         """全部 main/draft State 就绪后统一读取静态标定，并交给具体 State 绑定。
@@ -266,7 +331,11 @@ class AttentionStateManager:
             # 管理器统一设置实际页规格和设备；State 的分配接口只接收 token 容量。
             state.page_size = page_size
             state.device = torch.device(device)
-            state.allocate_storage(token_capacity)
+            store = self._execution_stores.get(state.state_name)
+            if store is None:
+                state.allocate_storage(token_capacity)
+            else:
+                store.allocate_storage(token_capacity)
         self.full_att_allocator = FullAttKVAllocator(token_capacity, page_size)
 
         # bounded-attention 大页池末尾保留 CPU 加载/卸载暂存槽位，普通分配不使用它们。

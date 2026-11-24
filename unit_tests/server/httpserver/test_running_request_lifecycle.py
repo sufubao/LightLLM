@@ -57,15 +57,32 @@ def _make_manager(mode: NodeRole):
 
 def _sampling_params():
     sampling_params = SamplingParams()
-    sampling_params.group_request_id = 123
-    sampling_params.n = 1
-    sampling_params.max_new_tokens = 1
+    sampling_params.init(None, group_request_id=123, n=1, max_new_tokens=1)
     sampling_params.pd_node_resource_wait_timeout_seconds = 20
     return sampling_params
 
 
 def _multimodal_params():
     return SimpleNamespace(audios=[], images=[], verify_and_preload=AsyncMock())
+
+
+@pytest.mark.parametrize(
+    ("error", "event"),
+    [
+        (ClientDisconnected(), "debug"),
+        (ServerBusyError(), "warning"),
+        (RuntimeError("alloc failed"), "exception"),
+    ],
+)
+def test_request_failure_logs_cause_and_preserves_cleanup(error, event):
+    manager = _make_manager(NodeRole.NORMAL)
+    manager._alloc_shm_req_indexes = AsyncMock(side_effect=error)
+    with patch("lightllm.server.httpserver.manager.logger") as logger, pytest.raises(type(error)) as raised:
+        asyncio.run(_drain_generate(manager, _sampling_params(), _multimodal_params(), None, None))
+    assert raised.value is error
+    getattr(logger, event).assert_called_once()
+    assert 123 in getattr(logger, event).call_args.args
+    manager.abort.assert_awaited_once_with(123)
 
 
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.P, NodeRole.D])
@@ -298,7 +315,7 @@ def test_prefill_assignment_wait_encloses_master_budget(resource_wait: int, expe
 def test_prefill_upload_preserves_int64_multimodal_prompt_ids():
     async def run():
         manager = _make_manager(NodeRole.P)
-        multimodal_token_id = 2 ** 32
+        multimodal_token_id = 2**32
         manager._encode.return_value = [10, multimodal_token_id, 12]
         websocket = AsyncMock()
         pd_event = asyncio.Event()
@@ -625,7 +642,14 @@ def test_wait_to_token_package_releases_lock_while_consumer_is_suspended():
                 req_status.event.set()
 
         await asyncio.wait_for(produce(), timeout=1)
-        rest = [item async for item in output_generator]
+        with patch("lightllm.server.httpserver.manager.logger.info") as log_info:
+            rest = [await anext(output_generator), await anext(output_generator)]
+            log_info.assert_called_once()
+            await output_generator.aclose()
+        message, group_id, choices, input_count, output_count, *_ = log_info.call_args.args
+        assert message.startswith("request.output_complete ")
+        assert (group_id, choices, input_count, output_count) == (123, 1, 3, 3)
+        assert log_info.call_args.args[-1] == {"stop": 1}
         assert [first[1]] + [item[1] for item in rest] == ["a", "b", "c"]
 
     asyncio.run(run())

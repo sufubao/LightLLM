@@ -424,7 +424,6 @@ def _launch_subprocesses(args: StartArgs):
     # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
     send_and_receive_node_ip(args)
     set_env_start_args(args)
-    logger.info(f"all start args:{args}")
 
     if args.enable_multimodal:
         process_manager.start_submodule_processes(
@@ -577,7 +576,6 @@ def pd_master_start(args: StartArgs):
     set_env_start_args(args)
     process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
-    logger.info(f"all start args:{args}")
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -693,7 +691,6 @@ def visual_only_start(args):
     set_env_start_args(args)
     process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
-    logger.info(f"all start args:{args}")
 
     from .visualserver.visual_only_manager import start_visual_process
 
@@ -721,7 +718,6 @@ def config_server_start(args):
     set_env_start_args(args)
     process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
-    logger.info(f"all start args:{args}")
 
     if args.config_server_visual_redis_port is not None:
         start_redis_service(args)

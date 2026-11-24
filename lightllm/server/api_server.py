@@ -11,6 +11,15 @@ def launch_server(args: StartArgs):
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
     set_log_node_role(args.run_mode)
+    logger.info(
+        "service.starting mode=%s host=%s port=%s tp=%s dp=%s http_workers=%s",
+        args.run_mode,
+        args.host,
+        args.port,
+        args.tp,
+        args.dp,
+        args.httpserver_workers,
+    )
     from .api_start import (
         pd_master_start,
         pd_master_multi_worker_start,

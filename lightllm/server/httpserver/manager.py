@@ -11,6 +11,7 @@ import hashlib
 import datetime
 import pickle
 from array import array
+from itertools import islice
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -345,7 +346,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-
         start_time = time.time()
         # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
         compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
@@ -545,13 +545,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except (asyncio.CancelledError, BaseException) as e:
-            if isinstance(e, ClientDisconnected):
-                logger.warning(f"group_request_id: {group_request_id} {e.reason}")
-            elif isinstance(e, asyncio.CancelledError):
-                logger.warning(f"group_request_id: {group_request_id} has been cancelled")
+        except BaseException as e:
+            if isinstance(e, (ClientDisconnected, asyncio.CancelledError, GeneratorExit, PDPrefillNodeStopGenToken)):
+                logger.debug("request.interrupted req_id=%s cause=%s", group_request_id, type(e).__name__)
+            elif isinstance(e, (InvalidRequestError, ServerBusyError)):
+                logger.warning("request.rejected req_id=%s cause=%s", group_request_id, type(e).__name__)
             else:
-                logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
+                logger.exception("request.failed req_id=%s", group_request_id)
 
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
@@ -560,7 +560,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if group_request_id not in self.req_id_to_out_inf:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
-            raise e
+            raise
         finally:
             # RL：兜底注销 generation admission（含中途异常 / abort 提前 return），
             # 防止 pending 请求泄漏导致 pause 无法正确结束。
@@ -630,11 +630,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
 
-        format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
-            f"received req X-Request-Id:{x_request_id} "
-            f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
-            f"lightllm_req_id:{group_request_id} "
+        logger.debug(
+            "request.received req_id=%s request_id=%r session_id=%r", group_request_id, x_request_id, x_session_id
         )
         return
 
@@ -776,7 +773,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -819,9 +815,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_status: "ReqStatus",
         request: Request,
     ):
-
         event = req_status.event
         unfinished_count = sampling_params.best_of
+        finish_counts = {}
         out_token_counter = 0
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
@@ -881,11 +877,29 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 # update inference timemark
                 self.latest_success_infer_time_mark.set_value(int(time.time()))
 
-                yield sub_req_id, out_str, metadata, finish_status
-                # 如果有子请求完成，就更新计数
                 if finish_status.is_finished():
                     unfinished_count -= 1
+                    reason = (
+                        "pd_capacity"
+                        if finish_status.is_finished_pd_decode_capacity()
+                        else finish_status.get_finish_reason()
+                    )
+                    finish_counts[reason] = finish_counts.get(reason, 0) + 1
 
+                if unfinished_count == 0:
+                    log_output = logger.error if "error" in finish_counts else logger.info
+                    log_output(
+                        "request.output_complete req_id=%s choices=%s input_tokens=%s output_tokens=%s "
+                        "first_token_ms=%.1f elapsed_ms=%.1f finishes=%s",
+                        group_request_id,
+                        sampling_params.best_of,
+                        prompt_tokens,
+                        out_token_counter,
+                        first_token_cost_ms,
+                        (time.time() - start_time) * 1000,
+                        finish_counts,
+                    )
+                yield sub_req_id, out_str, metadata, finish_status
                 if unfinished_count == 0:
                     total_cost_time_ms = (time.time() - start_time) * 1000
                     mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
@@ -969,13 +983,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def abort(self, group_req_id: int) -> bool:
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
         if req_status is None:
-            logger.warning(f"aborted group_request_id {group_req_id} not exist")
+            logger.debug("request.abort req_id=%s tracked=false", group_req_id)
             return False
 
         group_req_objs: GroupReqObjs = req_status.group_req_objs
         for req in group_req_objs.shm_req_objs:
             req.is_aborted = True
-        logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
+        logger.debug("request.abort req_id=%s tracked=true", group_req_id)
         return True
 
     def _get_router_profiler_client(self):
@@ -1020,18 +1034,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
 
-            # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:
                 pre_time_mark = time.time()
-                for group_req_id_ in list(self.req_id_to_out_inf.keys()):
-                    req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, None)
-                    if req_status is None:
-                        continue
-
-                    logger.info(
-                        f"left req id {req_status.group_req_objs.group_req_id}"
-                        f"can release {req_status.group_req_objs.shm_req_objs[0].can_released_mark} "
-                        f"refcount {req_status.group_req_objs.shm_req_objs[0].ref_count}"
+                if self.req_id_to_out_inf:
+                    logger.debug(
+                        "request.pending count=%s sample_ids=%s",
+                        len(self.req_id_to_out_inf),
+                        list(islice(self.req_id_to_out_inf, 8)),
                     )
         return
 
